@@ -398,14 +398,27 @@ class FeishuChannel(BaseChannel):
             "rows": [{f"c{i}": r[i] if i < len(r) else "" for i in range(len(headers))} for r in rows],
         }
 
+    # 飞书卡片中表格数量上限（超出后以 markdown 文本形式保留）
+    _MAX_CARD_TABLES = 5
+
     def _build_card_elements(self, content: str) -> list[dict]:
         """将文本内容拆分为包含 div/markdown 与 table 等 Feishu 卡片所需的结构化元素。"""
         elements, last_end = [], 0
+        table_count = 0
         for m in self._TABLE_RE.finditer(content):
             before = content[last_end:m.start()]
             if before.strip():
                 elements.extend(self._split_headings(before))
-            elements.append(self._parse_md_table(m.group(1)) or {"tag": "markdown", "content": m.group(1)})
+            if table_count < self._MAX_CARD_TABLES:
+                parsed = self._parse_md_table(m.group(1))
+                if parsed:
+                    elements.append(parsed)
+                    table_count += 1
+                else:
+                    elements.append({"tag": "markdown", "content": m.group(1)})
+            else:
+                # 超出限制，以 markdown 文本形式保留
+                elements.append({"tag": "markdown", "content": m.group(1)})
             last_end = m.end()
         remaining = content[last_end:]
         if remaining.strip():
@@ -445,6 +458,59 @@ class FeishuChannel(BaseChannel):
                     el["content"] = el["content"].replace(f"\x00CODE{i}\x00", cb)
 
         return elements or [{"tag": "markdown", "content": content}]
+
+    def _parse_line_to_post_elements(self, line: str) -> list[dict]:
+        """将单行 Markdown 文本解析为飞书富文本元素列表。"""
+        elements = []
+        link_re = re.compile(r"\[(.*?)\]\((.*?)\)")
+        bold_re = re.compile(r"\*\*(.*?)\*\*")
+        
+        tokens = []
+        for m in link_re.finditer(line):
+            start, end = m.span()
+            tokens.append((start, end, "a", m.group(1), m.group(2)))
+            
+        for m in bold_re.finditer(line):
+            start, end = m.span()
+            overlap = False
+            for ts, te, tt, _, _ in tokens:
+                if (start >= ts and start < te) or (end > ts and end <= te):
+                    overlap = True
+                    break
+            if not overlap:
+                tokens.append((start, end, "bold", m.group(1), None))
+                
+        tokens.sort()
+        curr = 0
+        for start, end, ttype, text, extra in tokens:
+            if start > curr:
+                elements.append({"tag": "text", "text": line[curr:start]})
+            if ttype == "a":
+                elements.append({"tag": "a", "text": text, "href": extra})
+            elif ttype == "bold":
+                elements.append({"tag": "text", "text": text, "style": ["bold"]})
+            curr = end
+        if curr < len(line):
+            elements.append({"tag": "text", "text": line[curr:]})
+        return elements or [{"tag": "text", "text": line}]
+
+    def _build_post_payload(self, content: str) -> str:
+        """将 Markdown 转换为飞书 post 负载。"""
+        lines = content.split("\n")
+        post_content = []
+        for line in lines:
+            if not line.strip():
+                post_content.append([{"tag": "text", "text": "\n"}])
+                continue
+            h_match = self._HEADING_RE.match(line)
+            if h_match:
+                post_content.append([{"tag": "text", "text": h_match.group(2), "style": ["bold"]}])
+                continue
+            if "|" in line:
+                post_content.append([{"tag": "text", "text": line}])
+                continue
+            post_content.append(self._parse_line_to_post_elements(line))
+        return json.dumps({"zh_cn": {"title": "", "content": post_content}}, ensure_ascii=False)
 
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif"}
     _AUDIO_EXTS = {".opus"}
@@ -652,6 +718,7 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
+                # 使用交互卡片格式（原生支持 Markdown 渲染）
                 card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
                 await loop.run_in_executor(
                     None, self._send_message_sync,

@@ -10,6 +10,7 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.date_utils import build_date_filter
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
+from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
 from nanobot.agent.tools.feishu_data.field_utils import apply_field_mapping
 from nanobot.config.schema import FeishuDataConfig
 
@@ -48,7 +49,9 @@ class BitableSearchTool(Tool):
     def description(self) -> str:
         return (
             "Search for records in Feishu Bitable. "
-            "Use this tool to read and query tabular data."
+            "IMPORTANT: If multiple records are found, ONLY provide a summary list with project IDs and titles, "
+            "and include the 'record_url' for each. DO NOT expand full details for every record as it is slow to generate. "
+            "Users can click the link or ask for a specific record ID for details."
         )
 
     @property
@@ -185,6 +188,53 @@ class BitableSearchTool(Tool):
                 "total": res.get("data", {}).get("total", len(normalized))
             }, ensure_ascii=False)
 
+        except FeishuDataAPIError as e:
+            # 飞书错误码 1254018 表示过滤器字段不存在 (InvalidFilter)
+            if e.code == 1254018:
+                logger.warning(f"Bitable search filter failed (likely missing fields in config): {e}. Falling back to non-filtered search.")
+                #  fallback: 去掉 filter 重新请求，完全依赖客户端侧 _is_value_match
+                try:
+                    fallback_payload = payload.copy()
+                    fallback_payload.pop("filter", None)
+                    res = await self.client.request("POST", path, params=params, json_body=fallback_payload)
+                    items = res.get("data", {}).get("items", [])
+                    
+                    normalized = []
+                    domain = self.config.bitable.domain
+                    mapping = self.config.bitable.field_mapping
+                    for item in items:
+                        raw_fields = item.get("fields", {})
+                        if keyword and not self._is_value_match(raw_fields.get(list(raw_fields.keys())[0]), keyword): # 简单的防暴力，实际上下面会全量遍历
+                            # 因为此时没有任何服务器过滤，我们要对所有项进行 _is_value_match 检查
+                            match = False
+                            for val in raw_fields.values():
+                                if self._is_value_match(val, keyword):
+                                    match = True
+                                    break
+                            if not match:
+                                continue
+
+                        rec_id = item.get("record_id")
+                        url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                        mapped = apply_field_mapping(raw_fields, mapping)
+                        normalized.append({
+                            "record_id": rec_id,
+                            "fields": mapped,
+                            "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                            "record_url": url,
+                        })
+                    
+                    return json.dumps({
+                        "records": normalized,
+                        "total": len(normalized),
+                        "warning": "部分搜索字段不存在，已回退到全量匹配模式。"
+                    }, ensure_ascii=False)
+                except Exception as ex:
+                    logger.error(f"Fallback search failed: {ex}")
+                    return json.dumps({"error": str(ex), "records": []}, ensure_ascii=False)
+            
+            logger.error(f"Bitable search API error: {e}")
+            return json.dumps({"error": str(e), "records": []}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Bitable search failed: {e}")
             return json.dumps({
@@ -482,6 +532,47 @@ class BitableSearchPersonTool(Tool):
                 "records": matched,
                 "total": len(matched)
             }, ensure_ascii=False)
+        except FeishuDataAPIError as e:
+            if e.code == 1254018:
+                logger.warning(f"Bitable search_person filter failed: {e}. Falling back to non-filtered search.")
+                try:
+                    fallback_payload = payload.copy()
+                    fallback_payload.pop("filter", None)
+                    res = await self.client.request("POST", path, params=params, json_body=fallback_payload)
+                    items = res.get("data", {}).get("items", [])
+                    
+                    matched = []
+                    domain = self.config.bitable.domain
+                    mapping = self.config.bitable.field_mapping
+                    for item in items:
+                        fields = item.get("fields", {})
+                        is_hit = False
+                        for _field_name, field_val in fields.items():
+                            if self._is_value_match(field_val, person_name):
+                                is_hit = True
+                                break
+                        if is_hit:
+                            rec_id = item.get("record_id")
+                            url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                            mapped = apply_field_mapping(fields, mapping)
+                            matched.append({
+                                "record_id": rec_id,
+                                "fields": mapped,
+                                "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                                "record_url": url,
+                            })
+                    
+                    return json.dumps({
+                        "records": matched,
+                        "total": len(matched),
+                        "warning": "部分人员搜索字段在表中未找到，已回退到全量扫描模式。"
+                    }, ensure_ascii=False)
+                except Exception as ex:
+                    logger.error(f"search_person fallback failed: {ex}")
+                    return json.dumps({"error": str(ex), "records": []}, ensure_ascii=False)
+            
+            logger.error(f"Bitable search_person API error: {e}")
+            return json.dumps({"error": str(e), "records": []}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Bitable search_person failed: {e}")
             return json.dumps({"error": str(e), "records": []}, ensure_ascii=False)
