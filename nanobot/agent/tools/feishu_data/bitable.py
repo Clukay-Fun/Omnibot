@@ -7,6 +7,7 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.date_utils import build_date_filter
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
+from nanobot.agent.tools.feishu_data.field_utils import apply_field_mapping
 from nanobot.config.schema import FeishuDataConfig
 
 # region [工具定义]
@@ -109,13 +110,16 @@ class BitableSearchTool(Tool):
             items = res.get("data", {}).get("items", [])
             normalized = []
             domain = self.config.bitable.domain
+            mapping = self.config.bitable.field_mapping
             for item in items:
                 rec_id = item.get("record_id")
                 url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                raw_fields = item.get("fields", {})
+                mapped = apply_field_mapping(raw_fields, mapping)
                 normalized.append({
                     "record_id": rec_id,
-                    "fields": item.get("fields", {}),
-                    "fields_text": {str(k): str(v) for k, v in item.get("fields", {}).items()},
+                    "fields": mapped,
+                    "fields_text": {str(k): str(v) for k, v in mapped.items()},
                     "record_url": url,
                 })
 
@@ -249,10 +253,11 @@ class BitableGetTool(Tool):
             record = res.get("data", {}).get("record", {})
             domain = self.config.bitable.domain
             url = f"{domain}/base/{app_token}?table={table_id}&record={record_id}" if domain else ""
+            mapped = apply_field_mapping(record.get("fields", {}), self.config.bitable.field_mapping)
             return json.dumps({
                 "record": {
                     "record_id": record.get("record_id", record_id),
-                    "fields": record.get("fields", {}),
+                    "fields": mapped,
                     "record_url": url,
                 }
             }, ensure_ascii=False)
@@ -364,6 +369,7 @@ class BitableSearchPersonTool(Tool):
             # 在客户端侧按 person_name 筛选含有匹配人员字段的记录
             matched = []
             domain = self.config.bitable.domain
+            mapping = self.config.bitable.field_mapping
             for item in items:
                 fields = item.get("fields", {})
                 for _field_name, field_val in fields.items():
@@ -373,10 +379,11 @@ class BitableSearchPersonTool(Tool):
                             if isinstance(entry, dict) and person_name.lower() in str(entry.get("name", "")).lower():
                                 rec_id = item.get("record_id")
                                 url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                                mapped = apply_field_mapping(fields, mapping)
                                 matched.append({
                                     "record_id": rec_id,
-                                    "fields": fields,
-                                    "fields_text": {str(k): str(v) for k, v in fields.items()},
+                                    "fields": mapped,
+                                    "fields_text": {str(k): str(v) for k, v in mapped.items()},
                                     "record_url": url,
                                 })
                                 break
@@ -384,10 +391,11 @@ class BitableSearchPersonTool(Tool):
                     elif isinstance(field_val, str) and person_name.lower() in field_val.lower():
                         rec_id = item.get("record_id")
                         url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                        mapped = apply_field_mapping(fields, mapping)
                         matched.append({
                             "record_id": rec_id,
-                            "fields": fields,
-                            "fields_text": {str(k): str(v) for k, v in fields.items()},
+                            "fields": mapped,
+                            "fields_text": {str(k): str(v) for k, v in mapped.items()},
                             "record_url": url,
                         })
                         break
