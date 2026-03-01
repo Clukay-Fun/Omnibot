@@ -310,6 +310,7 @@ class FeishuDataRequestConfig(Base):
 
 class FeishuDataBitableSearchConfig(Base):
     searchable_fields: list[str] = Field(default_factory=list)
+    date_field: str = ""  # 用于日期区间过滤的字段名（如 "创建日期"）
     max_records: int = 100
     default_limit: int = 20
 

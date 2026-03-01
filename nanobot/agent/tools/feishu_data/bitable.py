@@ -5,6 +5,7 @@ from typing import Any
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
+from nanobot.agent.tools.feishu_data.date_utils import build_date_filter
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.config.schema import FeishuDataConfig
 
@@ -81,7 +82,6 @@ class BitableSearchTool(Tool):
                 "records": []
             }, ensure_ascii=False)
 
-        keyword = kwargs.get("keyword")
         limit = kwargs.get("limit") or self.config.bitable.search.default_limit
         if self.config.bitable.search.max_records > 0:
             limit = min(limit, self.config.bitable.search.max_records)
@@ -89,14 +89,17 @@ class BitableSearchTool(Tool):
         view_id = kwargs.get("view_id") or self.config.bitable.default_view_id
 
         # 组装 payload
-        payload = {}
+        payload: dict[str, Any] = {}
         if view_id:
             payload["view_id"] = view_id
 
-        # Basic condition assembly
-        if keyword and self.config.bitable.search.searchable_fields:
-            # 基础条件占位
-            pass
+        # 日期区间过滤
+        date_from = kwargs.get("date_from")
+        date_to = kwargs.get("date_to")
+        date_field = self.config.bitable.search.date_field
+        date_filter = build_date_filter(date_field, date_from, date_to)
+        if date_filter:
+            payload["filter"] = date_filter
 
         path = FeishuEndpoints.bitable_records_search(app_token, table_id)
         params = {"page_size": limit}
@@ -303,6 +306,14 @@ class BitableSearchPersonTool(Tool):
                 "view_id": {
                     "type": "string",
                     "description": "View ID. Defaults to config."
+                },
+                "date_from": {
+                    "type": "string",
+                    "description": "Start date for filtering in ISO format, e.g., 2024-01-01."
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": "End date for filtering in ISO format, e.g., 2024-12-31."
                 }
             },
             "required": ["person_name"]
@@ -334,6 +345,14 @@ class BitableSearchPersonTool(Tool):
         payload: dict[str, Any] = {}
         if view_id:
             payload["view_id"] = view_id
+
+        # 日期区间过滤
+        date_from = kwargs.get("date_from")
+        date_to = kwargs.get("date_to")
+        date_field = self.config.bitable.search.date_field
+        date_filter = build_date_filter(date_field, date_from, date_to)
+        if date_filter:
+            payload["filter"] = date_filter
 
         path = FeishuEndpoints.bitable_records_search(app_token, table_id)
         params = {"page_size": limit}
