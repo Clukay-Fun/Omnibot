@@ -8,7 +8,7 @@ import re
 import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from loguru import logger
 
@@ -28,7 +28,7 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
+    from nanobot.config.schema import ChannelsConfig, ExecToolConfig, FeishuDataConfig
     from nanobot.cron.service import CronService
 
 
@@ -66,10 +66,12 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        feishu_data_config: "FeishuDataConfig | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.bus = bus
         self.channels_config = channels_config
+        self.feishu_data_config = feishu_data_config
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -97,6 +99,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            feishu_data_config=feishu_data_config,
         )
 
         self._running = False
@@ -128,6 +131,11 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        if self.feishu_data_config and self.feishu_data_config.enabled:
+            from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
+            for tool in build_feishu_data_tools(self.feishu_data_config):
+                self.tools.register(tool)
 
     # endregion
 
