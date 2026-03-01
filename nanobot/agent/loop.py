@@ -233,10 +233,13 @@ class AgentLoop:
             return fallback_text
 
         rendered = self._template_renderer.render(decision=decision, payloads=payloads, fallback_text=fallback_text)
+        audit = build_audit_summary(decision=decision, payloads=payloads, timings=timings, total_ms=total_ms)
+        if self.response_template_config.log_audit_summary:
+            logger.info("Template audit: {}", audit.replace("\n", " | "))
+
         if not self.response_template_config.show_audit_summary:
             return rendered
 
-        audit = build_audit_summary(decision=decision, payloads=payloads, timings=timings, total_ms=total_ms)
         return f"{audit}\n\n{rendered}"
 
     # endregion

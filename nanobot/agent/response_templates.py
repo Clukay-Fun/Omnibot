@@ -268,7 +268,7 @@ def build_quick_progress(tool_name: str, result: str) -> str | None:
     count, _ = _summarize_payload(payload, max_items=0)
     if count == "—":
         return None
-    return f"{tool_name}: 已获取 {count} 条结果，正在生成卡片..."
+    return f"{tool_name}: 已获取 {count} 条结果"
 
 
 def _extract_records(payload: dict[str, Any]) -> list[dict[str, Any]]:

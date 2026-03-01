@@ -221,7 +221,8 @@ class ResponseTemplateConfig(Base):
 
     enabled: bool = True
     strict_mode: bool = True
-    show_audit_summary: bool = True
+    show_audit_summary: bool = False
+    log_audit_summary: bool = True
     max_list_items: int = 5
 
 
