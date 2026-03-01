@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from loguru import logger
 
@@ -28,7 +29,12 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ChannelsConfig, ExecToolConfig
+    from nanobot.config.schema import (
+        ChannelsConfig,
+        ExecToolConfig,
+        FeishuDataConfig,
+        ResponseTemplateConfig,
+    )
     from nanobot.cron.service import CronService
 
 
@@ -66,10 +72,15 @@ class AgentLoop:
         session_manager: SessionManager | None = None,
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
+        feishu_data_config: "FeishuDataConfig | None" = None,
+        response_template_config: "ResponseTemplateConfig | None" = None,
     ):
-        from nanobot.config.schema import ExecToolConfig
+        from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
+        from nanobot.config.schema import ExecToolConfig, ResponseTemplateConfig
         self.bus = bus
         self.channels_config = channels_config
+        self.feishu_data_config = feishu_data_config
+        self.response_template_config = response_template_config or ResponseTemplateConfig()
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -97,6 +108,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
+            feishu_data_config=feishu_data_config,
         )
 
         self._running = False
@@ -109,6 +121,8 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
+        self._template_router = TemplateRouter()
+        self._template_renderer = TemplateRenderer(self.response_template_config.max_list_items)
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -128,6 +142,11 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        if self.feishu_data_config and self.feishu_data_config.enabled:
+            from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
+            for tool in build_feishu_data_tools(self.feishu_data_config):
+                self.tools.register(tool)
 
     # endregion
 
@@ -184,6 +203,45 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _render_with_template(
+        self,
+        *,
+        user_text: str,
+        fallback_text: str | None,
+        turn_messages: list[dict],
+        timings: list[dict[str, int | str | bool]],
+        total_ms: int,
+    ) -> str | None:
+        if not self.response_template_config.enabled:
+            return fallback_text
+
+        from nanobot.agent.response_templates import (
+            build_audit_summary,
+            collect_tool_payloads,
+            uses_structured_feishu_data,
+        )
+
+        payloads = collect_tool_payloads(turn_messages)
+        if not payloads or not uses_structured_feishu_data(payloads):
+            return fallback_text
+
+        decision = self._template_router.route(user_text=user_text, payloads=payloads)
+        if decision.template_id == "chat.PLAIN":
+            return fallback_text
+
+        if not self.response_template_config.strict_mode and decision.template_id == "generic.SUMMARY":
+            return fallback_text
+
+        rendered = self._template_renderer.render(decision=decision, payloads=payloads, fallback_text=fallback_text)
+        audit = build_audit_summary(decision=decision, payloads=payloads, timings=timings, total_ms=total_ms)
+        if self.response_template_config.log_audit_summary:
+            logger.info("Template audit: {}", audit.replace("\n", " | "))
+
+        if not self.response_template_config.show_audit_summary:
+            return rendered
+
+        return f"{audit}\n\n{rendered}"
+
     # endregion
 
     # region [核心调度与执行循环]
@@ -192,16 +250,20 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
-    ) -> tuple[str | None, list[str], list[dict]]:
+    ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
+        from nanobot.agent.response_templates import build_quick_progress
+
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        timings: list[dict[str, int | str | bool]] = []
 
         while iteration < self.max_iterations:
             iteration += 1
 
+            llm_started = time.perf_counter()
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
@@ -210,6 +272,10 @@ class AgentLoop:
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
             )
+            timings.append({
+                "stage": f"llm:{iteration}",
+                "duration_ms": int((time.perf_counter() - llm_started) * 1000),
+            })
 
             if response.has_tool_calls:
                 if on_progress:
@@ -239,10 +305,20 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    tool_started = time.perf_counter()
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
+                    timings.append({
+                        "stage": f"tool:{tool_call.name}",
+                        "duration_ms": tool_duration_ms,
+                    })
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if on_progress and self.response_template_config.enabled:
+                        quick_progress = build_quick_progress(tool_call.name, result)
+                        if quick_progress:
+                            await on_progress(quick_progress)
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -265,7 +341,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, timings
 
     async def run(self) -> None:
         """运行智能体循环，将消息分发为任务，以保持对 /stop 命令的响应能力。"""
@@ -362,7 +438,17 @@ class AgentLoop:
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
-            final_content, _, all_msgs = await self._run_agent_loop(messages)
+            turn_started = time.perf_counter()
+            final_content, _, all_msgs, timings = await self._run_agent_loop(messages)
+            turn_new = all_msgs[1 + len(history):]
+            total_ms = int((time.perf_counter() - turn_started) * 1000)
+            final_content = self._render_with_template(
+                user_text=msg.content,
+                fallback_text=final_content,
+                turn_messages=turn_new,
+                timings=timings,
+                total_ms=total_ms,
+            )
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
             return OutboundMessage(channel=channel, chat_id=chat_id,
@@ -447,12 +533,25 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
+        turn_started = time.perf_counter()
+        final_content, _, all_msgs, timings = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        turn_new = all_msgs[1 + len(history):]
+        total_ms = int((time.perf_counter() - turn_started) * 1000)
+        final_content = self._render_with_template(
+            user_text=msg.content,
+            fallback_text=final_content,
+            turn_messages=turn_new,
+            timings=timings,
+            total_ms=total_ms,
+        )
+
+        final_text = final_content or "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
@@ -460,10 +559,10 @@ class AgentLoop:
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
-        preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
+        preview = final_text[:120] + "..." if len(final_text) > 120 else final_text
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         return OutboundMessage(
-            channel=msg.channel, chat_id=msg.chat_id, content=final_content,
+            channel=msg.channel, chat_id=msg.chat_id, content=final_text,
             metadata=msg.metadata or {},
         )
 
