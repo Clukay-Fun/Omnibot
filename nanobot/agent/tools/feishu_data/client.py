@@ -1,9 +1,11 @@
 """飞书数据客户端：提供连接至飞书 OpenAPI 的 HTTP 客户端，集成令牌管理、重试与统一错误处理。"""
 
 import asyncio
+import time
 from typing import Any, Callable
 
 import httpx
+from loguru import logger
 
 from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
 from nanobot.agent.tools.feishu_data.token_manager import TenantAccessTokenManager
@@ -56,6 +58,8 @@ class FeishuDataClient:
 
         last_error = None
 
+        logger.debug(f"Feishu API Request: {method} {url}")
+        start_time = time.time()
         for attempt in range(max_retries + 1):
             try:
                 async with self.http_client_factory(timeout=timeout) as client:
@@ -67,7 +71,9 @@ class FeishuDataClient:
                         headers=req_headers
                     )
 
+                    duration = time.time() - start_time
                     if response.status_code >= 400:
+                        logger.error(f"Feishu API Error: {method} {url} - Status {response.status_code} - Duration {duration:.2f}s")
                         try:
                             error_data = response.json()
                             raise FeishuDataAPIError(
@@ -81,11 +87,15 @@ class FeishuDataClient:
                     data = response.json()
                     # Check Feishu API business code
                     if "code" in data and data["code"] != 0:
+                        logger.error(f"Feishu API Business Error: {method} {url} - Code {data.get('code')} - Msg {data.get('msg')} - Duration {duration:.2f}s")
                         raise FeishuDataAPIError(data["code"], data.get("msg", "Unknown API error"), data)
 
+                    logger.debug(f"Feishu API Success: {method} {url} - Duration {duration:.2f}s")
                     return data
             except httpx.HTTPError as e:
                 last_error = e
+                duration = time.time() - start_time
+                logger.warning(f"Feishu API Retry: {method} {url} - Attempt {attempt+1}/{max_retries+1} - Error {e} - Duration {duration:.2f}s")
                 if attempt < max_retries:
                     await asyncio.sleep(retry_delay)
 
