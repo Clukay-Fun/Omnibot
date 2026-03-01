@@ -209,17 +209,27 @@ class AgentDefaults(Base):
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
     provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    max_tokens: int = 8192
+    max_tokens: int = 4096
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
 
 
+class ResponseTemplateConfig(Base):
+    """Deterministic response template rendering configuration."""
+
+    enabled: bool = True
+    strict_mode: bool = True
+    show_audit_summary: bool = True
+    max_list_items: int = 5
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    response_templates: ResponseTemplateConfig = Field(default_factory=ResponseTemplateConfig)
 
 
 class ProviderConfig(Base):
@@ -303,16 +313,24 @@ class FeishuDataTokenConfig(Base):
 
 
 class FeishuDataRequestConfig(Base):
-    timeout: int = 30
-    max_retries: int = 3
+    timeout: int = 10
+    max_retries: int = 1
     retry_delay: float = 1.0
+
+
+class FeishuDataCacheConfig(Base):
+    enabled: bool = True
+    max_entries: int = 512
+    field_mapping_ttl_seconds: int = 1800
+    person_mapping_ttl_seconds: int = 600
+    table_schema_ttl_seconds: int = 1800
 
 
 class FeishuDataBitableSearchConfig(Base):
     searchable_fields: list[str] = Field(default_factory=list)
     date_field: str = ""  # 用于日期区间过滤的字段名（如 "创建日期"）
     max_records: int = 100
-    default_limit: int = 20
+    default_limit: int = 10
 
 
 class FeishuDataBitableConfig(Base):
@@ -343,6 +361,7 @@ class FeishuDataConfig(Base):
     api_base: str = "https://open.feishu.cn/open-apis"
     token: FeishuDataTokenConfig = Field(default_factory=FeishuDataTokenConfig)
     request: FeishuDataRequestConfig = Field(default_factory=FeishuDataRequestConfig)
+    cache: FeishuDataCacheConfig = Field(default_factory=FeishuDataCacheConfig)
     bitable: FeishuDataBitableConfig = Field(default_factory=FeishuDataBitableConfig)
     doc: FeishuDataDocConfig = Field(default_factory=FeishuDataDocConfig)
     confirm_token_ttl_seconds: int = 300

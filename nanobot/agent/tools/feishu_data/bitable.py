@@ -1,5 +1,6 @@
 """飞书多维表格只读工具：提供对 Bitable 数据的查询等功能。"""
 
+import asyncio
 import json
 import time
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.feishu_data.cache import TTLCache
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.date_utils import build_date_filter
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
@@ -25,6 +27,28 @@ class BitableSearchTool(Tool):
     def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
         self.config = config
         self.client = client
+        cache_cfg = self.config.cache
+        self._mapping_cache = TTLCache[str, dict[str, Any]](
+            ttl_seconds=cache_cfg.field_mapping_ttl_seconds if cache_cfg.enabled else 0,
+            max_entries=cache_cfg.max_entries,
+        )
+
+    @staticmethod
+    def _build_mapping_cache_key(fields: dict[str, Any], mapping: dict[str, str]) -> str:
+        mapping_sig = json.dumps(mapping, sort_keys=True, ensure_ascii=False)
+        fields_sig = json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
+        return f"{mapping_sig}|{fields_sig}"
+
+    def _apply_mapping_with_cache(self, fields: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+        if not mapping:
+            return fields
+        key = self._build_mapping_cache_key(fields, mapping)
+        cached = self._mapping_cache.get(key)
+        if cached is not None:
+            return cached
+        mapped = apply_field_mapping(fields, mapping)
+        self._mapping_cache.set(key, mapped)
+        return mapped
 
     def _is_value_match(self, value: Any, keyword: str) -> bool:
         """通用的值匹配逻辑，支持 list[dict] (人员)、list[str] (多选)、str (单选/文本) 等。"""
@@ -40,6 +64,149 @@ class BitableSearchTool(Tool):
                     return True
             return False
         return kw_lower in str(value).lower()
+
+    def _record_matches_keyword(self, fields: dict[str, Any], keyword: str) -> bool:
+        if not keyword:
+            return True
+        return any(self._is_value_match(v, keyword) for v in fields.values())
+
+    def _build_payload(
+        self,
+        *,
+        view_id: str | None,
+        keyword: str | None,
+        searchable_fields: list[str],
+        date_from: str | None,
+        date_to: str | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if view_id:
+            payload["view_id"] = view_id
+
+        date_field = self.config.bitable.search.date_field
+        date_filter = build_date_filter(date_field, date_from, date_to)
+        if date_filter:
+            payload["filter"] = date_filter
+
+        if keyword and searchable_fields:
+            keyword_filter = {
+                "conjunction": "or",
+                "conditions": [
+                    {"field_name": field_name, "operator": "contains", "value": [keyword]}
+                    for field_name in searchable_fields
+                ],
+            }
+            if "filter" in payload:
+                payload["filter"] = {
+                    "conjunction": "and",
+                    "conditions": [payload["filter"], keyword_filter],
+                }
+            else:
+                payload["filter"] = keyword_filter
+
+        return payload
+
+    def _normalize_records(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        app_token: str,
+        table_id: str,
+        keyword: str | None,
+        searchable_fields: list[str],
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        domain = self.config.bitable.domain
+        mapping = self.config.bitable.field_mapping
+
+        for item in items:
+            raw_fields = item.get("fields", {})
+            if not isinstance(raw_fields, dict):
+                continue
+
+            if keyword and not searchable_fields and not self._record_matches_keyword(raw_fields, keyword):
+                continue
+
+            rec_id = item.get("record_id")
+            url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+            mapped = self._apply_mapping_with_cache(raw_fields, mapping)
+            normalized.append({
+                "record_id": rec_id,
+                "table_id": table_id,
+                "fields": mapped,
+                "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                "record_url": url,
+            })
+
+        return normalized
+
+    async def _search_table(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        payload: dict[str, Any],
+        page_size: int,
+        keyword: str | None,
+        searchable_fields: list[str],
+    ) -> dict[str, Any]:
+        path = FeishuEndpoints.bitable_records_search(app_token, table_id)
+        params = {"page_size": page_size}
+
+        logger.info(
+            f"Bitable search: app={app_token}, table={table_id}, keyword={keyword}, filter={payload.get('filter')}"
+        )
+        started = time.time()
+
+        try:
+            response = await self.client.request("POST", path, params=params, json_body=payload)
+            items = response.get("data", {}).get("items", [])
+            normalized = self._normalize_records(
+                items=items,
+                app_token=app_token,
+                table_id=table_id,
+                keyword=keyword,
+                searchable_fields=searchable_fields,
+            )
+            duration = time.time() - started
+            logger.info(f"Bitable search completed in {duration:.2f}s, table={table_id}, found {len(normalized)} items")
+            return {
+                "table_id": table_id,
+                "records": normalized,
+                "total": response.get("data", {}).get("total", len(normalized)),
+            }
+        except FeishuDataAPIError as e:
+            if e.code != 1254018:
+                logger.error(f"Bitable search API error (table={table_id}): {e}")
+                return {"table_id": table_id, "records": [], "total": 0, "error": str(e)}
+
+            logger.warning(
+                f"Bitable search filter failed (table={table_id}): {e}. Falling back to non-filtered search."
+            )
+            try:
+                fallback_payload = payload.copy()
+                fallback_payload.pop("filter", None)
+                response = await self.client.request("POST", path, params=params, json_body=fallback_payload)
+                items = response.get("data", {}).get("items", [])
+                normalized = self._normalize_records(
+                    items=items,
+                    app_token=app_token,
+                    table_id=table_id,
+                    keyword=keyword,
+                    searchable_fields=[],
+                )
+                return {
+                    "table_id": table_id,
+                    "records": normalized,
+                    "total": len(normalized),
+                    "warning": "部分搜索字段不存在，已回退到全量匹配模式。",
+                }
+            except Exception as ex:
+                logger.error(f"Fallback search failed (table={table_id}): {ex}")
+                return {"table_id": table_id, "records": [], "total": 0, "error": str(ex)}
+        except Exception as e:
+            logger.error(f"Bitable search failed (table={table_id}): {e}")
+            return {"table_id": table_id, "records": [], "total": 0, "error": str(e)}
 
     @property
     def name(self) -> str:
@@ -87,6 +254,11 @@ class BitableSearchTool(Tool):
                     "type": "string",
                     "description": "Optional specific Table ID. Defaults to config."
                 },
+                "table_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional table ID list for cross-table parallel search."
+                },
                 "view_id": {
                     "type": "string",
                     "description": "Optional specific View ID. Defaults to config."
@@ -96,9 +268,13 @@ class BitableSearchTool(Tool):
 
     async def execute(self, **kwargs: Any) -> str:
         app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
-        table_id = kwargs.get("table_id") or self.config.bitable.default_table_id
+        default_table_id = kwargs.get("table_id") or self.config.bitable.default_table_id
+        table_ids = kwargs.get("table_ids")
+        target_tables = [tid for tid in table_ids if isinstance(tid, str) and tid] if isinstance(table_ids, list) else []
+        if not target_tables and default_table_id:
+            target_tables = [default_table_id]
 
-        if not app_token or not table_id:
+        if not app_token or not target_tables:
             return json.dumps({
                 "error": "Missing app_token or table_id. Cannot perform search without specific target.",
                 "records": []
@@ -109,138 +285,79 @@ class BitableSearchTool(Tool):
             limit = min(limit, self.config.bitable.search.max_records)
 
         view_id = kwargs.get("view_id") or self.config.bitable.default_view_id
-
-        # 组装 payload
-        payload: dict[str, Any] = {}
-        if view_id:
-            payload["view_id"] = view_id
-
-        # 日期区间过滤
         date_from = kwargs.get("date_from")
         date_to = kwargs.get("date_to")
-        date_field = self.config.bitable.search.date_field
-        date_filter = build_date_filter(date_field, date_from, date_to)
-        if date_filter:
-            payload["filter"] = date_filter
-
-        path = FeishuEndpoints.bitable_records_search(app_token, table_id)
-        params = {"page_size": limit}
-
-        # 构造服务器端过滤器
         searchable_fields = self.config.bitable.search.searchable_fields
         keyword = kwargs.get("keyword")
-        
-        # 如果有关键字且有可搜索字段，构造并集过滤器
-        if keyword and searchable_fields:
-            kw_filter = {
-                "conjunction": "or",
-                "conditions": [
-                    {"field_name": f, "operator": "contains", "value": [keyword]}
-                    for f in searchable_fields
-                ]
+        payload = self._build_payload(
+            view_id=view_id,
+            keyword=keyword,
+            searchable_fields=searchable_fields,
+            date_from=date_from,
+            date_to=date_to,
+        )
+
+        tasks = [
+            self._search_table(
+                app_token=app_token,
+                table_id=table_id,
+                payload=payload,
+                page_size=limit,
+                keyword=keyword,
+                searchable_fields=searchable_fields,
+            )
+            for table_id in target_tables
+        ]
+        table_results = await asyncio.gather(*tasks)
+
+        if len(table_results) == 1:
+            result = table_results[0]
+            if result.get("error"):
+                return json.dumps({"error": result["error"], "records": []}, ensure_ascii=False)
+            response_payload: dict[str, Any] = {
+                "records": result.get("records", []),
+                "total": result.get("total", 0),
             }
-            if "filter" in payload:
-                # 合并现有的日期过滤器
-                payload["filter"] = {
-                    "conjunction": "and",
-                    "conditions": [payload["filter"], kw_filter]
-                }
-            else:
-                payload["filter"] = kw_filter
+            if result.get("warning"):
+                response_payload["warning"] = result["warning"]
+            return json.dumps(response_payload, ensure_ascii=False)
 
-        logger.info(f"Bitable search: app={app_token}, table={table_id}, keyword={keyword}, filter={payload.get('filter')}")
-        start_time = time.time()
-        try:
-            res = await self.client.request("POST", path, params=params, json_body=payload)
-            items = res.get("data", {}).get("items", [])
-            duration = time.time() - start_time
-            logger.info(f"Bitable search completed in {duration:.2f}s, found {len(items)} items")
-            
-            normalized = []
-            domain = self.config.bitable.domain
-            mapping = self.config.bitable.field_mapping
-            
-            for item in items:
-                rec_id = item.get("record_id")
-                url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
-                raw_fields = item.get("fields", {})
-                
-                # 如果没有服务器端过滤（或补充过滤），在客户端进行二次匹配校验
-                if keyword and not searchable_fields:
-                    match = False
-                    for val in raw_fields.values():
-                        if self._is_value_match(val, keyword):
-                            match = True
-                            break
-                    if not match:
-                        continue
+        merged_records: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        errors: list[dict[str, Any]] = []
+        table_summaries: list[dict[str, Any]] = []
+        total = 0
 
-                mapped = apply_field_mapping(raw_fields, mapping)
-                normalized.append({
-                    "record_id": rec_id,
-                    "fields": mapped,
-                    "fields_text": {str(k): str(v) for k, v in mapped.items()},
-                    "record_url": url,
-                })
+        for result in table_results:
+            table_id = result.get("table_id")
+            table_total = int(result.get("total") or 0)
+            total += table_total
+            table_summary: dict[str, Any] = {
+                "table_id": table_id,
+                "total": table_total,
+            }
+            if result.get("error"):
+                table_summary["error"] = result["error"]
+                errors.append({"table_id": table_id, "error": result["error"]})
+            if result.get("warning"):
+                table_summary["warning"] = result["warning"]
+                warnings.append(str(result["warning"]))
+            table_summaries.append(table_summary)
+            merged_records.extend(result.get("records", []))
 
-            return json.dumps({
-                "records": normalized,
-                "total": res.get("data", {}).get("total", len(normalized))
-            }, ensure_ascii=False)
+        truncated = len(merged_records) > limit
+        response_payload = {
+            "records": merged_records[:limit],
+            "total": total,
+            "tables": table_summaries,
+            "truncated": truncated,
+        }
+        if warnings:
+            response_payload["warning"] = "；".join(sorted(set(warnings)))
+        if errors and len(errors) == len(table_summaries):
+            response_payload["error"] = "All table searches failed."
 
-        except FeishuDataAPIError as e:
-            # 飞书错误码 1254018 表示过滤器字段不存在 (InvalidFilter)
-            if e.code == 1254018:
-                logger.warning(f"Bitable search filter failed (likely missing fields in config): {e}. Falling back to non-filtered search.")
-                #  fallback: 去掉 filter 重新请求，完全依赖客户端侧 _is_value_match
-                try:
-                    fallback_payload = payload.copy()
-                    fallback_payload.pop("filter", None)
-                    res = await self.client.request("POST", path, params=params, json_body=fallback_payload)
-                    items = res.get("data", {}).get("items", [])
-                    
-                    normalized = []
-                    domain = self.config.bitable.domain
-                    mapping = self.config.bitable.field_mapping
-                    for item in items:
-                        raw_fields = item.get("fields", {})
-                        if keyword and not self._is_value_match(raw_fields.get(list(raw_fields.keys())[0]), keyword): # 简单的防暴力，实际上下面会全量遍历
-                            # 因为此时没有任何服务器过滤，我们要对所有项进行 _is_value_match 检查
-                            match = False
-                            for val in raw_fields.values():
-                                if self._is_value_match(val, keyword):
-                                    match = True
-                                    break
-                            if not match:
-                                continue
-
-                        rec_id = item.get("record_id")
-                        url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
-                        mapped = apply_field_mapping(raw_fields, mapping)
-                        normalized.append({
-                            "record_id": rec_id,
-                            "fields": mapped,
-                            "fields_text": {str(k): str(v) for k, v in mapped.items()},
-                            "record_url": url,
-                        })
-                    
-                    return json.dumps({
-                        "records": normalized,
-                        "total": len(normalized),
-                        "warning": "部分搜索字段不存在，已回退到全量匹配模式。"
-                    }, ensure_ascii=False)
-                except Exception as ex:
-                    logger.error(f"Fallback search failed: {ex}")
-                    return json.dumps({"error": str(ex), "records": []}, ensure_ascii=False)
-            
-            logger.error(f"Bitable search API error: {e}")
-            return json.dumps({"error": str(e), "records": []}, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Bitable search failed: {e}")
-            return json.dumps({
-                "error": str(e),
-                "records": []
-            }, ensure_ascii=False)
+        return json.dumps(response_payload, ensure_ascii=False)
 
 
 class BitableListTablesTool(Tool):
@@ -252,6 +369,11 @@ class BitableListTablesTool(Tool):
     def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
         self.config = config
         self.client = client
+        cache_cfg = self.config.cache
+        self._table_cache = TTLCache[str, dict[str, Any]](
+            ttl_seconds=cache_cfg.table_schema_ttl_seconds if cache_cfg.enabled else 0,
+            max_entries=cache_cfg.max_entries,
+        )
 
     @property
     def name(self) -> str:
@@ -284,6 +406,11 @@ class BitableListTablesTool(Tool):
                 "tables": []
             }, ensure_ascii=False)
 
+        cache_key = f"tables:{app_token}"
+        cached = self._table_cache.get(cache_key)
+        if cached is not None:
+            return json.dumps(cached, ensure_ascii=False)
+
         path = FeishuEndpoints.bitable_tables(app_token)
         try:
             res = await self.client.request("GET", path)
@@ -292,7 +419,9 @@ class BitableListTablesTool(Tool):
                 {"table_id": t.get("table_id"), "name": t.get("name", "")}
                 for t in items
             ]
-            return json.dumps({"tables": tables}, ensure_ascii=False)
+            payload = {"tables": tables}
+            self._table_cache.set(cache_key, payload)
+            return json.dumps(payload, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e), "tables": []}, ensure_ascii=False)
 
@@ -383,6 +512,32 @@ class BitableSearchPersonTool(Tool):
     def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
         self.config = config
         self.client = client
+        cache_cfg = self.config.cache
+        self._person_cache = TTLCache[str, dict[str, Any]](
+            ttl_seconds=cache_cfg.person_mapping_ttl_seconds if cache_cfg.enabled else 0,
+            max_entries=cache_cfg.max_entries,
+        )
+        self._mapping_cache = TTLCache[str, dict[str, Any]](
+            ttl_seconds=cache_cfg.field_mapping_ttl_seconds if cache_cfg.enabled else 0,
+            max_entries=cache_cfg.max_entries,
+        )
+
+    @staticmethod
+    def _build_mapping_cache_key(fields: dict[str, Any], mapping: dict[str, str]) -> str:
+        mapping_sig = json.dumps(mapping, sort_keys=True, ensure_ascii=False)
+        fields_sig = json.dumps(fields, sort_keys=True, ensure_ascii=False, default=str)
+        return f"{mapping_sig}|{fields_sig}"
+
+    def _apply_mapping_with_cache(self, fields: dict[str, Any], mapping: dict[str, str]) -> dict[str, Any]:
+        if not mapping:
+            return fields
+        key = self._build_mapping_cache_key(fields, mapping)
+        cached = self._mapping_cache.get(key)
+        if cached is not None:
+            return cached
+        mapped = apply_field_mapping(fields, mapping)
+        self._mapping_cache.set(key, mapped)
+        return mapped
 
     def _is_value_match(self, value: Any, keyword: str) -> bool:
         """通用的值匹配逻辑，支持人员字段、多选、单选及文本。"""
@@ -470,6 +625,19 @@ class BitableSearchPersonTool(Tool):
 
         view_id = kwargs.get("view_id") or self.config.bitable.default_view_id
 
+        cache_key = json.dumps({
+            "app_token": app_token,
+            "table_id": table_id,
+            "person_name": person_name,
+            "limit": limit,
+            "view_id": view_id,
+            "date_from": kwargs.get("date_from"),
+            "date_to": kwargs.get("date_to"),
+        }, ensure_ascii=False, sort_keys=True)
+        cached_payload = self._person_cache.get(cache_key)
+        if cached_payload is not None:
+            return json.dumps(cached_payload, ensure_ascii=False)
+
         payload: dict[str, Any] = {}
         if view_id:
             payload["view_id"] = view_id
@@ -477,6 +645,11 @@ class BitableSearchPersonTool(Tool):
         # 日期区间过滤
         date_from = kwargs.get("date_from")
         date_to = kwargs.get("date_to")
+        date_field = self.config.bitable.search.date_field
+        date_filter = build_date_filter(date_field, date_from, date_to)
+        if date_filter:
+            payload["filter"] = date_filter
+
         # 增加服务器端人员名称过滤（如果配置了 searchable_fields 且包含人员字段）
         # 注意：由于人员字段在 API 中处理较复杂，暂且尝试对所有 searchable_fields 进行包含匹配
         search_fields = self.config.bitable.search.searchable_fields
@@ -515,23 +688,24 @@ class BitableSearchPersonTool(Tool):
                     if self._is_value_match(field_val, person_name):
                         is_hit = True
                         break
-                    
-                if is_hit:
-                        rec_id = item.get("record_id")
-                        url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
-                        mapped = apply_field_mapping(fields, mapping)
-                        matched.append({
-                            "record_id": rec_id,
-                            "fields": mapped,
-                            "fields_text": {str(k): str(v) for k, v in mapped.items()},
-                            "record_url": url,
-                        })
-                        break
 
-            return json.dumps({
+                if is_hit:
+                    rec_id = item.get("record_id")
+                    url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
+                    mapped = self._apply_mapping_with_cache(fields, mapping)
+                    matched.append({
+                        "record_id": rec_id,
+                        "fields": mapped,
+                        "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                        "record_url": url,
+                    })
+
+            response_payload = {
                 "records": matched,
                 "total": len(matched)
-            }, ensure_ascii=False)
+            }
+            self._person_cache.set(cache_key, response_payload)
+            return json.dumps(response_payload, ensure_ascii=False)
         except FeishuDataAPIError as e:
             if e.code == 1254018:
                 logger.warning(f"Bitable search_person filter failed: {e}. Falling back to non-filtered search.")
@@ -540,7 +714,7 @@ class BitableSearchPersonTool(Tool):
                     fallback_payload.pop("filter", None)
                     res = await self.client.request("POST", path, params=params, json_body=fallback_payload)
                     items = res.get("data", {}).get("items", [])
-                    
+
                     matched = []
                     domain = self.config.bitable.domain
                     mapping = self.config.bitable.field_mapping
@@ -554,23 +728,25 @@ class BitableSearchPersonTool(Tool):
                         if is_hit:
                             rec_id = item.get("record_id")
                             url = f"{domain}/base/{app_token}?table={table_id}&record={rec_id}" if domain else ""
-                            mapped = apply_field_mapping(fields, mapping)
+                            mapped = self._apply_mapping_with_cache(fields, mapping)
                             matched.append({
                                 "record_id": rec_id,
                                 "fields": mapped,
                                 "fields_text": {str(k): str(v) for k, v in mapped.items()},
                                 "record_url": url,
                             })
-                    
-                    return json.dumps({
+
+                    response_payload = {
                         "records": matched,
                         "total": len(matched),
                         "warning": "部分人员搜索字段在表中未找到，已回退到全量扫描模式。"
-                    }, ensure_ascii=False)
+                    }
+                    self._person_cache.set(cache_key, response_payload)
+                    return json.dumps(response_payload, ensure_ascii=False)
                 except Exception as ex:
                     logger.error(f"search_person fallback failed: {ex}")
                     return json.dumps({"error": str(ex), "records": []}, ensure_ascii=False)
-            
+
             logger.error(f"Bitable search_person API error: {e}")
             return json.dumps({"error": str(e), "records": []}, ensure_ascii=False)
         except Exception as e:
