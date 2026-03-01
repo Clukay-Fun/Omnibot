@@ -3,11 +3,18 @@
 from typing import Iterable
 
 from nanobot.agent.tools.base import Tool
-from nanobot.agent.tools.feishu_data.bitable import BitableSearchTool
+from nanobot.agent.tools.feishu_data.bitable import (
+    BitableGetTool,
+    BitableListTablesTool,
+    BitableSearchPersonTool,
+    BitableSearchTool,
+)
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
+from nanobot.agent.tools.feishu_data.doc_search import DocSearchTool
 from nanobot.config.schema import FeishuDataConfig
 
 # region [注册工厂]
+
 
 def build_feishu_data_tools(config: FeishuDataConfig) -> Iterable[Tool]:
     """
@@ -21,6 +28,10 @@ def build_feishu_data_tools(config: FeishuDataConfig) -> Iterable[Tool]:
 
     tools = [
         BitableSearchTool(config, client),
+        BitableListTablesTool(config, client),
+        BitableGetTool(config, client),
+        BitableSearchPersonTool(config, client),
+        DocSearchTool(config, client),
     ]
 
     return tools
