@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
@@ -184,20 +184,7 @@ class QQConfig(Base):
     secret: str = ""  # 机器人密钥 (AppSecret) from q.qq.com
     allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
-class MatrixConfig(Base):
-    """Matrix (Element) channel configuration."""
-    enabled: bool = False
-    homeserver: str = "https://matrix.org"
-    access_token: str = ""
-    user_id: str = ""                       # e.g. @bot:matrix.org
-    device_id: str = ""
-    e2ee_enabled: bool = True               # end-to-end encryption support
-    sync_stop_grace_seconds: int = 2        # graceful sync_forever shutdown timeout
-    max_media_bytes: int = 20 * 1024 * 1024 # inbound + outbound attachment limit
-    allow_from: list[str] = Field(default_factory=list)
-    group_policy: Literal["open", "mention", "allowlist"] = "open"
-    group_allow_from: list[str] = Field(default_factory=list)
-    allow_room_mentions: bool = False
+
 
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
@@ -311,6 +298,55 @@ class MCPServerConfig(Base):
     tool_timeout: int = 30  # Seconds before a tool call is cancelled
 
 
+class FeishuDataTokenConfig(Base):
+    refresh_ahead_seconds: int = 300
+
+
+class FeishuDataRequestConfig(Base):
+    timeout: int = 30
+    max_retries: int = 3
+    retry_delay: float = 1.0
+
+
+class FeishuDataBitableSearchConfig(Base):
+    searchable_fields: list[str] = Field(default_factory=list)
+    max_records: int = 100
+    default_limit: int = 20
+
+
+class FeishuDataBitableConfig(Base):
+    domain: str = ""
+    default_app_token: str = ""
+    default_table_id: str = ""
+    default_view_id: str | None = None
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+    search: FeishuDataBitableSearchConfig = Field(default_factory=FeishuDataBitableSearchConfig)
+
+
+class FeishuDataDocSearchConfig(Base):
+    default_folder_token: str | None = None
+    preview_length: int = 200
+    default_limit: int = 10
+
+
+class FeishuDataDocConfig(Base):
+    search: FeishuDataDocSearchConfig = Field(default_factory=FeishuDataDocSearchConfig)
+
+
+class FeishuDataConfig(Base):
+    """Feishu data tools configuration."""
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    api_base: str = "https://open.feishu.cn/open-apis"
+    token: FeishuDataTokenConfig = Field(default_factory=FeishuDataTokenConfig)
+    request: FeishuDataRequestConfig = Field(default_factory=FeishuDataRequestConfig)
+    bitable: FeishuDataBitableConfig = Field(default_factory=FeishuDataBitableConfig)
+    doc: FeishuDataDocConfig = Field(default_factory=FeishuDataDocConfig)
+    confirm_token_ttl_seconds: int = 300
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -318,6 +354,7 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    feishu_data: FeishuDataConfig = Field(default_factory=FeishuDataConfig)
 
 
 class Config(BaseSettings):
