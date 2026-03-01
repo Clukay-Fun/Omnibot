@@ -35,5 +35,10 @@ class FeishuEndpoints:
         """搜索具有读权限的飞书云文档列表的端点。"""
         return "/drive/v1/files"
 
+    @staticmethod
+    def bitable_records(app_token: str, table_id: str) -> str:
+        """创建记录或批量列出记录的端点。"""
+        return f"/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+
 # endregion
 

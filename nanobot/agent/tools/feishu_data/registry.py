@@ -9,7 +9,13 @@ from nanobot.agent.tools.feishu_data.bitable import (
     BitableSearchPersonTool,
     BitableSearchTool,
 )
+from nanobot.agent.tools.feishu_data.bitable_write import (
+    BitableCreateTool,
+    BitableDeleteTool,
+    BitableUpdateTool,
+)
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
+from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.doc_search import DocSearchTool
 from nanobot.config.schema import FeishuDataConfig
 
@@ -25,13 +31,19 @@ def build_feishu_data_tools(config: FeishuDataConfig) -> Iterable[Tool]:
         return []
 
     client = FeishuDataClient(config)
+    confirm_store = ConfirmTokenStore(ttl_seconds=config.confirm_token_ttl_seconds)
 
-    tools = [
+    tools: list[Tool] = [
+        # 只读工具
         BitableSearchTool(config, client),
         BitableListTablesTool(config, client),
         BitableGetTool(config, client),
         BitableSearchPersonTool(config, client),
         DocSearchTool(config, client),
+        # 写入工具（两阶段安全）
+        BitableCreateTool(config, client, confirm_store),
+        BitableUpdateTool(config, client, confirm_store),
+        BitableDeleteTool(config, client, confirm_store),
     ]
 
     return tools
