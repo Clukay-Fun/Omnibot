@@ -1,4 +1,4 @@
-"""Web tools: web_search and web_fetch."""
+"""Web 工具：网络搜索 (web_search) 与网页抓取 (web_fetch)。"""
 
 import html
 import json
@@ -13,11 +13,13 @@ from nanobot.agent.tools.base import Tool
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
-MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
+MAX_REDIRECTS = 5  # 限制重定向次数以防止 DoS 攻击
 
+
+# region [辅助方法]
 
 def _strip_tags(text: str) -> str:
-    """Remove HTML tags and decode entities."""
+    """移除 HTML 标签并解析实体。"""
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
     text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
     text = re.sub(r'<[^>]+>', '', text)
@@ -25,13 +27,13 @@ def _strip_tags(text: str) -> str:
 
 
 def _normalize(text: str) -> str:
-    """Normalize whitespace."""
+    """清理并标准化空白字符。"""
     text = re.sub(r'[ \t]+', ' ', text)
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain."""
+    """验证 URL：必须使用带有效域名的 http(s)。"""
     try:
         p = urlparse(url)
         if p.scheme not in ('http', 'https'):
@@ -43,16 +45,20 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+# endregion
+
+# region [网络搜索工具]
+
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """使用 Brave Search API 搜索网络。"""
     
     name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
+    description = "搜索网络。返回网页标题、URL 及内容片段。"
     parameters = {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search query"},
-            "count": {"type": "integer", "description": "Results (1-10)", "minimum": 1, "maximum": 10}
+            "query": {"type": "string", "description": "搜索查询词"},
+            "count": {"type": "integer", "description": "结果数量 (1-10)", "minimum": 1, "maximum": 10}
         },
         "required": ["query"]
     }
@@ -63,7 +69,7 @@ class WebSearchTool(Tool):
 
     @property
     def api_key(self) -> str:
-        """Resolve API key at call time so env/config changes are picked up."""
+        """在调用时解析 API 密钥，以便获取最新的环境变量或配置修改。"""
         return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
@@ -99,15 +105,19 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
 
+# endregion
+
+# region [网页内容提取工具]
+
 class WebFetchTool(Tool):
-    """Fetch and extract content from a URL using Readability."""
+    """获取页面并通过 Readability 提取核心内容。"""
     
     name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    description = "获取 URL 的可读内容并提取（HTML → Markdown/文本）。"
     parameters = {
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "URL to fetch"},
+            "url": {"type": "string", "description": "要获取的 URL"},
             "extractMode": {"type": "string", "enum": ["markdown", "text"], "default": "markdown"},
             "maxChars": {"type": "integer", "minimum": 100}
         },
@@ -122,7 +132,7 @@ class WebFetchTool(Tool):
 
         max_chars = maxChars or self.max_chars
 
-        # Validate URL before fetching
+        # 在获取内容前验证 URL
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
@@ -160,8 +170,8 @@ class WebFetchTool(Tool):
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
     
     def _to_markdown(self, html: str) -> str:
-        """Convert HTML to markdown."""
-        # Convert links, headings, lists before stripping tags
+        """将 HTML 转换为 Markdown。"""
+        # 在剥除标签之前转换链接、标题和列表
         text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
                       lambda m: f'[{_strip_tags(m[2])}]({m[1]})', html, flags=re.I)
         text = re.sub(r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',
@@ -170,3 +180,5 @@ class WebFetchTool(Tool):
         text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
         text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
         return _normalize(_strip_tags(text))
+
+# endregion

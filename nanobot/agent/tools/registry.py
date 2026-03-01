@@ -1,42 +1,44 @@
-"""Tool registry for dynamic tool management."""
+"""用于动态工具管理的工具注册表。"""
 
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
 
+# region [工具注册表类]
+
 class ToolRegistry:
     """
-    Registry for agent tools.
+    智能体工具的注册表。
     
-    Allows dynamic registration and execution of tools.
+    允许动态注册和执行工具。
     """
     
     def __init__(self):
         self._tools: dict[str, Tool] = {}
     
     def register(self, tool: Tool) -> None:
-        """Register a tool."""
+        """注册一个工具。"""
         self._tools[tool.name] = tool
     
     def unregister(self, name: str) -> None:
-        """Unregister a tool by name."""
+        """通过名称注销一个工具。"""
         self._tools.pop(name, None)
     
     def get(self, name: str) -> Tool | None:
-        """Get a tool by name."""
+        """通过名称获取一个工具。"""
         return self._tools.get(name)
     
     def has(self, name: str) -> bool:
-        """Check if a tool is registered."""
+        """检查工具是否已注册。"""
         return name in self._tools
     
     def get_definitions(self) -> list[dict[str, Any]]:
-        """Get all tool definitions in OpenAI format."""
+        """获取 OpenAI 格式的所有工具定义。"""
         return [tool.to_schema() for tool in self._tools.values()]
     
     async def execute(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name with given parameters."""
+        """使用给定参数执行指定名称的工具。"""
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
@@ -56,7 +58,7 @@ class ToolRegistry:
     
     @property
     def tool_names(self) -> list[str]:
-        """Get list of registered tool names."""
+        """获取已注册的工具名称列表。"""
         return list(self._tools.keys())
     
     def __len__(self) -> int:
@@ -64,3 +66,5 @@ class ToolRegistry:
     
     def __contains__(self, name: str) -> bool:
         return name in self._tools
+
+# endregion

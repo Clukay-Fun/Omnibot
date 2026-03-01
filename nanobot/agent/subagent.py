@@ -1,4 +1,4 @@
-"""Subagent manager for background task execution."""
+"""用于后台任务执行的子代理（Subagent）管理器。"""
 
 import asyncio
 import json
@@ -17,8 +17,10 @@ from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebSearchTool, WebFetchTool
 
 
+# region [子代理管理器]
+
 class SubagentManager:
-    """Manages background subagent execution."""
+    """管理后台子代理的执行。"""
     
     def __init__(
         self,
@@ -55,7 +57,7 @@ class SubagentManager:
         origin_chat_id: str = "direct",
         session_key: str | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background."""
+        """派发（Spawn）一个子代理在后台执行任务。"""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
@@ -79,6 +81,10 @@ class SubagentManager:
         logger.info("Spawned subagent [{}]: {}", task_id, display_label)
         return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
     
+    # endregion
+
+    # region [子代理核心迭代器]
+
     async def _run_subagent(
         self,
         task_id: str,
@@ -86,11 +92,11 @@ class SubagentManager:
         label: str,
         origin: dict[str, str],
     ) -> None:
-        """Execute the subagent task and announce the result."""
+        """执行一个子代理任务。"""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
         
         try:
-            # Build subagent tools (no message tool, no spawn tool)
+            # 构建子代理所需工具（不允许嵌套 message 和 spawn 工具）
             tools = ToolRegistry()
             allowed_dir = self.workspace if self.restrict_to_workspace else None
             tools.register(ReadFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
@@ -112,7 +118,7 @@ class SubagentManager:
                 {"role": "user", "content": task},
             ]
             
-            # Run agent loop (limited iterations)
+            # 运行内部智能体循环（带迭代次数限制）
             max_iterations = 15
             iteration = 0
             final_result: str | None = None
@@ -130,7 +136,7 @@ class SubagentManager:
                 )
                 
                 if response.has_tool_calls:
-                    # Add assistant message with tool calls
+                    # 带有工具调用结果的助手消息追加
                     tool_call_dicts = [
                         {
                             "id": tc.id,
@@ -148,7 +154,7 @@ class SubagentManager:
                         "tool_calls": tool_call_dicts,
                     })
                     
-                    # Execute tools
+                    # 执行生成的工具
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
@@ -174,6 +180,10 @@ class SubagentManager:
             logger.error("Subagent [{}] failed: {}", task_id, e)
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
     
+    # endregion
+
+    # region [子代理通信及辅助]
+
     async def _announce_result(
         self,
         task_id: str,
@@ -183,7 +193,7 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
     ) -> None:
-        """Announce the subagent result to the main agent via the message bus."""
+        """通过消息总线向主智能体通告子代理的执行结果。"""
         status_text = "completed successfully" if status == "ok" else "failed"
         
         announce_content = f"""[Subagent '{label}' {status_text}]
@@ -195,7 +205,7 @@ Result:
 
 Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
         
-        # Inject as system message to trigger main agent
+        # 作为系统消息注入以触发主智能体执行
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",
@@ -207,7 +217,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
     
     def _build_subagent_prompt(self) -> str:
-        """Build a focused system prompt for the subagent."""
+        """为子代理构建目标聚焦的系统提示词。"""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
@@ -229,7 +239,7 @@ Stay focused on the assigned task. Your final response will be reported back to 
         return "\n\n".join(parts)
     
     async def cancel_by_session(self, session_key: str) -> int:
-        """Cancel all subagents for the given session. Returns count cancelled."""
+        """为给定的会话取消所有活跃的子代理任务。返回已被取消的数量。"""
         tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
                  if tid in self._running_tasks and not self._running_tasks[tid].done()]
         for t in tasks:
@@ -239,5 +249,7 @@ Stay focused on the assigned task. Your final response will be reported back to 
         return len(tasks)
 
     def get_running_count(self) -> int:
-        """Return the number of currently running subagents."""
+        """返回当前正在运行的子代理数量。"""
         return len(self._running_tasks)
+
+    # endregion

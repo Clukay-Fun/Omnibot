@@ -1,4 +1,4 @@
-"""Shell execution tool."""
+"""Shell 执行工具。"""
 
 import asyncio
 import os
@@ -9,8 +9,10 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
+# region [Shell 执行工具实现]
+
 class ExecTool(Tool):
-    """Tool to execute shell commands."""
+    """用于执行 Shell 命令的工具。"""
     
     def __init__(
         self,
@@ -44,7 +46,7 @@ class ExecTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        return "执行 shell 命令并返回其输出。请谨慎使用。"
     
     @property
     def parameters(self) -> dict[str, Any]:
@@ -53,11 +55,11 @@ class ExecTool(Tool):
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "要执行的 shell 命令"
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "Optional working directory for the command"
+                    "description": "可选的命令执行工作目录"
                 }
             },
             "required": ["command"]
@@ -89,8 +91,7 @@ class ExecTool(Tool):
                 )
             except asyncio.TimeoutError:
                 process.kill()
-                # Wait for the process to fully terminate so pipes are
-                # drained and file descriptors are released.
+                # 等待进程完全终止，以便彻底清空管道并释放文件描述符
                 try:
                     await asyncio.wait_for(process.wait(), timeout=5.0)
                 except asyncio.TimeoutError:
@@ -112,7 +113,7 @@ class ExecTool(Tool):
             
             result = "\n".join(output_parts) if output_parts else "(no output)"
             
-            # Truncate very long output
+            # 截断超长输出
             max_len = 10000
             if len(result) > max_len:
                 result = result[:max_len] + f"\n... (truncated, {len(result) - max_len} more chars)"
@@ -123,7 +124,7 @@ class ExecTool(Tool):
             return f"Error executing command: {str(e)}"
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
+        """针对潜在破坏性命令的尽力而为（Best-effort）安全防护。"""
         cmd = command.strip()
         lower = cmd.lower()
 
@@ -156,3 +157,5 @@ class ExecTool(Tool):
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)   # Windows: C:\...
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
+
+# endregion

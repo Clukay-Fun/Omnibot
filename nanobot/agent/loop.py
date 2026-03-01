@@ -1,4 +1,4 @@
-"""Agent loop: the core processing engine."""
+"""Agent 循环：核心处理引擎。"""
 
 from __future__ import annotations
 
@@ -34,17 +34,19 @@ if TYPE_CHECKING:
 
 class AgentLoop:
     """
-    The agent loop is the core processing engine.
+    Agent 循环是核心处理引擎。
 
-    It:
-    1. Receives messages from the bus
-    2. Builds context with history, memory, skills
-    3. Calls the LLM
-    4. Executes tool calls
-    5. Sends responses back
+    它的工作流：
+    1. 从事件总线接收消息
+    2. 使用历史记录、记忆、技能构建上下文
+    3. 调用大语言模型（LLM）
+    4. 执行工具调用
+    5. 将响应发送回去
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+
+    # region [初始化与配置]
 
     def __init__(
         self,
@@ -110,7 +112,7 @@ class AgentLoop:
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
-        """Register the default set of tools."""
+        """注册默认工具集。"""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
@@ -127,8 +129,12 @@ class AgentLoop:
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
 
+    # endregion
+
+    # region [MCP 服务配置与清理]
+
     async def _connect_mcp(self) -> None:
-        """Connect to configured MCP servers (one-time, lazy)."""
+        """连接到已配置的 MCP 服务器（单次、懒加载）。"""
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
             return
         self._mcp_connecting = True
@@ -149,8 +155,12 @@ class AgentLoop:
         finally:
             self._mcp_connecting = False
 
+    # endregion
+
+    # region [工具与执行辅助方法]
+
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """Update context for all tools that need routing info."""
+        """为所有需要路由信息的工具更新上下文。"""
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
                 if hasattr(tool, "set_context"):
@@ -158,14 +168,14 @@ class AgentLoop:
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
-        """Remove <think>…</think> blocks that some models embed in content."""
+        """移除某些模型嵌入在内容中的 <think>…</think> 块。"""
         if not text:
             return None
         return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
 
     @staticmethod
     def _tool_hint(tool_calls: list) -> str:
-        """Format tool calls as concise hint, e.g. 'web_search("query")'."""
+        """将工具调用格式化为简明的提示，例如 'web_search("query")'。"""
         def _fmt(tc):
             args = (tc.arguments[0] if isinstance(tc.arguments, list) else tc.arguments) or {}
             val = next(iter(args.values()), None) if isinstance(args, dict) else None
@@ -174,12 +184,16 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    # endregion
+
+    # region [核心调度与执行循环]
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
-        """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -254,7 +268,7 @@ class AgentLoop:
         return final_content, tools_used, messages
 
     async def run(self) -> None:
-        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        """运行智能体循环，将消息分发为任务，以保持对 /stop 命令的响应能力。"""
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
@@ -273,7 +287,7 @@ class AgentLoop:
                 task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
-        """Cancel all active tasks and subagents for the session."""
+        """取消会话的所有活动任务和子代理（subagents）。"""
         tasks = self._active_tasks.pop(msg.session_key, [])
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
         for t in tasks:
@@ -289,7 +303,7 @@ class AgentLoop:
         ))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message under the global lock."""
+        """在全局锁下处理一条消息。"""
         async with self._processing_lock:
             try:
                 response = await self._process_message(msg)
@@ -311,7 +325,7 @@ class AgentLoop:
                 ))
 
     async def close_mcp(self) -> None:
-        """Close MCP connections."""
+        """关闭 MCP 连接。"""
         if self._mcp_stack:
             try:
                 await self._mcp_stack.aclose()
@@ -320,9 +334,13 @@ class AgentLoop:
             self._mcp_stack = None
 
     def stop(self) -> None:
-        """Stop the agent loop."""
+        """停止智能体主循环。"""
         self._running = False
         logger.info("Agent loop stopping")
+
+    # endregion
+
+    # region [消息处理核心逻辑]
 
     async def _process_message(
         self,
@@ -330,8 +348,8 @@ class AgentLoop:
         session_key: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
-        # System messages: parse origin from chat_id ("channel:chat_id")
+        """处理单条传入消息并返回响应。"""
+        # 系统消息：从 chat_id 中解析来源 ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
                                 else ("cli", msg.chat_id))
@@ -356,7 +374,7 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
-        # Slash commands
+        # 斜杠命令 (Slash commands)
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
@@ -449,14 +467,18 @@ class AgentLoop:
             metadata=msg.metadata or {},
         )
 
+    # endregion
+
+    # region [记忆与状态管理]
+
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
-        """Save new-turn messages into session, truncating large tool results."""
+        """将会话的新一轮消息保存起来，截断过长的工具结果。"""
         from datetime import datetime
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
-                continue  # skip empty assistant messages — they poison session context
+                continue  # 跳过空的助手消息 —— 它们会污染会话上下文
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
@@ -474,11 +496,15 @@ class AgentLoop:
         session.updated_at = datetime.now()
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
-        """Delegate to MemoryStore.consolidate(). Returns True on success."""
+        """委托给 MemoryStore.consolidate()，成功时返回 True。"""
         return await MemoryStore(self.workspace).consolidate(
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    # endregion
+
+    # region [直接调用接口]
 
     async def process_direct(
         self,
@@ -488,8 +514,10 @@ class AgentLoop:
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
-        """Process a message directly (for CLI or cron usage)."""
+        """直接处理一条消息（用于 CLI 或 cron 定时任务）。"""
         await self._connect_mcp()
         msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
         response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
         return response.content if response else ""
+
+    # endregion

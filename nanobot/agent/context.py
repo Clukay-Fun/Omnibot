@@ -1,4 +1,4 @@
-"""Context builder for assembling agent prompts."""
+"""用于组装智能体提示词的上下文构建器。"""
 
 import base64
 import mimetypes
@@ -13,9 +13,11 @@ from nanobot.agent.skills import SkillsLoader
 
 
 class ContextBuilder:
-    """Builds the context (system prompt + messages) for the agent."""
+    """构建智能体的上下文（系统提示词 + 消息历史记录）。"""
     
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+
+    # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     
     def __init__(self, workspace: Path):
@@ -24,7 +26,7 @@ class ContextBuilder:
         self.skills = SkillsLoader(workspace)
     
     def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """从身份设定、引导文件、记忆和技能中构建系统提示词。"""
         parts = [self._get_identity()]
 
         bootstrap = self._load_bootstrap_files()
@@ -53,7 +55,7 @@ Skills with available="false" need dependencies installed first - you can try in
         return "\n\n---\n\n".join(parts)
     
     def _get_identity(self) -> str:
-        """Get the core identity section."""
+        """获取核心身份设定部分。"""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -80,9 +82,13 @@ Your workspace is at: {workspace_path}
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
+    # endregion
+
+    # region [运行时上下文与引导]
+
     @staticmethod
     def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
-        """Build untrusted runtime metadata block for injection before the user message."""
+        """构建不受信任的运行时元数据块，用于注入到用户消息之前。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = time.strftime("%Z") or "UTC"
         lines = [f"Current Time: {now} ({tz})"]
@@ -91,7 +97,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
     
     def _load_bootstrap_files(self) -> str:
-        """Load all bootstrap files from workspace."""
+        """从工作区加载所有引导文件（bootstrap files）。"""
         parts = []
         
         for filename in self.BOOTSTRAP_FILES:
@@ -102,6 +108,10 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         
         return "\n\n".join(parts) if parts else ""
     
+    # endregion
+
+    # region [消息列表构建]
+
     def build_messages(
         self,
         history: list[dict[str, Any]],
@@ -111,7 +121,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         channel: str | None = None,
         chat_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Build the complete message list for an LLM call."""
+        """构建用于大语言模型调用的完整消息列表。"""
         return [
             {"role": "system", "content": self.build_system_prompt(skill_names)},
             *history,
@@ -120,7 +130,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         ]
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """构建包含可选 Base64 编码图片的用户消息内容。"""
         if not media:
             return text
         
@@ -137,11 +147,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             return text
         return images + [{"type": "text", "text": text}]
     
+    # endregion
+
+    # region [消息追加与辅助方法]
+
     def add_tool_result(
         self, messages: list[dict[str, Any]],
         tool_call_id: str, tool_name: str, result: str,
     ) -> list[dict[str, Any]]:
-        """Add a tool result to the message list."""
+        """将工具调用结果追加到消息列表中。"""
         messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
         return messages
     
@@ -152,7 +166,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         reasoning_content: str | None = None,
         thinking_blocks: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """Add an assistant message to the message list."""
+        """将助手的消息追加到消息列表中。"""
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls
@@ -162,3 +176,5 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             msg["thinking_blocks"] = thinking_blocks
         messages.append(msg)
         return messages
+
+    # endregion

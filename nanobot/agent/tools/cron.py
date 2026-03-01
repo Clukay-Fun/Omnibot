@@ -1,4 +1,4 @@
-"""Cron tool for scheduling reminders and tasks."""
+"""用于调度提醒和定时任务的 cron 工具。"""
 
 from typing import Any
 
@@ -7,8 +7,10 @@ from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 
 
+# region [定时任务工具实现]
+
 class CronTool(Tool):
-    """Tool to schedule reminders and recurring tasks."""
+    """用于调度提醒和重复性任务的工具。"""
     
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
@@ -16,7 +18,7 @@ class CronTool(Tool):
         self._chat_id = ""
     
     def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
+        """设置当前会话上下文用于消息投递。"""
         self._channel = channel
         self._chat_id = chat_id
     
@@ -85,6 +87,10 @@ class CronTool(Tool):
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
     
+    # endregion
+
+    # region [核心执行逻辑]
+
     def _add_job(
         self,
         message: str,
@@ -106,7 +112,7 @@ class CronTool(Tool):
             except (KeyError, Exception):
                 return f"Error: unknown timezone '{tz}'"
         
-        # Build schedule
+        # 构建调度计划
         delete_after = False
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
@@ -145,3 +151,5 @@ class CronTool(Tool):
         if self._cron.remove_job(job_id):
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
+
+    # endregion

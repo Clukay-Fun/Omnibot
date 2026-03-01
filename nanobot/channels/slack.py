@@ -1,4 +1,4 @@
-"""Slack channel implementation using Socket Mode."""
+"""采用 Socket Mode 的 Slack 频道实现。"""
 
 import asyncio
 import re
@@ -18,8 +18,10 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import SlackConfig
 
 
+# region [Slack 频道核心类]
+
 class SlackChannel(BaseChannel):
-    """Slack channel using Socket Mode."""
+    """运行于 Socket Mode 下的 Slack 交互频道实现基类。"""
 
     name = "slack"
 
@@ -31,7 +33,7 @@ class SlackChannel(BaseChannel):
         self._bot_user_id: str | None = None
 
     async def start(self) -> None:
-        """Start the Slack Socket Mode client."""
+        """启动针对 Slack Socket Mode 的工作客户端主体例程架构网络。"""
         if not self.config.bot_token or not self.config.app_token:
             logger.error("Slack bot/app token not configured")
             return
@@ -49,7 +51,7 @@ class SlackChannel(BaseChannel):
 
         self._socket_client.socket_mode_request_listeners.append(self._on_socket_request)
 
-        # Resolve bot user ID for mention handling
+        # 解析得到机器人账号的实际 User ID，以此为之后的 At (@) 提及处理打下标识符基础
         try:
             auth = await self._web_client.auth_test()
             self._bot_user_id = auth.get("user_id")
@@ -64,7 +66,7 @@ class SlackChannel(BaseChannel):
             await asyncio.sleep(1)
 
     async def stop(self) -> None:
-        """Stop the Slack client."""
+        """针对该频道实例停止工作机制中的客户端。"""
         self._running = False
         if self._socket_client:
             try:
@@ -74,7 +76,7 @@ class SlackChannel(BaseChannel):
             self._socket_client = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Slack."""
+        """通过 Slack 环境发布对外生成的应答讯息数据。"""
         if not self._web_client:
             logger.warning("Slack client not running")
             return
@@ -82,7 +84,7 @@ class SlackChannel(BaseChannel):
             slack_meta = msg.metadata.get("slack", {}) if msg.metadata else {}
             thread_ts = slack_meta.get("thread_ts")
             channel_type = slack_meta.get("channel_type")
-            # Only reply in thread for channel/group messages; DMs don't use threads
+            # 只有对频道/群组当中的对话内容才会尝试以 Thread (短信序列) 形式作答；传统的 DM（私信）交流一般不会使用线程序列形态
             use_thread = thread_ts and channel_type != "im"
             thread_ts_param = thread_ts if use_thread else None
 
@@ -110,11 +112,11 @@ class SlackChannel(BaseChannel):
         client: SocketModeClient,
         req: SocketModeRequest,
     ) -> None:
-        """Handle incoming Socket Mode requests."""
+        """作为回调目标接管处理经 Socket Mode 转送到达的一切网络 Request 请求包数据。"""
         if req.type != "events_api":
             return
 
-        # Acknowledge right away
+        # 第一时间送出回执 Acknowledge 确认操作收到
         await client.send_socket_mode_response(
             SocketModeResponse(envelope_id=req.envelope_id)
         )
@@ -123,26 +125,26 @@ class SlackChannel(BaseChannel):
         event = payload.get("event") or {}
         event_type = event.get("type")
 
-        # Handle app mentions or plain messages
+        # 进行分支甄选只去响应系统层面有关的被提起提及 ("app_mention") 或是基础发言 ("message") 事件动作
         if event_type not in ("message", "app_mention"):
             return
 
         sender_id = event.get("user")
         chat_id = event.get("channel")
 
-        # Ignore bot/system messages (any subtype = not a normal user message)
+        # 丢弃一切不来自于真人的机器播报类/系统的副类别发言产出活动 (任意包含 subtype 非主分类标记的行为=皆等价视为非正常标准真人产生的发言)
         if event.get("subtype"):
             return
         if self._bot_user_id and sender_id == self._bot_user_id:
             return
 
-        # Avoid double-processing: Slack sends both `message` and `app_mention`
-        # for mentions in channels. Prefer `app_mention`.
+        # 为避免双重执行产生重复: 当有 At (@) 动作发生在公开交流的开放通道中时 Slack 的通知事件经常既会有 `message` 又附上了 `app_mention`
+        # 总体原则通常是以 `app_mention` 作为我们被响应和驱动业务的前提重点选项去处理。
         text = event.get("text") or ""
         if event_type == "message" and self._bot_user_id and f"<@{self._bot_user_id}>" in text:
             return
 
-        # Debug: log basic event shape
+        # Debug 阶段: 打印一下这部分网络通知活动载荷的大致全貌状态去分析
         logger.debug(
             "Slack event: type={} subtype={} user={} channel={} channel_type={} text={}",
             event_type,
@@ -168,7 +170,7 @@ class SlackChannel(BaseChannel):
         thread_ts = event.get("thread_ts")
         if self.config.reply_in_thread and not thread_ts:
             thread_ts = event.get("ts")
-        # Add :eyes: reaction to the triggering message (best-effort)
+        # 追加添加 :eyes: 这个代表已经被我们接收并关注注视过的 Emoji 表演回应动作到发出引发执行条件的那个起始话题消息载体（只是为了做到尽可能的表现回显服务反馈响应而已）
         try:
             if self._web_client and event.get("ts"):
                 await self._web_client.reactions_add(
@@ -179,7 +181,7 @@ class SlackChannel(BaseChannel):
         except Exception as e:
             logger.debug("Slack reactions_add failed: {}", e)
 
-        # Thread-scoped session key for channel/group messages
+        # 使用基于短线索(Thread)上下文划分机制作为会话 Session key 在群聊和群通信频道去识别用户，否则采用默认通用方式
         session_key = f"slack:{chat_id}:{thread_ts}" if thread_ts and channel_type != "im" else None
 
         try:
@@ -237,7 +239,7 @@ class SlackChannel(BaseChannel):
 
     @classmethod
     def _to_mrkdwn(cls, text: str) -> str:
-        """Convert Markdown to Slack mrkdwn, including tables."""
+        """把基础常规文本结构的 Markdown 排版要素给向包含表 Table 等各种额外细节的专属定置化 Slack mrkdwn 文本体制转换映射。"""
         if not text:
             return ""
         text = cls._TABLE_RE.sub(cls._convert_table, text)
@@ -245,7 +247,7 @@ class SlackChannel(BaseChannel):
 
     @classmethod
     def _fixup_mrkdwn(cls, text: str) -> str:
-        """Fix markdown artifacts that slackify_markdown misses."""
+        """在原有基础上补救处理好来自于 slackify_markdown 第三方接口库通常总会疏忽并遗忘遗留过滤的种种标记排版的显示弊病或乱写形式。"""
         code_blocks: list[str] = []
 
         def _save_code(m: re.Match) -> str:
@@ -264,7 +266,7 @@ class SlackChannel(BaseChannel):
 
     @staticmethod
     def _convert_table(match: re.Match) -> str:
-        """Convert a Markdown table to a Slack-readable list."""
+        """完成具体某一个独立的 Markdown 标准构建的数据列表向当前频道要求的阅读友好 Slack 可靠读取展现的序列转化过程。"""
         lines = [ln.strip() for ln in match.group(0).strip().splitlines() if ln.strip()]
         if len(lines) < 2:
             return match.group(0)
@@ -278,4 +280,6 @@ class SlackChannel(BaseChannel):
             if parts:
                 rows.append(" · ".join(parts))
         return "\n".join(rows)
+
+# endregion
 

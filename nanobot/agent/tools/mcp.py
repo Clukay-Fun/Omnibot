@@ -1,4 +1,4 @@
-"""MCP client: connects to MCP servers and wraps their tools as native nanobot tools."""
+"""MCP 客户端：连接到 MCP 服务器并将其工具包装为本机的 nanobot 工具。"""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -11,8 +11,10 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 
 
+# region [MCP 工具包装器]
+
 class MCPToolWrapper(Tool):
-    """Wraps a single MCP server tool as a nanobot Tool."""
+    """将单个 MCP 服务器工具包装为 nanobot 工具。"""
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session
@@ -53,10 +55,14 @@ class MCPToolWrapper(Tool):
         return "\n".join(parts) or "(no output)"
 
 
+# endregion
+
+# region [连接核心逻辑]
+
 async def connect_mcp_servers(
     mcp_servers: dict, registry: ToolRegistry, stack: AsyncExitStack
 ) -> None:
-    """Connect to configured MCP servers and register their tools."""
+    """连接到已配置的 MCP 服务器并注册它们的工具。"""
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
 
@@ -69,8 +75,8 @@ async def connect_mcp_servers(
                 read, write = await stack.enter_async_context(stdio_client(params))
             elif cfg.url:
                 from mcp.client.streamable_http import streamable_http_client
-                # Always provide an explicit httpx client so MCP HTTP transport does not
-                # inherit httpx's default 5s timeout and preempt the higher-level tool timeout.
+                # 始终显式提供一个 httpx 客户端，这样 MCP HTTP 传输层就不会
+                # 继承 httpx 默认的 5 秒超时，从而干扰上层工具的超时机制。
                 http_client = await stack.enter_async_context(
                     httpx.AsyncClient(
                         headers=cfg.headers or None,
@@ -97,3 +103,5 @@ async def connect_mcp_servers(
             logger.info("MCP server '{}': connected, {} tools registered", name, len(tools.tools))
         except Exception as e:
             logger.error("MCP server '{}': failed to connect: {}", name, e)
+
+# endregion

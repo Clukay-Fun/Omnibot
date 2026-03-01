@@ -1,4 +1,4 @@
-"""Email channel implementation using IMAP polling + SMTP replies."""
+"""基于 IMAP 轮询和 SMTP 回复机制的 Email 频道实现。"""
 
 import asyncio
 import html
@@ -22,16 +22,18 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import EmailConfig
 
 
+# region [Email 频道核心类]
+
 class EmailChannel(BaseChannel):
     """
-    Email channel.
+    Email 频道。
 
-    Inbound:
-    - Poll IMAP mailbox for unread messages.
-    - Convert each message into an inbound event.
+    接收端 (Inbound):
+    - 轮询 IMAP 邮箱收集未读邮件。
+    - 将每封邮件转换为传入事件。
 
-    Outbound:
-    - Send responses via SMTP back to the sender address.
+    发送端 (Outbound):
+    - 借助 SMTP 协议将回复通过原发送地址发回。
     """
 
     name = "email"
@@ -55,11 +57,11 @@ class EmailChannel(BaseChannel):
         self.config: EmailConfig = config
         self._last_subject_by_chat: dict[str, str] = {}
         self._last_message_id_by_chat: dict[str, str] = {}
-        self._processed_uids: set[str] = set()  # Capped to prevent unbounded growth
+        self._processed_uids: set[str] = set()  # 为了防止无限增长而设有上限控制
         self._MAX_PROCESSED_UIDS = 100000
 
     async def start(self) -> None:
-        """Start polling IMAP for inbound emails."""
+        """启动 IMAP 轮询监听任务，处理传入的电子邮件。"""
         if not self.config.consent_granted:
             logger.warning(
                 "Email channel disabled: consent_granted is false. "
@@ -99,11 +101,11 @@ class EmailChannel(BaseChannel):
             await asyncio.sleep(poll_seconds)
 
     async def stop(self) -> None:
-        """Stop polling loop."""
+        """停止轮询循环。"""
         self._running = False
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send email via SMTP."""
+        """通过 SMTP 发送电子邮件。"""
         if not self.config.consent_granted:
             logger.warning("Skip email send: consent_granted is false")
             return
@@ -117,11 +119,11 @@ class EmailChannel(BaseChannel):
             logger.warning("Email channel missing recipient address")
             return
 
-        # Determine if this is a reply (recipient has sent us an email before)
+        # 判断这是否为一次回复操作（之前目标收件人向我们发送过邮件）
         is_reply = to_addr in self._last_subject_by_chat
         force_send = bool((msg.metadata or {}).get("force_send"))
 
-        # autoReplyEnabled only controls automatic replies, not proactive sends
+        # autoReplyEnabled 仅对自动回复的限制生效，并不限制主动发送
         if is_reply and not self.config.auto_reply_enabled and not force_send:
             logger.info("Skip automatic email reply to {}: auto_reply_enabled is false", to_addr)
             return
@@ -189,7 +191,7 @@ class EmailChannel(BaseChannel):
             smtp.send_message(msg)
 
     def _fetch_new_messages(self) -> list[dict[str, Any]]:
-        """Poll IMAP and return parsed unread messages."""
+        """执行 IMAP 轮询并返回所有初步解析过的未读邮件队列。"""
         return self._fetch_messages(
             search_criteria=("UNSEEN",),
             mark_seen=self.config.mark_seen,
@@ -204,9 +206,9 @@ class EmailChannel(BaseChannel):
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """
-        Fetch messages in [start_date, end_date) by IMAP date search.
+        通过 IMAP 的日期搜索条件抓取在 [start_date, end_date) 区间内的邮件。
 
-        This is used for historical summarization tasks (e.g. "yesterday").
+        常用于针对历史阶段的大致总结归纳任务（例如查询 "昨天" 的邮件）。
         """
         if end_date <= start_date:
             return []
@@ -230,7 +232,7 @@ class EmailChannel(BaseChannel):
         dedupe: bool,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Fetch messages by arbitrary IMAP search criteria."""
+        """依托任意指定的 IMAP 搜索标准抓取邮件序列。"""
         messages: list[dict[str, Any]] = []
         mailbox = self.config.imap_mailbox or "INBOX"
 
@@ -306,9 +308,9 @@ class EmailChannel(BaseChannel):
 
                 if dedupe and uid:
                     self._processed_uids.add(uid)
-                    # mark_seen is the primary dedup; this set is a safety net
+                    # mark_seen 才是基础排重条件; 这里的处理仅为额外的安全缓冲网
                     if len(self._processed_uids) > self._MAX_PROCESSED_UIDS:
-                        # Evict a random half to cap memory; mark_seen is the primary dedup
+                        # 随机淘汰抛弃一半数据以管控内存; 虽然 mark_seen 通常是主处理机制
                         self._processed_uids = set(list(self._processed_uids)[len(self._processed_uids) // 2:])
 
                 if mark_seen:
@@ -323,7 +325,7 @@ class EmailChannel(BaseChannel):
 
     @classmethod
     def _format_imap_date(cls, value: date) -> str:
-        """Format date for IMAP search (always English month abbreviations)."""
+        """将对象格式化为合乎 IMAP 检索标准的短格式时间（固定为全英文的月份缩写）。"""
         month = cls._IMAP_MONTHS[value.month - 1]
         return f"{value.day:02d}-{month}-{value.year}"
 
@@ -355,7 +357,7 @@ class EmailChannel(BaseChannel):
 
     @classmethod
     def _extract_text_body(cls, msg: Any) -> str:
-        """Best-effort extraction of readable body text."""
+        """尽最大的努力去抽取出拥有可读性的正文文本主体内容。"""
         if msg.is_multipart():
             plain_parts: list[str] = []
             html_parts: list[str] = []
@@ -406,3 +408,5 @@ class EmailChannel(BaseChannel):
         if subject.lower().startswith("re:"):
             return subject
         return f"{prefix}{subject}"
+
+# endregion

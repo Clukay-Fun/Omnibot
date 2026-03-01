@@ -1,4 +1,4 @@
-"""Channel manager for coordinating chat channels."""
+"""协调各个聊天频道的 Channel Manager 组件。"""
 
 from __future__ import annotations
 
@@ -13,14 +13,16 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
 
 
+# region [频道管理器]
+
 class ChannelManager:
     """
-    Manages chat channels and coordinates message routing.
+    管理聊天频道并负责消息路由的协调。
     
-    Responsibilities:
-    - Initialize enabled channels (Telegram, WhatsApp, etc.)
-    - Start/stop channels
-    - Route outbound messages
+    职责:
+    - 初始化已启用的频道（如 Telegram、WhatsApp 等）
+    - 启动/停止频道
+    - 路由向外发送的消息
     """
     
     def __init__(self, config: Config, bus: MessageBus):
@@ -150,14 +152,14 @@ class ChannelManager:
                 logger.warning("Matrix channel not available: {}", e)
     
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
-        """Start a channel and log any exceptions."""
+        """启动频道并记录可能出现的异常。"""
         try:
             await channel.start()
         except Exception as e:
             logger.error("Failed to start channel {}: {}", name, e)
 
     async def start_all(self) -> None:
-        """Start all channels and the outbound dispatcher."""
+        """启动所有频道及外发消息调度器。"""
         if not self.channels:
             logger.warning("No channels enabled")
             return
@@ -175,7 +177,7 @@ class ChannelManager:
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def stop_all(self) -> None:
-        """Stop all channels and the dispatcher."""
+        """停止所有频道及调度器。"""
         logger.info("Stopping all channels...")
         
         # Stop dispatcher
@@ -195,7 +197,7 @@ class ChannelManager:
                 logger.error("Error stopping {}: {}", name, e)
     
     async def _dispatch_outbound(self) -> None:
-        """Dispatch outbound messages to the appropriate channel."""
+        """将向外发送的消息调度给适当的频道。"""
         logger.info("Outbound dispatcher started")
         
         while True:
@@ -226,11 +228,11 @@ class ChannelManager:
                 break
     
     def get_channel(self, name: str) -> BaseChannel | None:
-        """Get a channel by name."""
+        """通过名称获取指定频道。"""
         return self.channels.get(name)
     
     def get_status(self) -> dict[str, Any]:
-        """Get status of all channels."""
+        """获取所有频道的状态。"""
         return {
             name: {
                 "enabled": True,
@@ -241,5 +243,7 @@ class ChannelManager:
     
     @property
     def enabled_channels(self) -> list[str]:
-        """Get list of enabled channel names."""
+        """获取已启用的频道名称列表。"""
         return list(self.channels.keys())
+
+# endregion

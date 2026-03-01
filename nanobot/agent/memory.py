@@ -1,4 +1,4 @@
-"""Memory system for persistent agent memory."""
+"""用于持久化智能体记忆的记忆系统。"""
 
 from __future__ import annotations
 
@@ -15,24 +15,25 @@ if TYPE_CHECKING:
     from nanobot.session.manager import Session
 
 
+# region [工具模式定义]
+
 _SAVE_MEMORY_TOOL = [
     {
         "type": "function",
         "function": {
             "name": "save_memory",
-            "description": "Save the memory consolidation result to persistent storage.",
+            "description": "将记忆整合结果保存到持久化存储中。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "history_entry": {
                         "type": "string",
-                        "description": "A paragraph (2-5 sentences) summarizing key events/decisions/topics. "
-                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
+                        "description": "概述关键事件/决定/主题的一段文字（2-5 句话）。"
+                        "以 [YYYY-MM-DD HH:MM] 开头。包含有助于 grep 搜索的详细信息。",
                     },
                     "memory_update": {
                         "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "description": "完整的、更新后的 Markdown 格式长期记忆。包括所有现有的事实以及新事实。如果没有新内容则原样返回。",
                     },
                 },
                 "required": ["history_entry", "memory_update"],
@@ -42,8 +43,13 @@ _SAVE_MEMORY_TOOL = [
 ]
 
 
+# endregion
+
+# region [记忆存储核心类]
+
+
 class MemoryStore:
-    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log)."""
+    """双层记忆：MEMORY.md（长期事实）+ HISTORY.md（可 grep 搜索的日志）。"""
 
     def __init__(self, workspace: Path):
         self.memory_dir = ensure_dir(workspace / "memory")
@@ -75,9 +81,9 @@ class MemoryStore:
         archive_all: bool = False,
         memory_window: int = 50,
     ) -> bool:
-        """Consolidate old messages into MEMORY.md + HISTORY.md via LLM tool call.
+        """通过大语言模型（LLM）工具调用，将旧消息整合到 MEMORY.md + HISTORY.md 中。
 
-        Returns True on success (including no-op), False on failure.
+        成功时返回 True（包括无操作），失败时返回 False。
         """
         if archive_all:
             old_messages = session.messages
@@ -113,7 +119,7 @@ class MemoryStore:
         try:
             response = await provider.chat(
                 messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+                    {"role": "system", "content": "你是一个记忆整合智能体（memory consolidation agent）。请调用 save_memory 工具来处理和整合对话。"},
                     {"role": "user", "content": prompt},
                 ],
                 tools=_SAVE_MEMORY_TOOL,
@@ -125,7 +131,7 @@ class MemoryStore:
                 return False
 
             args = response.tool_calls[0].arguments
-            # Some providers return arguments as a JSON string instead of dict
+            # 某些模型供应商会将参数作为 JSON 字符串而非字典返回
             if isinstance(args, str):
                 args = json.loads(args)
             if not isinstance(args, dict):
@@ -148,3 +154,5 @@ class MemoryStore:
         except Exception:
             logger.exception("Memory consolidation failed")
             return False
+
+    # endregion

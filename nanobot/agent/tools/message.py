@@ -1,4 +1,4 @@
-"""Message tool for sending messages to users."""
+"""用于向用户发送消息的消息工具。"""
 
 from typing import Any, Awaitable, Callable
 
@@ -6,8 +6,10 @@ from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
 
 
+# region [消息发送工具]
+
 class MessageTool(Tool):
-    """Tool to send messages to users on chat channels."""
+    """向聊天频道上的用户发送消息的工具。"""
 
     def __init__(
         self,
@@ -23,17 +25,17 @@ class MessageTool(Tool):
         self._sent_in_turn: bool = False
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """Set the current message context."""
+        """设置当前的消息上下文。"""
         self._default_channel = channel
         self._default_chat_id = chat_id
         self._default_message_id = message_id
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
-        """Set the callback for sending messages."""
+        """设置发送消息的回调函数。"""
         self._send_callback = callback
 
     def start_turn(self) -> None:
-        """Reset per-turn send tracking."""
+        """重置每一轮的发送跟踪状态。"""
         self._sent_in_turn = False
 
     @property
@@ -42,7 +44,7 @@ class MessageTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Send a message to the user. Use this when you want to communicate something."
+        return "向用户发送一条消息。当你需要交流某些内容时使用它。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -51,20 +53,20 @@ class MessageTool(Tool):
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The message content to send"
+                    "description": "要发送的消息内容"
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Optional: target channel (telegram, discord, etc.)"
+                    "description": "可选：目标频道（telegram、discord 等）"
                 },
                 "chat_id": {
                     "type": "string",
-                    "description": "Optional: target chat/user ID"
+                    "description": "可选：目标聊天室/用户 ID"
                 },
                 "media": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional: list of file paths to attach (images, audio, documents)"
+                    "description": "可选：需要附加的文件路径列表（图片、音频、文档）"
                 }
             },
             "required": ["content"]
@@ -107,3 +109,5 @@ class MessageTool(Tool):
             return f"Message sent to {channel}:{chat_id}{media_info}"
         except Exception as e:
             return f"Error sending message: {str(e)}"
+
+# endregion

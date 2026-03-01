@@ -1,4 +1,4 @@
-"""File system tools: read, write, edit."""
+"""文件系统工具：读取、写入、编辑。"""
 
 import difflib
 from pathlib import Path
@@ -7,8 +7,10 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
+# region [路径限制与解析]
+
 def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction."""
+    """根据工作区（如果是相对路径）解析路径，并实施目录限制检查。"""
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
@@ -21,8 +23,12 @@ def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | 
     return resolved
 
 
+# endregion
+
+# region [文件读取工具]
+
 class ReadFileTool(Tool):
-    """Tool to read file contents."""
+    """读取文件内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -65,8 +71,12 @@ class ReadFileTool(Tool):
             return f"Error reading file: {str(e)}"
 
 
+# endregion
+
+# region [文件写入工具]
+
 class WriteFileTool(Tool):
-    """Tool to write content to a file."""
+    """向文件写入内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -109,8 +119,12 @@ class WriteFileTool(Tool):
             return f"Error writing file: {str(e)}"
 
 
+# endregion
+
+# region [文件编辑工具]
+
 class EditFileTool(Tool):
-    """Tool to edit a file by replacing text."""
+    """通过替换文本来编辑文件的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -156,7 +170,7 @@ class EditFileTool(Tool):
             if old_text not in content:
                 return self._not_found_message(old_text, content, path)
 
-            # Count occurrences
+            # 计算出现次数
             count = content.count(old_text)
             if count > 1:
                 return f"Warning: old_text appears {count} times. Please provide more context to make it unique."
@@ -172,7 +186,7 @@ class EditFileTool(Tool):
 
     @staticmethod
     def _not_found_message(old_text: str, content: str, path: str) -> str:
-        """Build a helpful error when old_text is not found."""
+        """当未找到 old_text 时构建有用的错误提示。"""
         lines = content.splitlines(keepends=True)
         old_lines = old_text.splitlines(keepends=True)
         window = len(old_lines)
@@ -193,8 +207,12 @@ class EditFileTool(Tool):
         return f"Error: old_text not found in {path}. No similar text found. Verify the file content."
 
 
+# endregion
+
+# region [目录列出工具]
+
 class ListDirTool(Tool):
-    """Tool to list directory contents."""
+    """列出目录内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -242,3 +260,5 @@ class ListDirTool(Tool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error listing directory: {str(e)}"
+
+# endregion
