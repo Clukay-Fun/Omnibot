@@ -33,6 +33,8 @@ try:
         Emoji,
         GetFileRequest,
         GetMessageResourceRequest,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         P2ImMessageReceiveV1,
         UpdateMessageRequest,
         UpdateMessageRequestBody,
@@ -55,6 +57,8 @@ except ImportError:
     Emoji = None
     UpdateMessageRequest = None
     UpdateMessageRequestBody = None
+    PatchMessageRequest = None
+    PatchMessageRequestBody = None
     Card = None
     IdConvertCardRequest = None
     IdConvertCardRequestBody = None
@@ -736,30 +740,65 @@ class FeishuChannel(BaseChannel):
             logger.error("Error sending Feishu {} message: {}", msg_type, e)
             return False, None
 
-    def _update_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
-        """更新既有 Feishu 消息内容。"""
+    def _update_message_put_sync(self, message_id: str, content: str, msg_type: str | None) -> bool:
+        """通过 im.v1.message.update (PUT) 更新消息。"""
         if not UpdateMessageRequest or not UpdateMessageRequestBody:
             return False
         try:
+            body_builder = UpdateMessageRequestBody.builder().content(content)
+            if msg_type:
+                body_builder = body_builder.msg_type(msg_type)
             request = UpdateMessageRequest.builder() \
                 .message_id(message_id) \
-                .request_body(
-                    UpdateMessageRequestBody.builder()
-                    .msg_type(msg_type)
-                    .content(content)
-                    .build()
-                ).build()
+                .request_body(body_builder.build()) \
+                .build()
             response = self._client.im.v1.message.update(request)
             if not response.success():
                 logger.warning(
-                    "Failed to update Feishu {} message {}: code={}, msg={}",
-                    msg_type, message_id, response.code, response.msg,
+                    "Failed to update Feishu message {} via PUT: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
                 )
                 return False
             return True
         except Exception as e:
-            logger.warning("Error updating Feishu {} message {}: {}", msg_type, message_id, e)
+            logger.warning("Error updating Feishu message {} via PUT: {}", message_id, e)
             return False
+
+    def _update_message_patch_sync(self, message_id: str, content: str) -> bool:
+        """通过 im.v1.message.patch 作为兜底更新消息。"""
+        if not PatchMessageRequest or not PatchMessageRequestBody:
+            return False
+        try:
+            request = PatchMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(PatchMessageRequestBody.builder().content(content).build()) \
+                .build()
+            response = self._client.im.v1.message.patch(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to update Feishu message {} via PATCH: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Error updating Feishu message {} via PATCH: {}", message_id, e)
+            return False
+
+    def _update_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
+        """更新既有 Feishu 消息内容，包含多级降级。"""
+        # 1) 优先按规范携带 msg_type 调用 PUT
+        if self._update_message_put_sync(message_id, content, msg_type):
+            return True
+        # 2) 部分场景下 PUT + msg_type 会被拒绝，重试不带 msg_type
+        if self._update_message_put_sync(message_id, content, None):
+            return True
+        # 3) 最后退化到 PATCH
+        return self._update_message_patch_sync(message_id, content)
 
     def _convert_message_id_to_card_id_sync(self, message_id: str) -> str | None:
         """将消息 ID 转换为 CardKit card_id。"""
@@ -863,6 +902,33 @@ class FeishuChannel(BaseChannel):
         for source_id in stale_keys:
             self._stream_states.pop(source_id, None)
 
+    async def _try_enable_cardkit_for_state(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        state: _FeishuStreamState,
+    ) -> None:
+        """尝试为当前状态绑定 CardKit card_id 并开启 streaming_mode。"""
+        if not state.cardkit_enabled:
+            return
+
+        card_id = await loop.run_in_executor(None, self._convert_message_id_to_card_id_sync, state.bot_message_id)
+        if not card_id:
+            state.cardkit_enabled = False
+            return
+
+        state.card_id = card_id
+        enabled = await loop.run_in_executor(
+            None,
+            self._enable_cardkit_streaming_sync,
+            card_id,
+            state.stream_uuid,
+            1,
+        )
+        if enabled:
+            state.sequence = 1
+        else:
+            state.cardkit_enabled = False
+
     async def _create_stream_state(
         self,
         loop: asyncio.AbstractEventLoop,
@@ -893,23 +959,7 @@ class FeishuChannel(BaseChannel):
             updated_at=now,
         )
 
-        if state.cardkit_enabled:
-            card_id = await loop.run_in_executor(None, self._convert_message_id_to_card_id_sync, bot_message_id)
-            if card_id:
-                state.card_id = card_id
-                enabled = await loop.run_in_executor(
-                    None,
-                    self._enable_cardkit_streaming_sync,
-                    card_id,
-                    state.stream_uuid,
-                    1,
-                )
-                if enabled:
-                    state.sequence = 1
-                else:
-                    state.cardkit_enabled = False
-            else:
-                state.cardkit_enabled = False
+        await self._try_enable_cardkit_for_state(loop, state)
 
         self._stream_states[source_message_id] = state
         return state
@@ -956,7 +1006,7 @@ class FeishuChannel(BaseChannel):
     ) -> bool:
         """发送/更新飞书流式单卡内容；返回是否已处理。"""
         metadata = msg.metadata or {}
-        source_message_id = metadata.get("message_id")
+        source_message_id = metadata.get("message_id") or metadata.get("source_message_id")
         if not source_message_id:
             return False
 
@@ -991,14 +1041,24 @@ class FeishuChannel(BaseChannel):
                 state.updated_at = now
                 return True
 
-            await loop.run_in_executor(
+            ok, fallback_message_id = await loop.run_in_executor(
                 None,
-                self._send_message_sync,
+                self._send_message_detail_sync,
                 receive_id_type,
                 msg.chat_id,
                 "interactive",
                 card_payload,
             )
+            if ok and fallback_message_id:
+                now = time.monotonic()
+                state.bot_message_id = fallback_message_id
+                state.updated_at = now
+                state.last_update_at = now
+                state.stream_uuid = uuid4().hex
+                state.sequence = 0
+                state.card_id = None
+                state.cardkit_enabled = bool(self.config.stream_card_use_cardkit)
+                await self._try_enable_cardkit_for_state(loop, state)
             return True
 
         state = self._stream_states.pop(source_message_id, None)

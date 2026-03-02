@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -23,9 +25,17 @@ class _FakeResponse:
 
 
 class _FakeMessageAPI:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        update_handler: Callable[[Any], _FakeResponse] | None = None,
+        patch_handler: Callable[[Any], _FakeResponse] | None = None,
+    ) -> None:
         self.create_calls: list[object] = []
         self.update_calls: list[object] = []
+        self.patch_calls: list[object] = []
+        self._update_handler = update_handler
+        self._patch_handler = patch_handler
 
     def create(self, request: object) -> _FakeResponse:
         self.create_calls.append(request)
@@ -34,6 +44,14 @@ class _FakeMessageAPI:
 
     def update(self, request: object) -> _FakeResponse:
         self.update_calls.append(request)
+        if self._update_handler:
+            return self._update_handler(request)
+        return _FakeResponse(True)
+
+    def patch(self, request: object) -> _FakeResponse:
+        self.patch_calls.append(request)
+        if self._patch_handler:
+            return self._patch_handler(request)
         return _FakeResponse(True)
 
 
@@ -44,7 +62,7 @@ class _FakeCardAPI:
         self.update_calls: list[object] = []
         self._update_success = update_success
 
-    def id_convert(self, request: object) -> _FakeResponse:
+    def id_convert(self, request: Any) -> _FakeResponse:
         self.id_convert_calls.append(request)
         message_id = request.request_body.message_id
         return _FakeResponse(True, SimpleNamespace(card_id=f"card-{message_id}"))
@@ -63,7 +81,9 @@ def _build_channel(
     card_update_success: bool = True,
     ttl_seconds: int = 600,
     min_update_ms: int = 0,
-) -> tuple[FeishuChannel, object]:
+    update_handler: Callable[[Any], _FakeResponse] | None = None,
+    patch_handler: Callable[[Any], _FakeResponse] | None = None,
+) -> tuple[FeishuChannel, SimpleNamespace]:
     config = FeishuConfig(
         stream_card_enabled=True,
         stream_card_use_cardkit=True,
@@ -71,7 +91,7 @@ def _build_channel(
         stream_card_ttl_seconds=ttl_seconds,
     )
     channel = FeishuChannel(config=config, bus=MessageBus())
-    message_api = _FakeMessageAPI()
+    message_api = _FakeMessageAPI(update_handler=update_handler, patch_handler=patch_handler)
     card_api = _FakeCardAPI(update_success=card_update_success)
     client = SimpleNamespace(
         im=SimpleNamespace(v1=SimpleNamespace(message=message_api)),
@@ -216,8 +236,11 @@ async def test_streaming_progress_updates_are_throttled() -> None:
 
 @pytest.mark.asyncio
 async def test_streaming_final_fallback_creates_new_card_when_updates_fail() -> None:
-    channel, client = _build_channel(card_update_success=False)
-    client.im.v1.message.update = lambda request: _FakeResponse(False)
+    channel, client = _build_channel(
+        card_update_success=False,
+        update_handler=lambda request: _FakeResponse(False),
+        patch_handler=lambda request: _FakeResponse(False),
+    )
 
     await channel.send(
         OutboundMessage(
@@ -237,3 +260,76 @@ async def test_streaming_final_fallback_creates_new_card_when_updates_fail() -> 
     )
 
     assert len(client.im.v1.message.create_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_streaming_retries_put_without_msg_type_before_patch() -> None:
+    def update_handler(request: Any) -> _FakeResponse:
+        msg_type = getattr(getattr(request, "request_body", None), "msg_type", None)
+        return _FakeResponse(msg_type is None)
+
+    channel, client = _build_channel(card_update_success=False, update_handler=update_handler)
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="step-1",
+            metadata={"_progress": True, "message_id": "src-put-retry"},
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="step-2",
+            metadata={"_progress": True, "message_id": "src-put-retry"},
+        )
+    )
+
+    assert len(client.im.v1.message.create_calls) == 1
+    assert len(client.im.v1.message.update_calls) == 2
+    assert len(client.im.v1.message.patch_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_streaming_rebinds_state_after_progress_fallback_send() -> None:
+    def update_handler(request: Any) -> _FakeResponse:
+        return _FakeResponse(request.message_id != "bot-1")
+
+    def patch_handler(request: Any) -> _FakeResponse:
+        return _FakeResponse(request.message_id != "bot-1")
+
+    channel, client = _build_channel(
+        card_update_success=False,
+        update_handler=update_handler,
+        patch_handler=patch_handler,
+    )
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="step-1",
+            metadata={"_progress": True, "message_id": "src-rebind"},
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="step-2",
+            metadata={"_progress": True, "message_id": "src-rebind"},
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="step-3",
+            metadata={"_progress": True, "message_id": "src-rebind"},
+        )
+    )
+
+    assert len(client.im.v1.message.create_calls) == 2
+    assert any(call.message_id == "bot-2" for call in client.im.v1.message.update_calls)
