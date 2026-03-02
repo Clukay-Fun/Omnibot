@@ -43,6 +43,10 @@ class FeishuConfig(Base):
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
     react_emoji: str = "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
+    stream_card_enabled: bool = True  # Reuse single card for progress streaming
+    stream_card_use_cardkit: bool = True  # Prefer CardKit APIs for card update
+    stream_card_min_update_ms: int = 300  # Min interval between progress updates
+    stream_card_ttl_seconds: int = 600  # Stale stream state cleanup TTL
 
 
 class DingTalkConfig(Base):

@@ -5,7 +5,9 @@ import json
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +33,46 @@ try:
         GetFileRequest,
         GetMessageResourceRequest,
         P2ImMessageReceiveV1,
+        UpdateMessageRequest,
+        UpdateMessageRequestBody,
+    )
+    from lark_oapi.api.cardkit.v1 import (
+        Card,
+        IdConvertCardRequest,
+        IdConvertCardRequestBody,
+        SettingsCardRequest,
+        SettingsCardRequestBody,
+        UpdateCardRequest,
+        UpdateCardRequestBody,
     )
     FEISHU_AVAILABLE = True
+    CARDKIT_AVAILABLE = True
 except ImportError:
     FEISHU_AVAILABLE = False
+    CARDKIT_AVAILABLE = False
     lark = None
     Emoji = None
+    UpdateMessageRequest = None
+    UpdateMessageRequestBody = None
+    Card = None
+    IdConvertCardRequest = None
+    IdConvertCardRequestBody = None
+    SettingsCardRequest = None
+    SettingsCardRequestBody = None
+    UpdateCardRequest = None
+    UpdateCardRequestBody = None
+
+
+@dataclass
+class _FeishuStreamState:
+    source_message_id: str
+    bot_message_id: str
+    stream_uuid: str
+    sequence: int = 0
+    card_id: str | None = None
+    cardkit_enabled: bool = True
+    last_update_at: float = 0.0
+    updated_at: float = 0.0
 
 # 消息类型展示映射
 MSG_TYPE_MAP = {
@@ -270,6 +306,7 @@ class FeishuChannel(BaseChannel):
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # 用于排重的缓存队列
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stream_states: dict[str, _FeishuStreamState] = {}
     
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -663,6 +700,17 @@ class FeishuChannel(BaseChannel):
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
         """串行化执行单一消息（文本/图像/文件/交互卡片内容）的端点发送动作。"""
+        ok, _ = self._send_message_detail_sync(receive_id_type, receive_id, msg_type, content)
+        return ok
+
+    def _send_message_detail_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> tuple[bool, str | None]:
+        """发送消息并在成功时返回 message_id。"""
         try:
             request = CreateMessageRequest.builder() \
                 .receive_id_type(receive_id_type) \
@@ -679,12 +727,140 @@ class FeishuChannel(BaseChannel):
                     "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
                     msg_type, response.code, response.msg, response.get_log_id()
                 )
-                return False
+                return False, None
             logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-            return True
+            message_id = getattr(getattr(response, "data", None), "message_id", None)
+            return True, message_id
         except Exception as e:
             logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            return False, None
+
+    def _update_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
+        """更新既有 Feishu 消息内容。"""
+        if not UpdateMessageRequest or not UpdateMessageRequestBody:
             return False
+        try:
+            request = UpdateMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(
+                    UpdateMessageRequestBody.builder()
+                    .msg_type(msg_type)
+                    .content(content)
+                    .build()
+                ).build()
+            response = self._client.im.v1.message.update(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to update Feishu {} message {}: code={}, msg={}",
+                    msg_type, message_id, response.code, response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Error updating Feishu {} message {}: {}", msg_type, message_id, e)
+            return False
+
+    def _convert_message_id_to_card_id_sync(self, message_id: str) -> str | None:
+        """将消息 ID 转换为 CardKit card_id。"""
+        if not CARDKIT_AVAILABLE or not IdConvertCardRequest or not IdConvertCardRequestBody:
+            return None
+        try:
+            request = IdConvertCardRequest.builder().request_body(
+                IdConvertCardRequestBody.builder().message_id(message_id).build()
+            ).build()
+            response = self._client.cardkit.v1.card.id_convert(request)
+            if not response.success():
+                logger.warning(
+                    "CardKit id_convert failed for message {}: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return None
+            return getattr(getattr(response, "data", None), "card_id", None)
+        except Exception as e:
+            logger.warning("CardKit id_convert error for message {}: {}", message_id, e)
+            return None
+
+    def _enable_cardkit_streaming_sync(self, card_id: str, stream_uuid: str, sequence: int) -> bool:
+        """启用 CardKit 卡片 streaming_mode。"""
+        if not CARDKIT_AVAILABLE or not SettingsCardRequest or not SettingsCardRequestBody:
+            return False
+        try:
+            settings_payload = json.dumps({"config": {"streaming_mode": True}}, ensure_ascii=False)
+            request = SettingsCardRequest.builder() \
+                .card_id(card_id) \
+                .request_body(
+                    SettingsCardRequestBody.builder()
+                    .settings(settings_payload)
+                    .uuid(stream_uuid)
+                    .sequence(sequence)
+                    .build()
+                ).build()
+            response = self._client.cardkit.v1.card.settings(request)
+            if not response.success():
+                logger.warning(
+                    "CardKit settings failed for card {}: code={}, msg={}",
+                    card_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("CardKit settings error for card {}: {}", card_id, e)
+            return False
+
+    def _update_cardkit_card_sync(
+        self,
+        card_id: str,
+        card_payload: str,
+        stream_uuid: str,
+        sequence: int,
+    ) -> bool:
+        """使用 CardKit 更新整张卡片数据。"""
+        if not CARDKIT_AVAILABLE or not UpdateCardRequest or not UpdateCardRequestBody or not Card:
+            return False
+        try:
+            request = UpdateCardRequest.builder() \
+                .card_id(card_id) \
+                .request_body(
+                    UpdateCardRequestBody.builder()
+                    .card(Card.builder().type("raw_json").data(card_payload).build())
+                    .uuid(stream_uuid)
+                    .sequence(sequence)
+                    .build()
+                ).build()
+            response = self._client.cardkit.v1.card.update(request)
+            if not response.success():
+                logger.warning(
+                    "CardKit update failed for card {}: code={}, msg={}",
+                    card_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("CardKit update error for card {}: {}", card_id, e)
+            return False
+
+    def _build_interactive_card_content(self, content: str) -> str:
+        """将文本内容转换为交互卡片 content JSON。"""
+        card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(content)}
+        return json.dumps(card, ensure_ascii=False)
+
+    def _cleanup_stream_states(self) -> None:
+        """清理超时未更新的流式卡片状态。"""
+        ttl_seconds = max(1, int(self.config.stream_card_ttl_seconds))
+        now = time.monotonic()
+        stale_keys = [
+            source_id
+            for source_id, state in self._stream_states.items()
+            if now - state.updated_at > ttl_seconds
+        ]
+        for source_id in stale_keys:
+            self._stream_states.pop(source_id, None)
 
     async def send(self, msg: OutboundMessage) -> None:
         """通过 Feishu 频道将包装好的标准消息实例发送出去，如有包含媒体文件（图像/音频）也可以一并发送。"""
@@ -718,11 +894,13 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                # 使用交互卡片格式（原生支持 Markdown 渲染）
-                card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
                 await loop.run_in_executor(
-                    None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),
+                    None,
+                    self._send_message_sync,
+                    receive_id_type,
+                    msg.chat_id,
+                    "interactive",
+                    self._build_interactive_card_content(msg.content),
                 )
 
         except Exception as e:
