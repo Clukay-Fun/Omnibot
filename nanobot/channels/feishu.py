@@ -10,6 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
@@ -862,6 +863,162 @@ class FeishuChannel(BaseChannel):
         for source_id in stale_keys:
             self._stream_states.pop(source_id, None)
 
+    async def _create_stream_state(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        source_message_id: str,
+        receive_id_type: str,
+        chat_id: str,
+        card_payload: str,
+    ) -> _FeishuStreamState | None:
+        """创建首条流式卡片消息并初始化状态。"""
+        ok, bot_message_id = await loop.run_in_executor(
+            None,
+            self._send_message_detail_sync,
+            receive_id_type,
+            chat_id,
+            "interactive",
+            card_payload,
+        )
+        if not ok or not bot_message_id:
+            return None
+
+        now = time.monotonic()
+        state = _FeishuStreamState(
+            source_message_id=source_message_id,
+            bot_message_id=bot_message_id,
+            stream_uuid=uuid4().hex,
+            cardkit_enabled=bool(self.config.stream_card_use_cardkit),
+            last_update_at=now,
+            updated_at=now,
+        )
+
+        if state.cardkit_enabled:
+            card_id = await loop.run_in_executor(None, self._convert_message_id_to_card_id_sync, bot_message_id)
+            if card_id:
+                state.card_id = card_id
+                enabled = await loop.run_in_executor(
+                    None,
+                    self._enable_cardkit_streaming_sync,
+                    card_id,
+                    state.stream_uuid,
+                    1,
+                )
+                if enabled:
+                    state.sequence = 1
+                else:
+                    state.cardkit_enabled = False
+            else:
+                state.cardkit_enabled = False
+
+        self._stream_states[source_message_id] = state
+        return state
+
+    async def _update_stream_card(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        state: _FeishuStreamState,
+        card_payload: str,
+    ) -> bool:
+        """更新单个流式卡片，优先 CardKit，失败退化到 IM message.update。"""
+        if state.cardkit_enabled and state.card_id:
+            next_sequence = state.sequence + 1
+            cardkit_ok = await loop.run_in_executor(
+                None,
+                self._update_cardkit_card_sync,
+                state.card_id,
+                card_payload,
+                state.stream_uuid,
+                next_sequence,
+            )
+            if cardkit_ok:
+                state.sequence = next_sequence
+                return True
+            state.cardkit_enabled = False
+
+        im_ok = await loop.run_in_executor(
+            None,
+            self._update_message_sync,
+            state.bot_message_id,
+            "interactive",
+            card_payload,
+        )
+        if im_ok:
+            state.sequence += 1
+            return True
+        return False
+
+    async def _send_streaming_content(
+        self,
+        msg: OutboundMessage,
+        receive_id_type: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """发送/更新飞书流式单卡内容；返回是否已处理。"""
+        metadata = msg.metadata or {}
+        source_message_id = metadata.get("message_id")
+        if not source_message_id:
+            return False
+
+        self._cleanup_stream_states()
+        is_progress = bool(metadata.get("_progress"))
+        card_payload = self._build_interactive_card_content(msg.content)
+
+        if is_progress:
+            state = self._stream_states.get(source_message_id)
+            if state is None:
+                return (
+                    await self._create_stream_state(
+                        loop,
+                        source_message_id,
+                        receive_id_type,
+                        msg.chat_id,
+                        card_payload,
+                    )
+                    is not None
+                )
+
+            min_update_seconds = max(0, int(self.config.stream_card_min_update_ms)) / 1000
+            now = time.monotonic()
+            state.updated_at = now
+            if min_update_seconds > 0 and (now - state.last_update_at) < min_update_seconds:
+                return True
+
+            updated = await self._update_stream_card(loop, state, card_payload)
+            if updated:
+                now = time.monotonic()
+                state.last_update_at = now
+                state.updated_at = now
+                return True
+
+            await loop.run_in_executor(
+                None,
+                self._send_message_sync,
+                receive_id_type,
+                msg.chat_id,
+                "interactive",
+                card_payload,
+            )
+            return True
+
+        state = self._stream_states.pop(source_message_id, None)
+        if state is None:
+            return False
+
+        updated = await self._update_stream_card(loop, state, card_payload)
+        if updated:
+            return True
+
+        await loop.run_in_executor(
+            None,
+            self._send_message_sync,
+            receive_id_type,
+            msg.chat_id,
+            "interactive",
+            card_payload,
+        )
+        return True
+
     async def send(self, msg: OutboundMessage) -> None:
         """通过 Feishu 频道将包装好的标准消息实例发送出去，如有包含媒体文件（图像/音频）也可以一并发送。"""
         if not self._client:
@@ -894,14 +1051,19 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                await loop.run_in_executor(
-                    None,
-                    self._send_message_sync,
-                    receive_id_type,
-                    msg.chat_id,
-                    "interactive",
-                    self._build_interactive_card_content(msg.content),
-                )
+                handled = False
+                if self.config.stream_card_enabled:
+                    handled = await self._send_streaming_content(msg, receive_id_type, loop)
+
+                if not handled:
+                    await loop.run_in_executor(
+                        None,
+                        self._send_message_sync,
+                        receive_id_type,
+                        msg.chat_id,
+                        "interactive",
+                        self._build_interactive_card_content(msg.content),
+                    )
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
