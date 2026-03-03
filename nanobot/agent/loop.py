@@ -7,9 +7,10 @@ import json
 import re
 import time
 import weakref
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -25,7 +26,7 @@ from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
@@ -51,6 +52,8 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    _ANSWER_PLACEHOLDER_DELAY_MS = 250
+    _ANSWER_PLACEHOLDER_TEXT = "🐈努力回答中..."
 
     # region [初始化与配置]
 
@@ -123,6 +126,13 @@ class AgentLoop:
         self._processing_lock = asyncio.Lock()
         self._template_router = TemplateRouter()
         self._template_renderer = TemplateRenderer(self.response_template_config.max_list_items)
+        self._stream_warmup_chars = 24
+        self._stream_warmup_ms = 300
+        if self.channels_config:
+            feishu_cfg = getattr(self.channels_config, "feishu", None)
+            if feishu_cfg is not None:
+                self._stream_warmup_chars = max(1, int(getattr(feishu_cfg, "stream_answer_warmup_chars", 24)))
+                self._stream_warmup_ms = max(0, int(getattr(feishu_cfg, "stream_answer_warmup_ms", 300)))
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -203,6 +213,67 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _extract_think(text: str | None) -> str | None:
+        """提取内容中的 <think>…</think> 文本。"""
+        if not text:
+            return None
+        matches = re.findall(r"<think>([\s\S]*?)</think>", text)
+        if not matches:
+            return None
+        joined = "\n".join(m.strip() for m in matches if m and m.strip())
+        return joined or None
+
+    @staticmethod
+    def _extract_thinking_blocks_text(thinking_blocks: list[dict] | None) -> str | None:
+        """从 thinking_blocks 中提取可读文本。"""
+        if not thinking_blocks:
+            return None
+
+        parts: list[str] = []
+
+        def _collect(value: Any) -> None:
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    parts.append(text)
+                return
+            if isinstance(value, dict):
+                for key in ("text", "content", "thinking", "summary"):
+                    if key in value:
+                        _collect(value[key])
+                return
+            if isinstance(value, list):
+                for item in value:
+                    _collect(item)
+
+        _collect(thinking_blocks)
+        if not parts:
+            return None
+        return "\n".join(parts)
+
+    @staticmethod
+    def _short_text(value: Any, limit: int = 240) -> str:
+        """将任意值压缩为单行短文本。"""
+        if value is None:
+            return ""
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        compact = " ".join(text.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[:limit].rstrip() + "..."
+
+    def _build_thinking_detail(self, response: LLMResponse) -> str | None:
+        """优先提取可展示的思考细节。"""
+        for candidate in (
+            self._extract_think(response.content),
+            self._extract_thinking_blocks_text(response.thinking_blocks),
+            (response.reasoning_content or "").strip() or None,
+        ):
+            if candidate:
+                return candidate
+        return None
+
     def _render_with_template(
         self,
         *,
@@ -252,37 +323,91 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
     ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
-        from nanobot.agent.response_templates import build_quick_progress
-
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
         timings: list[dict[str, int | str | bool]] = []
+        thinking_done_sent = False
+        thinking_detail_emitted = False
+
+        async def _emit_progress(content: str, **kwargs: Any) -> None:
+            if not on_progress:
+                return
+            try:
+                await on_progress(content, **kwargs)
+            except TypeError:
+                await on_progress(content)
 
         while iteration < self.max_iterations:
             iteration += 1
+            streamed_content = ""
+            published_stream = False
+            stream_started_at = time.monotonic()
+            announced_tool_names: set[str] = set()
+            answer_placeholder_task: asyncio.Task[None] | None = None
+
+            async def _on_delta(delta: str) -> None:
+                nonlocal streamed_content, published_stream
+                if not on_progress or not delta:
+                    return
+                streamed_content += delta
+
+                if not published_stream and iteration == 1:
+                    elapsed_ms = int((time.monotonic() - stream_started_at) * 1000)
+                    if len(streamed_content) < self._stream_warmup_chars or elapsed_ms < self._stream_warmup_ms:
+                        return
+
+                await _emit_progress(streamed_content, phase="answer")
+                published_stream = True
+
+            async def _on_tool_call_name(tool_name: str) -> None:
+                nonlocal thinking_detail_emitted
+                name = (tool_name or "").strip()
+                if not on_progress or not name or name in announced_tool_names:
+                    return
+                announced_tool_names.add(name)
+                await _emit_progress(f"准备调用 {name}", phase="thinking")
+                thinking_detail_emitted = True
+
+            async def _emit_answer_placeholder() -> None:
+                if not on_progress:
+                    return
+                await asyncio.sleep(self._ANSWER_PLACEHOLDER_DELAY_MS / 1000)
+                if published_stream or thinking_detail_emitted:
+                    return
+                await _emit_progress(self._ANSWER_PLACEHOLDER_TEXT, phase="answer")
+
+            if on_progress and iteration == 1:
+                answer_placeholder_task = asyncio.create_task(_emit_answer_placeholder())
 
             llm_started = time.perf_counter()
-            response = await self.provider.chat(
-                messages=messages,
-                tools=self.tools.get_definitions(),
-                model=self.model,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                reasoning_effort=self.reasoning_effort,
-            )
+            try:
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=self.tools.get_definitions(),
+                    model=self.model,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    reasoning_effort=self.reasoning_effort,
+                    on_delta=_on_delta if on_progress else None,
+                    on_tool_call_name=_on_tool_call_name if on_progress else None,
+                )
+            finally:
+                if answer_placeholder_task and not answer_placeholder_task.done():
+                    answer_placeholder_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await answer_placeholder_task
             timings.append({
                 "stage": f"llm:{iteration}",
                 "duration_ms": int((time.perf_counter() - llm_started) * 1000),
             })
 
             if response.has_tool_calls:
-                if on_progress:
-                    clean = self._strip_think(response.content)
-                    if clean:
-                        await on_progress(clean)
-                    await on_progress(self._tool_hint(response.tool_calls), tool_hint=True)
+                thinking_detail = self._build_thinking_detail(response)
+                if thinking_detail:
+                    await _emit_progress(thinking_detail, phase="thinking")
+                    thinking_detail_emitted = True
 
                 tool_call_dicts = [
                     {
@@ -305,6 +430,12 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    args_preview = self._short_text(tool_call.arguments, limit=160)
+                    if args_preview:
+                        await _emit_progress(f"调用 {tool_call.name}，参数：{args_preview}", phase="thinking")
+                        thinking_detail_emitted = True
+                    else:
+                        await _emit_progress(f"正在调用 {tool_call.name} ...", phase="thinking")
                     tool_started = time.perf_counter()
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
@@ -312,13 +443,18 @@ class AgentLoop:
                         "stage": f"tool:{tool_call.name}",
                         "duration_ms": tool_duration_ms,
                     })
+                    result_preview = self._short_text(result, limit=200)
+                    if result_preview:
+                        await _emit_progress(f"{tool_call.name} 结果：{result_preview}", phase="thinking")
+                        thinking_detail_emitted = True
+                    else:
+                        await _emit_progress(f"{tool_call.name} 完成，继续思考中...", phase="thinking")
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
-                    if on_progress and self.response_template_config.enabled:
-                        quick_progress = build_quick_progress(tool_call.name, result)
-                        if quick_progress:
-                            await on_progress(quick_progress)
+
+                await _emit_progress("已获取数据，正在整理答案...", phase="thinking")
+                thinking_detail_emitted = True
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -327,6 +463,14 @@ class AgentLoop:
                     logger.error("LLM returned error: {}", (clean or "")[:200])
                     final_content = clean or "Sorry, I encountered an error calling the AI model."
                     break
+
+                if on_progress and not thinking_done_sent and thinking_detail_emitted:
+                    await _emit_progress("思考完成", phase="thinking_done")
+                    thinking_done_sent = True
+
+                if on_progress and clean and not published_stream:
+                    await _emit_progress(clean, phase="answer")
+
                 messages = self.context.add_assistant_message(
                     messages, clean, reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
@@ -418,6 +562,127 @@ class AgentLoop:
 
     # region [消息处理核心逻辑]
 
+    @staticmethod
+    def _build_commands_help_text() -> str:
+        """返回命令总览（简短说明）。"""
+        return (
+            "🐈 可用指令\n\n"
+            "- /help 或 /commands：显示全部指令说明\n"
+            "- /new：归档并清空当前会话\n"
+            "- /stop：停止当前会话中的进行中任务\n"
+            "- /session：查看会话子命令\n"
+            "- /session new [标题]：创建飞书话题会话\n"
+            "- /session list：列出当前聊天下的会话\n"
+            "- /session del [id|main]：删除指定会话"
+        )
+
+    def _list_chat_session_keys(self, channel: str, chat_id: str, current_key: str) -> list[str]:
+        """列出当前聊天上下文下的会话 keys（主会话 + 线程会话）。"""
+        base_key = f"{channel}:{chat_id}"
+        keys = {base_key, current_key}
+        for item in self.sessions.list_sessions():
+            key = str(item.get("key") or "")
+            if key == base_key or key.startswith(f"{base_key}:"):
+                keys.add(key)
+        return sorted(keys, key=lambda x: (0 if x == base_key else 1, x))
+
+    def _handle_session_command(self, msg: InboundMessage, current_key: str, raw_cmd: str) -> OutboundMessage:
+        """处理 /session 子命令。"""
+        parts = raw_cmd.split()
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        base_key = f"{msg.channel}:{msg.chat_id}"
+
+        if sub in ("", "help"):
+            content = (
+                "会话子命令：\n\n"
+                "- /session new [标题]：创建飞书话题会话（缺省为 会话-YYYYMMDD-HHMM）\n"
+                "- /session list：列出当前聊天下的会话\n"
+                "- /session del [id|main]：删除当前/指定会话"
+            )
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
+
+        if sub == "new":
+            if msg.channel != "feishu":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="/session new 目前仅支持飞书频道。",
+                )
+
+            prefix = "/session new"
+            title = raw_cmd[len(prefix):].strip() if raw_cmd.lower().startswith(prefix) else ""
+            if not title:
+                title = datetime.now().strftime("会话-%Y%m%d-%H%M")
+
+            meta = dict(msg.metadata or {})
+            meta["_start_topic_session"] = True
+            meta["_reply_in_thread"] = True
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=title,
+                metadata=meta,
+            )
+
+        session_keys = self._list_chat_session_keys(msg.channel, msg.chat_id, current_key)
+
+        if sub == "list":
+            lines = ["当前聊天会话列表："]
+            for idx, key in enumerate(session_keys, start=1):
+                if key == base_key:
+                    label = "main（主会话）"
+                else:
+                    label = key.removeprefix(f"{base_key}:")
+                marker = "（当前）" if key == current_key else ""
+                lines.append(f"{idx}. {label}{marker}")
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="\n".join(lines),
+            )
+
+        if sub in ("del", "delete", "rm"):
+            target_arg = parts[2] if len(parts) > 2 else "current"
+            target_key = current_key
+
+            if target_arg == "main":
+                target_key = base_key
+            elif target_arg.isdigit():
+                idx = int(target_arg)
+                if idx < 1 or idx > len(session_keys):
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=msg.chat_id,
+                        content=f"会话序号无效：{target_arg}",
+                    )
+                target_key = session_keys[idx - 1]
+            elif target_arg != "current":
+                if target_arg.startswith(f"{msg.channel}:"):
+                    target_key = target_arg
+                elif target_arg.startswith(f"{base_key}:"):
+                    target_key = target_arg
+                else:
+                    target_key = f"{base_key}:{target_arg}"
+
+            deleted = self.sessions.delete(target_key)
+            if not deleted:
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=f"未找到会话：{target_key}",
+                )
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=f"已删除会话：{target_key}",
+            )
+
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=f"未知会话子命令：{sub}。请输入 /session 查看帮助。",
+        )
+
     async def _process_message(
         self,
         msg: InboundMessage,
@@ -461,7 +726,16 @@ class AgentLoop:
         session = self.sessions.get_or_create(key)
 
         # 斜杠命令 (Slash commands)
-        cmd = msg.content.strip().lower()
+        raw_cmd = msg.content.strip()
+        cmd = raw_cmd.lower()
+        if cmd in {"/help", "/commands"}:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_commands_help_text(),
+            )
+        if cmd.startswith("/session"):
+            return self._handle_session_command(msg, key, raw_cmd)
         if cmd == "/new":
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             self._consolidating.add(session.key)
@@ -490,9 +764,6 @@ class AgentLoop:
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
-        if cmd == "/help":
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
-                                  content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
@@ -525,16 +796,16 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
-        async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
+        async def _bus_progress(content: str, *, phase: str = "answer") -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
-            meta["_tool_hint"] = tool_hint
+            meta["_progress_phase"] = phase
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
         turn_started = time.perf_counter()
-        final_content, _, all_msgs, timings = await self._run_agent_loop(
+        final_content, tools_used, all_msgs, timings = await self._run_agent_loop(
             initial_messages, on_progress=on_progress or _bus_progress,
         )
 
@@ -561,9 +832,12 @@ class AgentLoop:
 
         preview = final_text[:120] + "..." if len(final_text) > 120 else final_text
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
+        meta = dict(msg.metadata or {})
+        meta["_tool_turn"] = bool(tools_used)
+
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_text,
-            metadata=msg.metadata or {},
+            metadata=meta,
         )
 
     # endregion
