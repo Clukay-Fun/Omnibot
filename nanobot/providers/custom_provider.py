@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import json_repair
 from openai import AsyncOpenAI
@@ -19,7 +19,9 @@ class CustomProvider(LLMProvider):
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                    model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
-                   reasoning_effort: str | None = None) -> LLMResponse:
+                   reasoning_effort: str | None = None,
+                   on_delta: Callable[[str], Awaitable[None]] | None = None,
+                   on_tool_call_name: Callable[[str], Awaitable[None]] | None = None) -> LLMResponse:
         kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "messages": self._sanitize_empty_content(messages),
@@ -52,4 +54,3 @@ class CustomProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return self.default_model
-

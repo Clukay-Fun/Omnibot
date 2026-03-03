@@ -5,9 +5,12 @@ import json
 import os
 import re
 import threading
+import time
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from loguru import logger
 
@@ -27,16 +30,76 @@ try:
         CreateMessageRequestBody,
         CreateMessageReactionRequest,
         CreateMessageReactionRequestBody,
+        DeleteMessageRequest,
         Emoji,
         GetFileRequest,
         GetMessageResourceRequest,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         P2ImMessageReceiveV1,
+        ReplyMessageRequest,
+        ReplyMessageRequestBody,
+        UpdateMessageRequest,
+        UpdateMessageRequestBody,
+    )
+    from lark_oapi.api.cardkit.v1 import (
+        ContentCardElementRequest,
+        ContentCardElementRequestBody,
+        IdConvertCardRequest,
+        IdConvertCardRequestBody,
     )
     FEISHU_AVAILABLE = True
+    CARDKIT_AVAILABLE = True
 except ImportError:
     FEISHU_AVAILABLE = False
+    CARDKIT_AVAILABLE = False
     lark = None
     Emoji = None
+    UpdateMessageRequest = None
+    UpdateMessageRequestBody = None
+    PatchMessageRequest = None
+    PatchMessageRequestBody = None
+    DeleteMessageRequest = None
+    ReplyMessageRequest = None
+    ReplyMessageRequestBody = None
+    ContentCardElementRequest = None
+    ContentCardElementRequestBody = None
+    IdConvertCardRequest = None
+    IdConvertCardRequestBody = None
+
+
+@dataclass
+class _FeishuStreamState:
+    source_message_id: str
+    bot_message_id: str
+    stream_uuid: str
+    sequence: int = 0
+    card_id: str | None = None
+    thinking_text: str = ""
+    answer_text: str = ""
+    thinking_collapsed: bool = False
+    reply_in_thread: bool = False
+    last_update_at: float = 0.0
+    updated_at: float = 0.0
+
+
+_STREAM_THINKING_ELEMENT_ID = "thinking_text"
+_STREAM_ANSWER_ELEMENT_ID = "answer_text"
+_THINKING_COLLAPSED_SUMMARY = "思考完成"
+_THINKING_GENERIC_LINES = {
+    "思考中",
+    "思考完成",
+    "正在思考中...",
+    "正在分析问题与检索数据...",
+    "已获取数据，正在整理答案...",
+}
+_THINKING_GENERIC_BASE = {
+    "思考中",
+    "思考完成",
+    "正在思考中",
+    "正在分析问题与检索数据",
+    "已获取数据，正在整理答案",
+}
 
 # 消息类型展示映射
 MSG_TYPE_MAP = {
@@ -269,7 +332,9 @@ class FeishuChannel(BaseChannel):
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # 用于排重的缓存队列
+        self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._stream_states: dict[str, _FeishuStreamState] = {}
     
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -291,13 +356,23 @@ class FeishuChannel(BaseChannel):
             .log_level(lark.LogLevel.INFO) \
             .build()
         
-        # Create event handler (only register message receive, ignore other events)
-        event_handler = lark.EventDispatcherHandler.builder(
+        # Create event handler (message receive + optional access-event no-op)
+        event_handler_builder = lark.EventDispatcherHandler.builder(
             self.config.encrypt_key or "",
             self.config.verification_token or "",
         ).register_p2_im_message_receive_v1(
             self._on_message_sync
-        ).build()
+        )
+
+        register_chat_entered = getattr(
+            event_handler_builder,
+            "register_p2_im_chat_access_event_bot_p2p_chat_entered_v1",
+            None,
+        )
+        if callable(register_chat_entered):
+            event_handler_builder = register_chat_entered(lambda _event: None)
+
+        event_handler = event_handler_builder.build()
         
         # Create WebSocket client for long connection
         self._ws_client = lark.ws.Client(
@@ -663,6 +738,17 @@ class FeishuChannel(BaseChannel):
 
     def _send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
         """串行化执行单一消息（文本/图像/文件/交互卡片内容）的端点发送动作。"""
+        ok, _ = self._send_message_detail_sync(receive_id_type, receive_id, msg_type, content)
+        return ok
+
+    def _send_message_detail_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+    ) -> tuple[bool, str | None]:
+        """发送消息并在成功时返回 message_id。"""
         try:
             request = CreateMessageRequest.builder() \
                 .receive_id_type(receive_id_type) \
@@ -679,12 +765,751 @@ class FeishuChannel(BaseChannel):
                     "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
                     msg_type, response.code, response.msg, response.get_log_id()
                 )
-                return False
+                return False, None
             logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
-            return True
+            message_id = getattr(getattr(response, "data", None), "message_id", None)
+            return True, message_id
         except Exception as e:
             logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            return False, None
+
+    @staticmethod
+    def _is_thread_context(metadata: dict[str, Any] | None) -> bool:
+        """判断元数据是否来自话题上下文。"""
+        if not metadata:
             return False
+        if metadata.get("thread_id"):
+            return True
+        root_id = metadata.get("root_id")
+        parent_id = metadata.get("parent_id")
+        message_id = metadata.get("message_id")
+        return bool(root_id and parent_id and message_id and parent_id != message_id)
+
+    def _resolve_reply_in_thread(self, metadata: dict[str, Any] | None) -> bool:
+        """按优先级解析 reply_in_thread。"""
+        if metadata is None:
+            return bool(self.config.reply_in_thread)
+        if "_reply_in_thread" in metadata:
+            return bool(metadata.get("_reply_in_thread"))
+        if metadata.get("_start_topic_session"):
+            return True
+        if self._is_thread_context(metadata):
+            return True
+        return bool(self.config.reply_in_thread)
+
+    def _reply_message_detail_sync(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: str,
+        reply_in_thread: bool,
+    ) -> tuple[bool, str | None]:
+        """回复指定消息并在成功时返回 message_id。"""
+        if not ReplyMessageRequest or not ReplyMessageRequestBody:
+            return False, None
+
+        try:
+            request = ReplyMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type(msg_type)
+                    .content(content)
+                    .reply_in_thread(reply_in_thread)
+                    .build()
+                ).build()
+            response = self._client.im.v1.message.reply(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to reply Feishu {} message {}: code={}, msg={}",
+                    msg_type,
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False, None
+            replied_id = getattr(getattr(response, "data", None), "message_id", None)
+            return True, replied_id
+        except Exception as e:
+            logger.warning("Error replying Feishu {} message {}: {}", msg_type, message_id, e)
+            return False, None
+
+    def _delete_message_sync(self, message_id: str) -> bool:
+        """删除既有 Feishu 消息。"""
+        if not DeleteMessageRequest:
+            return False
+        try:
+            request = DeleteMessageRequest.builder().message_id(message_id).build()
+            response = self._client.im.v1.message.delete(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to delete Feishu message {}: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Error deleting Feishu message {}: {}", message_id, e)
+            return False
+
+    def _update_message_put_sync(self, message_id: str, content: str, msg_type: str | None) -> bool:
+        """通过 im.v1.message.update (PUT) 更新消息。"""
+        if not UpdateMessageRequest or not UpdateMessageRequestBody:
+            return False
+        try:
+            body_builder = UpdateMessageRequestBody.builder().content(content)
+            if msg_type:
+                body_builder = body_builder.msg_type(msg_type)
+            request = UpdateMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(body_builder.build()) \
+                .build()
+            response = self._client.im.v1.message.update(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to update Feishu message {} via PUT: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Error updating Feishu message {} via PUT: {}", message_id, e)
+            return False
+
+    def _update_message_patch_sync(self, message_id: str, content: str) -> bool:
+        """通过 im.v1.message.patch 作为兜底更新消息。"""
+        if not PatchMessageRequest or not PatchMessageRequestBody:
+            return False
+        try:
+            request = PatchMessageRequest.builder() \
+                .message_id(message_id) \
+                .request_body(PatchMessageRequestBody.builder().content(content).build()) \
+                .build()
+            response = self._client.im.v1.message.patch(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to update Feishu message {} via PATCH: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("Error updating Feishu message {} via PATCH: {}", message_id, e)
+            return False
+
+    def _update_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
+        """更新既有 Feishu 消息内容，包含多级降级。"""
+        if msg_type == "interactive":
+            if self._update_message_patch_sync(message_id, content):
+                return True
+            return self._update_message_put_sync(message_id, content, None)
+
+        # 1) 优先按规范携带 msg_type 调用 PUT
+        if self._update_message_put_sync(message_id, content, msg_type):
+            return True
+        # 2) 部分场景下 PUT + msg_type 会被拒绝，重试不带 msg_type
+        if self._update_message_put_sync(message_id, content, None):
+            return True
+        # 3) 最后退化到 PATCH
+        return self._update_message_patch_sync(message_id, content)
+
+    def _convert_message_id_to_card_id_sync(self, message_id: str) -> str | None:
+        """将消息 ID 转换为 CardKit card_id。"""
+        if not CARDKIT_AVAILABLE or not IdConvertCardRequest or not IdConvertCardRequestBody:
+            return None
+        try:
+            request = IdConvertCardRequest.builder().request_body(
+                IdConvertCardRequestBody.builder().message_id(message_id).build()
+            ).build()
+            response = self._client.cardkit.v1.card.id_convert(request)
+            if not response.success():
+                logger.warning(
+                    "CardKit id_convert failed for message {}: code={}, msg={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return None
+            return getattr(getattr(response, "data", None), "card_id", None)
+        except Exception as e:
+            logger.warning("CardKit id_convert error for message {}: {}", message_id, e)
+            return None
+
+    def _build_interactive_card_content(self, content: str) -> str:
+        """将文本内容转换为交互卡片 content JSON。"""
+        normalized = self._normalize_markdown_headings(content)
+        card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(normalized)}
+        return json.dumps(card, ensure_ascii=False)
+
+    @staticmethod
+    def _normalize_markdown_headings(content: str) -> str:
+        """将 Markdown 标题行降级为普通文本粗体，避免频道端大标题样式。"""
+        if not content:
+            return content
+
+        lines = content.splitlines()
+        out: list[str] = []
+        in_code_block = False
+
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                out.append(line)
+                continue
+
+            if not in_code_block:
+                candidate = stripped
+                if candidate.startswith("#"):
+                    text = candidate.lstrip("#").strip()
+                    out.append(f"**{text}**" if text else "")
+                    continue
+
+            out.append(line)
+
+        return "\n".join(out)
+
+    def _format_thinking_block(self, thinking_text: str, collapsed: bool) -> str:
+        """格式化思考区文本（浅色/小块风格）。"""
+        summary = _THINKING_COLLAPSED_SUMMARY if collapsed else "思考中"
+        if not self.config.stream_card_show_thinking:
+            return ""
+
+        detail_lines = self._extract_specific_thinking_lines(thinking_text)
+        if not detail_lines:
+            return ""
+
+        prefix = "> "
+        quoted_lines = [f"{prefix}{summary}"]
+        for line in detail_lines:
+            quoted_lines.append(f"{prefix}{line}")
+        return "\n".join(quoted_lines)
+
+    @staticmethod
+    def _normalize_thinking_line(line: str) -> str:
+        """规范化思考文本单行内容，用于占位词判定。"""
+        normalized = line.strip()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"[。\.！!？?…]+$", "", normalized)
+        return normalized.strip()
+
+    @classmethod
+    def _is_generic_thinking_line(cls, line: str) -> bool:
+        """判断是否为通用占位思考文本。"""
+        normalized = cls._normalize_thinking_line(line)
+        if not normalized:
+            return True
+        return normalized in _THINKING_GENERIC_BASE or normalized in _THINKING_GENERIC_LINES
+
+    @classmethod
+    def _extract_specific_thinking_lines(cls, thinking_text: str | None) -> list[str]:
+        """提取可展示的具体思考行，自动过滤占位词。"""
+        if not thinking_text:
+            return []
+        lines = [line.strip() for line in str(thinking_text).splitlines() if line.strip()]
+        return [line for line in lines if not cls._is_generic_thinking_line(line)]
+
+    @classmethod
+    def _has_specific_thinking_content(cls, thinking_text: str | None) -> bool:
+        """判断是否包含可展示的具体思考内容。"""
+        return bool(cls._extract_specific_thinking_lines(thinking_text))
+
+    def _build_streaming_body_elements(self, thinking_content: str, answer_content: str) -> list[dict[str, Any]]:
+        """构造流式卡片 body elements。"""
+        if not self.config.stream_card_show_thinking or not thinking_content.strip():
+            return [
+                {
+                    "tag": "markdown",
+                    "element_id": _STREAM_ANSWER_ELEMENT_ID,
+                    "content": answer_content,
+                }
+            ]
+
+        return [
+            {
+                "tag": "markdown",
+                "element_id": _STREAM_THINKING_ELEMENT_ID,
+                "content": thinking_content,
+            },
+            {
+                "tag": "markdown",
+                "content": "---",
+            },
+            {
+                "tag": "markdown",
+                "element_id": _STREAM_ANSWER_ELEMENT_ID,
+                "content": answer_content,
+            },
+        ]
+
+    def _build_streaming_initial_card_content(self, thinking_text: str, answer_text: str, collapsed: bool) -> str:
+        """构造首条 Card 2.0 流式卡片。"""
+        thinking_content = self._format_thinking_block(thinking_text, collapsed)
+        answer_content = self._normalize_markdown_headings(answer_text)
+        print_frequency_ms = max(30, int(self.config.stream_card_print_frequency_ms))
+        print_step = max(1, int(self.config.stream_card_print_step))
+        print_strategy = self.config.stream_card_print_strategy
+        summary_text = self.config.stream_card_summary
+        header_title = (self.config.stream_card_header_title or "").strip()
+        card = {
+            "schema": "2.0",
+            "config": {
+                "streaming_mode": True,
+                "summary": {"content": summary_text},
+                "streaming_config": {
+                    "print_frequency_ms": {
+                        "default": print_frequency_ms,
+                        "android": print_frequency_ms,
+                        "ios": print_frequency_ms,
+                        "pc": print_frequency_ms,
+                    },
+                    "print_step": {
+                        "default": print_step,
+                        "android": print_step,
+                        "ios": print_step,
+                        "pc": print_step,
+                    },
+                    "print_strategy": print_strategy,
+                },
+            },
+            "body": {
+                "elements": self._build_streaming_body_elements(thinking_content, answer_content),
+            },
+        }
+        if header_title:
+            card["header"] = {"title": {"content": header_title, "tag": "plain_text"}}
+        return json.dumps(card, ensure_ascii=False)
+
+    def _build_streaming_update_card_content(self, thinking_text: str, answer_text: str, collapsed: bool) -> str:
+        """构造 Card 2.0 更新内容（用于消息级回退更新）。"""
+        thinking_content = self._format_thinking_block(thinking_text, collapsed)
+        answer_content = self._normalize_markdown_headings(answer_text)
+        card = {
+            "schema": "2.0",
+            "body": {
+                "elements": self._build_streaming_body_elements(thinking_content, answer_content),
+            },
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    def _update_cardkit_element_text_sync(
+        self,
+        card_id: str,
+        element_id: str,
+        content: str,
+        request_uuid: str,
+        sequence: int,
+    ) -> bool:
+        """通过 CardKit 组件 content 接口更新文本元素，触发打字机效果。"""
+        if not CARDKIT_AVAILABLE or not ContentCardElementRequest or not ContentCardElementRequestBody:
+            return False
+
+        card_element_resource = getattr(getattr(self._client.cardkit.v1, "card_element", None), "content", None)
+        if card_element_resource is None:
+            return False
+
+        try:
+            request = ContentCardElementRequest.builder() \
+                .card_id(card_id) \
+                .element_id(element_id) \
+                .request_body(
+                    ContentCardElementRequestBody.builder()
+                    .content(content)
+                    .uuid(request_uuid)
+                    .sequence(sequence)
+                    .build()
+                ).build()
+            response = self._client.cardkit.v1.card_element.content(request)
+            if not response.success():
+                logger.warning(
+                    "CardKit content update failed for card {}: code={}, msg={}",
+                    card_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.warning("CardKit content update error for card {}: {}", card_id, e)
+            return False
+
+    def _cleanup_stream_states(self) -> None:
+        """清理超时未更新的流式卡片状态。"""
+        ttl_seconds = max(1, int(self.config.stream_card_ttl_seconds))
+        now = time.monotonic()
+        stale_keys = [
+            source_id
+            for source_id, state in self._stream_states.items()
+            if now - state.updated_at > ttl_seconds
+        ]
+        for source_id in stale_keys:
+            self._stream_states.pop(source_id, None)
+
+    async def _try_enable_cardkit_for_state(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        state: _FeishuStreamState,
+    ) -> None:
+        """尝试为当前状态绑定 CardKit card_id。"""
+
+        card_id = await loop.run_in_executor(None, self._convert_message_id_to_card_id_sync, state.bot_message_id)
+        if not card_id:
+            return
+
+        state.card_id = card_id
+
+    async def _create_stream_state(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        source_message_id: str,
+        receive_id_type: str,
+        chat_id: str,
+        thinking_text: str,
+        answer_text: str,
+        thinking_collapsed: bool,
+        reply_in_thread: bool,
+    ) -> _FeishuStreamState | None:
+        """创建首条流式卡片消息并初始化状态。"""
+        card_payload = self._build_streaming_initial_card_content(thinking_text, answer_text, thinking_collapsed)
+
+        ok = False
+        bot_message_id: str | None = None
+        if self.config.reply_to_message:
+            ok, bot_message_id = await loop.run_in_executor(
+                None,
+                self._reply_message_detail_sync,
+                source_message_id,
+                "interactive",
+                card_payload,
+                reply_in_thread,
+            )
+
+        if not ok:
+            ok, bot_message_id = await loop.run_in_executor(
+                None,
+                self._send_message_detail_sync,
+                receive_id_type,
+                chat_id,
+                "interactive",
+                card_payload,
+            )
+
+        if not ok or not bot_message_id:
+            return None
+
+        now = time.monotonic()
+        state = _FeishuStreamState(
+            source_message_id=source_message_id,
+            bot_message_id=bot_message_id,
+            stream_uuid=uuid4().hex,
+            thinking_text=thinking_text,
+            answer_text=answer_text,
+            thinking_collapsed=thinking_collapsed,
+            reply_in_thread=reply_in_thread,
+            last_update_at=now,
+            updated_at=now,
+        )
+
+        await self._try_enable_cardkit_for_state(loop, state)
+
+        self._stream_states[source_message_id] = state
+        return state
+
+    async def _update_stream_card(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        state: _FeishuStreamState,
+        *,
+        update_thinking: bool,
+        update_answer: bool,
+        allow_message_fallback: bool,
+    ) -> bool:
+        """更新单个流式卡片，优先 CardKit 2.0，失败退化到 IM message.update。"""
+        updates: list[tuple[str, str]] = []
+        if update_thinking:
+            updates.append((
+                _STREAM_THINKING_ELEMENT_ID,
+                self._format_thinking_block(state.thinking_text, state.thinking_collapsed),
+            ))
+        if update_answer:
+            updates.append((
+                _STREAM_ANSWER_ELEMENT_ID,
+                self._normalize_markdown_headings(state.answer_text),
+            ))
+
+        if not updates:
+            return True
+
+        if state.card_id:
+            cardkit_all_ok = True
+            for element_id, element_content in updates:
+                next_sequence = state.sequence + 1
+                content_ok = False
+                for _ in range(2):
+                    content_ok = await loop.run_in_executor(
+                        None,
+                        self._update_cardkit_element_text_sync,
+                        state.card_id,
+                        element_id,
+                        element_content,
+                        uuid4().hex,
+                        next_sequence,
+                    )
+                    if content_ok:
+                        break
+                if not content_ok:
+                    cardkit_all_ok = False
+                    break
+                state.sequence = next_sequence
+            if cardkit_all_ok:
+                return True
+
+        if allow_message_fallback:
+            card_payload = self._build_streaming_update_card_content(
+                state.thinking_text,
+                state.answer_text,
+                state.thinking_collapsed,
+            )
+            im_ok = await loop.run_in_executor(
+                None,
+                self._update_message_sync,
+                state.bot_message_id,
+                "interactive",
+                card_payload,
+            )
+            if im_ok:
+                state.sequence += 1
+                return True
+        return False
+
+    async def _send_streaming_content(
+        self,
+        msg: OutboundMessage,
+        receive_id_type: str,
+        loop: asyncio.AbstractEventLoop,
+    ) -> bool:
+        """发送/更新飞书流式单卡内容；返回是否已处理。"""
+        metadata = msg.metadata or {}
+        source_message_id = metadata.get("message_id") or metadata.get("source_message_id")
+        phase = str(metadata.get("_progress_phase") or "answer")
+        reply_in_thread = self._resolve_reply_in_thread(metadata)
+        show_thinking = bool(self.config.stream_card_show_thinking)
+        if not source_message_id:
+            return False
+
+        self._cleanup_stream_states()
+        is_progress = bool(metadata.get("_progress"))
+
+        if is_progress:
+            state = self._stream_states.get(source_message_id)
+            if state is None:
+                if not show_thinking and phase in {"thinking", "thinking_done"}:
+                    return True
+
+                initial_thinking = ""
+                initial_answer = ""
+                initial_collapsed = not show_thinking
+                if phase == "thinking":
+                    initial_thinking = (msg.content or "").strip()
+                    if not self._has_specific_thinking_content(initial_thinking):
+                        return True
+                elif phase == "thinking_done":
+                    return True
+                else:
+                    initial_answer = msg.content
+                    initial_collapsed = True
+
+                return (
+                    await self._create_stream_state(
+                        loop,
+                        source_message_id,
+                        receive_id_type,
+                        msg.chat_id,
+                        initial_thinking,
+                        initial_answer,
+                        initial_collapsed,
+                        reply_in_thread,
+                    )
+                    is not None
+                )
+
+            min_update_seconds = max(0, int(self.config.stream_card_min_update_ms)) / 1000
+            now = time.monotonic()
+            state.updated_at = now
+            if phase == "answer" and min_update_seconds > 0 and (now - state.last_update_at) < min_update_seconds:
+                return True
+
+            if not show_thinking and phase in {"thinking", "thinking_done"}:
+                return True
+
+            update_thinking = False
+            update_answer = False
+            if phase == "thinking":
+                thinking_text = (msg.content or "").strip()
+                incoming_lines = self._extract_specific_thinking_lines(thinking_text)
+                if not incoming_lines:
+                    return True
+
+                merged_lines = self._extract_specific_thinking_lines(state.thinking_text)
+                existing_lines = set(merged_lines)
+                for line in incoming_lines:
+                    if line not in existing_lines:
+                        merged_lines.append(line)
+                        existing_lines.add(line)
+
+                merged_thinking = "\n".join(merged_lines)
+                if state.thinking_collapsed or state.thinking_text != merged_thinking:
+                    state.thinking_text = merged_thinking
+                    state.thinking_collapsed = False
+                    update_thinking = True
+            elif phase == "thinking_done":
+                if self._has_specific_thinking_content(state.thinking_text) and not state.thinking_collapsed:
+                    state.thinking_collapsed = True
+                    update_thinking = True
+            else:
+                answer_text = msg.content
+                if (
+                    show_thinking
+                    and self._has_specific_thinking_content(state.thinking_text)
+                    and not state.thinking_collapsed
+                ):
+                    state.thinking_collapsed = True
+                    update_thinking = True
+                if state.answer_text != answer_text:
+                    state.answer_text = answer_text
+                    update_answer = True
+
+            updated = await self._update_stream_card(
+                loop,
+                state,
+                update_thinking=update_thinking,
+                update_answer=update_answer,
+                allow_message_fallback=False,
+            )
+            if updated:
+                now = time.monotonic()
+                state.last_update_at = now
+                state.updated_at = now
+                return True
+
+            fallback_payload = self._build_streaming_initial_card_content(
+                state.thinking_text,
+                state.answer_text,
+                state.thinking_collapsed,
+            )
+            old_bot_message_id = state.bot_message_id
+
+            ok, fallback_message_id = await loop.run_in_executor(
+                None,
+                self._reply_message_detail_sync,
+                state.source_message_id,
+                "interactive",
+                fallback_payload,
+                state.reply_in_thread,
+            )
+            if not ok:
+                ok, fallback_message_id = await loop.run_in_executor(
+                    None,
+                    self._send_message_detail_sync,
+                    receive_id_type,
+                    msg.chat_id,
+                    "interactive",
+                    fallback_payload,
+                )
+            if ok and fallback_message_id:
+                now = time.monotonic()
+                if old_bot_message_id and old_bot_message_id != fallback_message_id:
+                    await loop.run_in_executor(
+                        None,
+                        self._delete_message_sync,
+                        old_bot_message_id,
+                    )
+                state.bot_message_id = fallback_message_id
+                state.updated_at = now
+                state.last_update_at = now
+                state.stream_uuid = uuid4().hex
+                state.sequence = 0
+                state.card_id = None
+                await self._try_enable_cardkit_for_state(loop, state)
+            return True
+
+        state = self._stream_states.get(source_message_id)
+        if state is None:
+            return False
+
+        update_thinking = False
+        update_answer = False
+        if (
+            show_thinking
+            and self._has_specific_thinking_content(state.thinking_text)
+            and not state.thinking_collapsed
+        ):
+            state.thinking_collapsed = True
+            update_thinking = True
+        if state.answer_text != msg.content:
+            state.answer_text = msg.content
+            update_answer = True
+
+        updated = await self._update_stream_card(
+            loop,
+            state,
+            update_thinking=update_thinking,
+            update_answer=update_answer,
+            allow_message_fallback=True,
+        )
+        if updated:
+            now = time.monotonic()
+            state.last_update_at = now
+            state.updated_at = now
+            return True
+
+        fallback_payload = self._build_streaming_initial_card_content(
+            state.thinking_text,
+            state.answer_text,
+            state.thinking_collapsed,
+        )
+        old_bot_message_id = state.bot_message_id
+
+        ok, fallback_message_id = await loop.run_in_executor(
+            None,
+            self._reply_message_detail_sync,
+            state.source_message_id,
+            "interactive",
+            fallback_payload,
+            state.reply_in_thread,
+        )
+        if not ok:
+            ok, fallback_message_id = await loop.run_in_executor(
+                None,
+                self._send_message_detail_sync,
+                receive_id_type,
+                msg.chat_id,
+                "interactive",
+                fallback_payload,
+            )
+        if ok and fallback_message_id:
+            now = time.monotonic()
+            if old_bot_message_id and old_bot_message_id != fallback_message_id:
+                await loop.run_in_executor(
+                    None,
+                    self._delete_message_sync,
+                    old_bot_message_id,
+                )
+            state.bot_message_id = fallback_message_id
+            state.updated_at = now
+            state.last_update_at = now
+            state.stream_uuid = uuid4().hex
+            state.sequence = 0
+            state.card_id = None
+            await self._try_enable_cardkit_for_state(loop, state)
+        return True
 
     async def send(self, msg: OutboundMessage) -> None:
         """通过 Feishu 频道将包装好的标准消息实例发送出去，如有包含媒体文件（图像/音频）也可以一并发送。"""
@@ -718,16 +1543,40 @@ class FeishuChannel(BaseChannel):
                         )
 
             if msg.content and msg.content.strip():
-                # 使用交互卡片格式（原生支持 Markdown 渲染）
-                card = {"config": {"wide_screen_mode": True}, "elements": self._build_card_elements(msg.content)}
-                await loop.run_in_executor(
-                    None, self._send_message_sync,
-                    receive_id_type, msg.chat_id, "interactive", json.dumps(card, ensure_ascii=False),
-                )
+                handled = False
+                if self.config.stream_card_enabled:
+                    handled = await self._send_streaming_content(msg, receive_id_type, loop)
+
+                if not handled:
+                    fallback_payload = self._build_interactive_card_content(msg.content)
+                    replied = False
+                    metadata = msg.metadata or {}
+                    source_message_id = metadata.get("message_id")
+                    reply_in_thread = self._resolve_reply_in_thread(metadata)
+                    if self.config.reply_to_message and source_message_id:
+                        ok, _ = await loop.run_in_executor(
+                            None,
+                            self._reply_message_detail_sync,
+                            source_message_id,
+                            "interactive",
+                            fallback_payload,
+                            reply_in_thread,
+                        )
+                        replied = ok
+
+                    if not replied:
+                        await loop.run_in_executor(
+                            None,
+                            self._send_message_sync,
+                            receive_id_type,
+                            msg.chat_id,
+                            "interactive",
+                            fallback_payload,
+                        )
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
-    
+
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """
         处理传入消息的同步封装处理器（受 WebSocket 工作线程调用）。
@@ -762,8 +1611,9 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
-            # Add reaction
-            await self._add_reaction(message_id, self.config.react_emoji)
+            # Add reaction (optional)
+            if self.config.react_enabled:
+                await self._add_reaction(message_id, self.config.react_emoji)
 
             # Parse content
             content_parts = []
@@ -814,16 +1664,49 @@ class FeishuChannel(BaseChannel):
 
             # Forward to message bus
             reply_to = chat_id if chat_type == "group" else sender_id
+            if content:
+                now = time.monotonic()
+                fingerprint = f"{sender_id}:{reply_to}:{msg_type}:{content.strip()}"
+                last_seen = self._recent_message_fingerprints.get(fingerprint)
+                if last_seen is not None and (now - last_seen) < 3:
+                    logger.debug("Skip duplicate inbound Feishu message by fingerprint")
+                    return
+                self._recent_message_fingerprints[fingerprint] = now
+
+                while len(self._recent_message_fingerprints) > 1000:
+                    self._recent_message_fingerprints.popitem(last=False)
+
+                stale_before = now - 30
+                while self._recent_message_fingerprints:
+                    first_key = next(iter(self._recent_message_fingerprints))
+                    if self._recent_message_fingerprints[first_key] >= stale_before:
+                        break
+                    self._recent_message_fingerprints.popitem(last=False)
+
+            metadata = {
+                "message_id": message_id,
+                "chat_type": chat_type,
+                "msg_type": msg_type,
+            }
+            for key in ("root_id", "parent_id", "thread_id", "upper_message_id"):
+                value = getattr(message, key, None)
+                if value:
+                    metadata[key] = value
+
+            session_key = None
+            thread_id = metadata.get("thread_id")
+            if not thread_id and self._is_thread_context(metadata):
+                thread_id = metadata.get("root_id")
+            if chat_type == "group" and thread_id:
+                session_key = f"{self.name}:{reply_to}:{thread_id}"
+
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,
                 content=content,
                 media=media_paths,
-                metadata={
-                    "message_id": message_id,
-                    "chat_type": chat_type,
-                    "msg_type": msg_type,
-                }
+                metadata=metadata,
+                session_key=session_key,
             )
 
         except Exception as e:

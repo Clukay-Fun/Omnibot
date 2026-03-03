@@ -1,11 +1,10 @@
 """LiteLLM provider implementation for multi-provider support."""
 
-import json
 import json_repair
 import os
 import secrets
 import string
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import litellm
 from litellm import acompletion
@@ -179,6 +178,8 @@ class LiteLLMProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        on_delta: Callable[[str], Awaitable[None]] | None = None,
+        on_tool_call_name: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -232,8 +233,11 @@ class LiteLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        
+
         try:
+            if on_delta or on_tool_call_name:
+                stream = await acompletion(**{**kwargs, "stream": True})
+                return await self._parse_stream_response(stream, on_delta, on_tool_call_name)
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
@@ -242,6 +246,119 @@ class LiteLLMProvider(LLMProvider):
                 content=f"Error calling LLM: {str(e)}",
                 finish_reason="error",
             )
+
+    async def _parse_stream_response(
+        self,
+        stream: Any,
+        on_delta: Callable[[str], Awaitable[None]] | None,
+        on_tool_call_name: Callable[[str], Awaitable[None]] | None = None,
+    ) -> LLMResponse:
+        content_parts: list[str] = []
+        tool_call_buffers: dict[int, dict[str, Any]] = {}
+        announced_tool_indexes: set[int] = set()
+        finish_reason = "stop"
+        usage: dict[str, int] = {}
+        reasoning_content: str | None = None
+        thinking_blocks: list[dict] | None = None
+
+        async for chunk in stream:
+            choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
+            if choice is None:
+                continue
+            finish_reason = choice.finish_reason or finish_reason
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+
+            delta_content = getattr(delta, "content", None)
+            if isinstance(delta_content, str) and delta_content:
+                content_parts.append(delta_content)
+                if on_delta:
+                    await on_delta(delta_content)
+            elif isinstance(delta_content, list):
+                for block in delta_content:
+                    text = ""
+                    if isinstance(block, dict):
+                        text = str(block.get("text") or "")
+                    else:
+                        text = str(getattr(block, "text", "") or "")
+                    if text:
+                        content_parts.append(text)
+                        if on_delta:
+                            await on_delta(text)
+
+            delta_reasoning = getattr(delta, "reasoning_content", None)
+            if isinstance(delta_reasoning, str) and delta_reasoning:
+                reasoning_content = (reasoning_content or "") + delta_reasoning
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if isinstance(delta_tool_calls, list):
+                for tc in delta_tool_calls:
+                    index = int(getattr(tc, "index", 0) or 0)
+                    buf = tool_call_buffers.setdefault(index, {"id": None, "name": None, "arguments": ""})
+                    tc_id = getattr(tc, "id", None)
+                    if tc_id:
+                        buf["id"] = tc_id
+
+                    fn = getattr(tc, "function", None)
+                    if fn is None and isinstance(tc, dict):
+                        fn = tc.get("function")
+
+                    if isinstance(fn, dict):
+                        if fn.get("name"):
+                            buf["name"] = fn.get("name")
+                        if fn.get("arguments"):
+                            buf["arguments"] += str(fn.get("arguments"))
+                    elif fn is not None:
+                        fn_name = getattr(fn, "name", None)
+                        fn_args = getattr(fn, "arguments", None)
+                        if fn_name:
+                            buf["name"] = fn_name
+                        if fn_args:
+                            buf["arguments"] += str(fn_args)
+
+                    if (
+                        on_tool_call_name
+                        and index not in announced_tool_indexes
+                        and isinstance(buf.get("name"), str)
+                        and str(buf.get("name") or "").strip()
+                        and (buf.get("id") or str(buf.get("arguments") or "").strip())
+                    ):
+                        announced_tool_indexes.add(index)
+                        await on_tool_call_name(str(buf.get("name") or "").strip())
+
+            if getattr(chunk, "usage", None):
+                usage = {
+                    "prompt_tokens": getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                    "completion_tokens": getattr(chunk.usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(chunk.usage, "total_tokens", 0) or 0,
+                }
+
+            chunk_thinking = getattr(delta, "thinking_blocks", None)
+            if chunk_thinking:
+                thinking_blocks = chunk_thinking
+
+        tool_calls: list[ToolCallRequest] = []
+        for buf in tool_call_buffers.values():
+            raw_args = str(buf.get("arguments") or "{}")
+            try:
+                parsed_args = json_repair.loads(raw_args)
+            except Exception:
+                parsed_args = {"raw": raw_args}
+            tool_calls.append(ToolCallRequest(
+                id=str(buf.get("id") or _short_tool_id()),
+                name=str(buf.get("name") or "tool"),
+                arguments=parsed_args,
+            ))
+
+        return LLMResponse(
+            content="".join(content_parts) or None,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+            reasoning_content=reasoning_content,
+            thinking_blocks=thinking_blocks,
+        )
     
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""

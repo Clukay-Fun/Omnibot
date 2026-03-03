@@ -1,5 +1,6 @@
 """Test message tool suppress logic for final replies."""
 
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -101,3 +102,95 @@ class TestMessageToolTurnTracking:
         tool._sent_in_turn = True
         tool.start_turn()
         assert not tool._sent_in_turn
+
+
+class TestAgentSlashCommands:
+    @pytest.mark.asyncio
+    async def test_commands_show_short_descriptions(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        msg = InboundMessage(channel="feishu", sender_id="u1", chat_id="oc_1", content="/commands")
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "可用指令" in response.content
+        assert "/help 或 /commands" in response.content
+        assert "/session new" in response.content
+        assert "/session del" in response.content
+
+    @pytest.mark.asyncio
+    async def test_session_new_marks_reply_in_thread_for_feishu(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="oc_1",
+            content="/session new",
+            metadata={"message_id": "m1"},
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert response.metadata.get("_start_topic_session") is True
+        assert response.metadata.get("_reply_in_thread") is True
+        assert re.fullmatch(r"会话-\d{8}-\d{4}", response.content)
+
+    @pytest.mark.asyncio
+    async def test_session_new_with_custom_title(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="oc_1",
+            content="/session new xx任务",
+            metadata={"message_id": "m1"},
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert response.content == "xx任务"
+        assert response.metadata.get("_start_topic_session") is True
+        assert response.metadata.get("_reply_in_thread") is True
+
+    @pytest.mark.asyncio
+    async def test_session_list_shows_main_and_thread_sessions(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        main = loop.sessions.get_or_create("feishu:oc_1")
+        main.add_message("user", "hello")
+        loop.sessions.save(main)
+
+        thread = loop.sessions.get_or_create("feishu:oc_1:thread_a")
+        thread.add_message("user", "topic")
+        loop.sessions.save(thread)
+
+        msg = InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="oc_1",
+            content="/session list",
+            session_key_override="feishu:oc_1:thread_a",
+        )
+
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "当前聊天会话列表" in response.content
+        assert "1. main（主会话）" in response.content
+        assert "thread_a（当前）" in response.content
+
+    @pytest.mark.asyncio
+    async def test_session_del_main_removes_main_session(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        main = loop.sessions.get_or_create("feishu:oc_1")
+        main.add_message("user", "hello")
+        loop.sessions.save(main)
+
+        msg = InboundMessage(channel="feishu", sender_id="u1", chat_id="oc_1", content="/session del main")
+        response = await loop._process_message(msg)
+
+        assert response is not None
+        assert "已删除会话" in response.content
+        keys = {str(item.get("key") or "") for item in loop.sessions.list_sessions()}
+        assert "feishu:oc_1" not in keys

@@ -42,7 +42,21 @@ class FeishuConfig(Base):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
+    react_enabled: bool = False  # Enable reaction emoji on inbound messages
     react_emoji: str = "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
+    reply_to_message: bool = True  # Reply to source message when possible
+    reply_in_thread: bool = False  # Default thread reply mode for message.reply
+    stream_card_enabled: bool = True  # Reuse single card for progress streaming
+    stream_card_min_update_ms: int = 120  # Min interval between progress updates
+    stream_card_ttl_seconds: int = 600  # Stale stream state cleanup TTL
+    stream_card_print_frequency_ms: int = 50  # 2.0 streaming print frequency
+    stream_card_print_step: int = 2  # 2.0 streaming print step (chars)
+    stream_card_print_strategy: Literal["fast", "delay"] = "fast"  # 2.0 print strategy
+    stream_card_summary: str = ""  # 2.0 card summary in chat preview
+    stream_card_header_title: str = ""  # 2.0 card header title (empty to hide)
+    stream_card_show_thinking: bool = True  # Show thinking section in streaming card
+    stream_answer_warmup_chars: int = 24  # Min streamed chars before answer starts rendering
+    stream_answer_warmup_ms: int = 300  # Min wait before first streamed answer render
 
 
 class DingTalkConfig(Base):
