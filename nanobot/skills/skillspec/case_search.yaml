@@ -1,0 +1,44 @@
+meta:
+  id: case_search
+  version: "0.1"
+  title: Case Search
+  description: Search existing cases by keyword
+  enabled: true
+
+params:
+  query:
+    type: string
+    required: true
+    description: Keyword used for lookup
+  limit:
+    type: integer
+    required: false
+    default: 5
+
+match:
+  channels: []
+  intents:
+    - case_search
+
+action:
+  kind: tool
+  target: feishu_data.doc_search
+  args:
+    query: "{{ params.query }}"
+    limit: "{{ params.limit }}"
+
+response:
+  type: list
+  template: "Found {{ result.count }} matching cases."
+
+error:
+  code: CASE_SEARCH_FAILED
+  message: Unable to search cases right now.
+  retryable: true
+
+output_policy:
+  max_items: 5
+  max_chars: 4000
+  continuation_ttl_seconds: 600
+
+pagination_mode: offset

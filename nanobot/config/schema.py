@@ -240,11 +240,21 @@ class ResponseTemplateConfig(Base):
     max_list_items: int = 5
 
 
+class SkillSpecConfig(Base):
+    """SkillSpec runtime configuration."""
+
+    enabled: bool = True
+    workspace_override_enabled: bool = True
+    startup_report_enabled: bool = True
+    startup_report_include_invalid: bool = True
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     response_templates: ResponseTemplateConfig = Field(default_factory=ResponseTemplateConfig)
+    skillspec: SkillSpecConfig = Field(default_factory=SkillSpecConfig)
 
 
 class ProviderConfig(Base):
