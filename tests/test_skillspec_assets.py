@@ -22,6 +22,8 @@ def test_skillspec_files_exist() -> None:
         "deadline_overview.yaml",
         "contract_search.yaml",
         "task_search.yaml",
+        "task_update.yaml",
+        "doc_recognize.yaml",
     }
     found = {p.name for p in SKILLSPEC_DIR.glob("*.yaml")}
     assert expected.issubset(found)
@@ -34,6 +36,12 @@ def test_query_skill_files_follow_v01_shape() -> None:
             continue
         payload = _load_yaml(path)
         assert REQUIRED_TOP_LEVEL_KEYS.issubset(payload)
+
+        action = payload.get("action")
+        assert isinstance(action, dict)
+        if str(action.get("kind", "")).lower() != "query":
+            continue
+
         assert payload["action"]["pagination_mode"] == "data"
         assert payload["response"]["output_policy"]["max_items"] == 5
         if "cross_query" in payload["action"]:
