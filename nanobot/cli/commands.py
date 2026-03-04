@@ -293,6 +293,7 @@ def gateway(
         feishu_data_config=config.tools.feishu_data,
         response_template_config=config.agents.response_templates,
         skillspec_config=config.agents.skillspec,
+        skillspec_embedding_provider_config=config.providers.siliconflow,
     )
 
     # 设置 Cron 任务的回调（需要依赖 agent）
@@ -455,6 +456,7 @@ def agent(
         feishu_data_config=config.tools.feishu_data,
         response_template_config=config.agents.response_templates,
         skillspec_config=config.agents.skillspec,
+        skillspec_embedding_provider_config=config.providers.siliconflow,
     )
 
     # 当日志关闭时显示加载动画（避免错过输出）；日志开启时则跳过
@@ -951,6 +953,7 @@ def cron_run(
         channels_config=config.channels,
         response_template_config=config.agents.response_templates,
         skillspec_config=config.agents.skillspec,
+        skillspec_embedding_provider_config=config.providers.siliconflow,
     )
 
     store_path = get_data_dir() / "cron" / "jobs.json"

@@ -17,6 +17,7 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skill_runtime import (
+    EmbeddingSkillRouter,
     OutputGuard,
     SkillSpecExecutor,
     SkillSpecRegistry,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
         ChannelsConfig,
         ExecToolConfig,
         FeishuDataConfig,
+        ProviderConfig,
         ResponseTemplateConfig,
         SkillSpecConfig,
     )
@@ -85,14 +87,21 @@ class AgentLoop:
         feishu_data_config: "FeishuDataConfig | None" = None,
         response_template_config: "ResponseTemplateConfig | None" = None,
         skillspec_config: "SkillSpecConfig | None" = None,
+        skillspec_embedding_provider_config: "ProviderConfig | None" = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
-        from nanobot.config.schema import ExecToolConfig, ResponseTemplateConfig, SkillSpecConfig
+        from nanobot.config.schema import (
+            ExecToolConfig,
+            ProviderConfig,
+            ResponseTemplateConfig,
+            SkillSpecConfig,
+        )
         self.bus = bus
         self.channels_config = channels_config
         self.feishu_data_config = feishu_data_config
         self.response_template_config = response_template_config or ResponseTemplateConfig()
         self.skillspec_config = skillspec_config or SkillSpecConfig()
+        self._skillspec_embedding_provider_config = skillspec_embedding_provider_config or ProviderConfig()
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -157,11 +166,20 @@ class AgentLoop:
 
         self._skillspec_registry = SkillSpecRegistry(workspace_root=workspace_root)
         self._skillspec_registry.load()
+        embedding_router = EmbeddingSkillRouter(
+            embedding_enabled=self.skillspec_config.embedding_enabled,
+            embedding_top_k=self.skillspec_config.embedding_top_k,
+            embedding_model=self.skillspec_config.embedding_model,
+            embedding_timeout_seconds=self.skillspec_config.embedding_timeout_seconds,
+            embedding_cache_ttl_seconds=self.skillspec_config.embedding_cache_ttl_seconds,
+            provider_config=self._skillspec_embedding_provider_config,
+        )
         self._skillspec_runtime = SkillSpecExecutor(
             registry=self._skillspec_registry,
             tools=self.tools,
             output_guard=OutputGuard(),
             user_memory=UserMemoryStore(self.workspace),
+            embedding_router=embedding_router,
         )
 
         if self.skillspec_config.startup_report_enabled:

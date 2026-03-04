@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 
 
@@ -16,8 +17,14 @@ class MatchSelection:
 
 
 class SkillSpecMatcher:
-    def __init__(self, specs: dict[str, SkillSpec]):
+    def __init__(
+        self,
+        specs: dict[str, SkillSpec],
+        *,
+        embedding_router: EmbeddingSkillRouter | None = None,
+    ):
         self._specs = specs
+        self._embedding_router = embedding_router
 
     def select(self, text: str) -> MatchSelection | None:
         content = text.strip()
@@ -59,7 +66,7 @@ class SkillSpecMatcher:
     def _select_by_keywords(self, text: str) -> MatchSelection | None:
         tokens = {token for token in re.findall(r"[\w\u4e00-\u9fff]+", text.lower()) if token}
         if not tokens:
-            return None
+            return self._select_by_embedding(text)
 
         best_id: str | None = None
         best_score = 0
@@ -87,6 +94,21 @@ class SkillSpecMatcher:
                 best_score = score
                 best_id = spec_id
 
-        if not best_id:
+        if best_id and best_score > 0:
+            return MatchSelection(spec_id=best_id, remainder=text, reason="keywords")
+
+        return self._select_by_embedding(text)
+
+    def _select_by_embedding(self, text: str) -> MatchSelection | None:
+        if not self._embedding_router:
             return None
-        return MatchSelection(spec_id=best_id, remainder=text, reason="keywords")
+        ranked = self._embedding_router.rank(text, self._specs)
+        if not ranked:
+            return None
+
+        spec_id, score = ranked[0]
+        if score <= 0:
+            return None
+        if spec_id not in self._specs:
+            return None
+        return MatchSelection(spec_id=spec_id, remainder=text, reason="embedding")

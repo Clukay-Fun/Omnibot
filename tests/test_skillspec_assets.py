@@ -2,7 +2,6 @@ from pathlib import Path
 
 import yaml
 
-
 SKILLSPEC_DIR = Path(__file__).resolve().parents[1] / "nanobot" / "skills" / "skillspec"
 REQUIRED_TOP_LEVEL_KEYS = {"meta", "params", "action", "response", "error"}
 
