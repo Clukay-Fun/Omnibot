@@ -1,8 +1,8 @@
 """Utility functions for nanobot."""
 
 import re
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 
 def ensure_dir(path: Path) -> Path:
@@ -19,7 +19,9 @@ def get_data_path() -> Path:
 def get_workspace_path(workspace: str | None = None) -> Path:
     """Resolve and ensure workspace path. Defaults to ~/.nanobot/workspace."""
     path = Path(workspace).expanduser() if workspace else Path.home() / ".nanobot" / "workspace"
-    return ensure_dir(path)
+    workspace_path = ensure_dir(path)
+    bootstrap_workspace_dirs(workspace_path)
+    return workspace_path
 
 
 def timestamp() -> str:
@@ -59,9 +61,16 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
     (workspace / "skills").mkdir(exist_ok=True)
+    bootstrap_workspace_dirs(workspace)
 
     if added and not silent:
         from rich.console import Console
         for name in added:
             Console().print(f"  [dim]Created {name}[/dim]")
     return added
+
+
+def bootstrap_workspace_dirs(workspace: Path) -> None:
+    """Create runtime directories required by current features."""
+    ensure_dir(workspace / "skillspec")
+    ensure_dir(workspace / "memory" / "users")
