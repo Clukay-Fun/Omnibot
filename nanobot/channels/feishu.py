@@ -1419,16 +1419,18 @@ class FeishuChannel(BaseChannel):
     ) -> bool:
         """发送/更新飞书流式单卡内容；返回是否已处理。"""
         metadata = msg.metadata or {}
+        is_progress = bool(metadata.get("_progress"))
         source_message_id = metadata.get("message_id") or metadata.get("source_message_id")
         phase = str(metadata.get("_progress_phase") or "answer")
         reply_in_thread = self._resolve_reply_in_thread(metadata)
         show_thinking = bool(self.config.stream_card_show_thinking)
         if not source_message_id:
-            logger.debug("Skip Feishu progress without source message_id")
-            return True
+            if is_progress:
+                logger.debug("Skip Feishu progress without source message_id")
+                return True
+            return False
 
         self._cleanup_stream_states()
-        is_progress = bool(metadata.get("_progress"))
 
         if is_progress:
             state = self._stream_states.get(source_message_id)
