@@ -308,7 +308,7 @@ async def test_streaming_skips_single_card_mode_without_source_message_id() -> N
         )
     )
 
-    assert _sent_message_count(client) == 1
+    assert _sent_message_count(client) == 0
     assert not channel._stream_states
 
 

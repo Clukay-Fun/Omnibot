@@ -1302,7 +1302,8 @@ class FeishuChannel(BaseChannel):
         reply_in_thread = self._resolve_reply_in_thread(metadata)
         show_thinking = bool(self.config.stream_card_show_thinking)
         if not source_message_id:
-            return False
+            logger.debug("Skip Feishu progress without source message_id")
+            return True
 
         self._cleanup_stream_states()
         is_progress = bool(metadata.get("_progress"))
