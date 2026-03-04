@@ -1,44 +1,89 @@
 meta:
   id: case_search
   version: "0.1"
-  title: Case Search
-  description: Search existing cases by keyword
-  enabled: true
-
+  description: Search case records by keyword and filters.
+  owner: built_in
+  domain: legal_ops
 params:
-  query:
-    type: string
-    required: true
-    description: Keyword used for lookup
-  limit:
-    type: integer
-    required: false
-    default: 5
-
-match:
-  channels: []
-  intents:
-    - case_search
-
+  type: object
+  required:
+    - query
+  properties:
+    query:
+      type: string
+      description: Free-text keyword for case title, case number, or client name.
+      min_length: 1
+    status:
+      type: string
+      description: Optional case status filter.
+      enum:
+        - open
+        - pending
+        - closed
+    owner:
+      type: string
+      description: Optional assignee name.
+    created_after:
+      type: string
+      description: Optional ISO date lower bound for case creation time.
+      format: date
+    page_size:
+      type: integer
+      description: Number of rows fetched per request.
+      default: 20
+      minimum: 1
+      maximum: 100
+    page_token:
+      type: string
+      description: Opaque continuation token returned by the data backend.
 action:
-  kind: tool
-  target: feishu_data.doc_search
-  args:
-    query: "{{ params.query }}"
-    limit: "{{ params.limit }}"
-
+  kind: query
+  data_source: bitable
+  table:
+    app_token: app_case_mgmt_001
+    table_id: tbl_case_registry_001
+  select_fields:
+    - case_id
+    - case_no
+    - title
+    - status
+    - owner
+    - client_name
+    - created_at
+    - next_deadline
+  filter_template:
+    op: and
+    conditions:
+      - field: title
+        op: contains
+        value: "{{ params.query }}"
+      - field: status
+        op: eq
+        value: "{{ params.status }}"
+        when: params.status
+      - field: owner
+        op: eq
+        value: "{{ params.owner }}"
+        when: params.owner
+      - field: created_at
+        op: gte
+        value: "{{ params.created_after }}"
+        when: params.created_after
+  order_by:
+    - field: updated_at
+      direction: desc
+  pagination_mode: data
 response:
-  type: list
-  template: "Found {{ result.count }} matching cases."
-
+  output_policy:
+    max_items: 5
+    include_total: true
+    include_next_page_token: true
+  view:
+    type: list
+    item_template:
+      - "{{ row.case_no }} | {{ row.title }}"
+      - "status={{ row.status }}, owner={{ row.owner }}, next_deadline={{ row.next_deadline }}"
 error:
-  code: CASE_SEARCH_FAILED
-  message: Unable to search cases right now.
+  not_found_message: No matching cases were found.
+  upstream_error_message: Case search is temporarily unavailable.
   retryable: true
-
-output_policy:
-  max_items: 5
-  max_chars: 4000
-  continuation_ttl_seconds: 600
-
-pagination_mode: offset

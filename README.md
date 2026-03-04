@@ -59,3 +59,9 @@ Notes:
 - `/session new [标题]`：从当前消息创建飞书话题会话（thread），缺省标题为 `会话-YYYYMMDD-HHMM`。
 - `/session list`：列出当前聊天下的会话（主会话 + 话题会话）。
 - `/session del [id|main]`：删除当前或指定会话。
+
+## Built-in skillspec assets
+
+- Built-in query skillspec files are stored in `nanobot/skills/skillspec/`.
+- The current built-in set includes case/task/contract query specs plus deadline overview.
+- Runtime should prefer workspace overrides under `workspace/skillspec/` when the same skillspec `id` exists, and fall back to built-in assets otherwise.
