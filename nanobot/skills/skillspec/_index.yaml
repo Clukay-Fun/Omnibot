@@ -11,3 +11,5 @@ skills:
     description: Search task records by case context, assignee, and due date.
   - id: task_update
     description: Update task owner/assignee/status with two-step confirmation.
+  - id: doc_recognize
+    description: Recognize uploaded documents and extract key fields with write-confirm flow.
