@@ -16,6 +16,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.skill_runtime import OutputGuard, SkillSpecExecutor, SkillSpecRegistry, UserMemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
         ExecToolConfig,
         FeishuDataConfig,
         ResponseTemplateConfig,
+        SkillSpecConfig,
     )
     from nanobot.cron.service import CronService
 
@@ -77,13 +79,15 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         feishu_data_config: "FeishuDataConfig | None" = None,
         response_template_config: "ResponseTemplateConfig | None" = None,
+        skillspec_config: "SkillSpecConfig | None" = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
-        from nanobot.config.schema import ExecToolConfig, ResponseTemplateConfig
+        from nanobot.config.schema import ExecToolConfig, ResponseTemplateConfig, SkillSpecConfig
         self.bus = bus
         self.channels_config = channels_config
         self.feishu_data_config = feishu_data_config
         self.response_template_config = response_template_config or ResponseTemplateConfig()
+        self.skillspec_config = skillspec_config or SkillSpecConfig()
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -134,6 +138,37 @@ class AgentLoop:
                 self._stream_warmup_chars = max(1, int(getattr(feishu_cfg, "stream_answer_warmup_chars", 24)))
                 self._stream_warmup_ms = max(0, int(getattr(feishu_cfg, "stream_answer_warmup_ms", 300)))
         self._register_default_tools()
+        self._skillspec_registry: SkillSpecRegistry | None = None
+        self._skillspec_runtime: SkillSpecExecutor | None = None
+        self._init_skillspec_runtime()
+
+    def _init_skillspec_runtime(self) -> None:
+        if not self.skillspec_config.enabled:
+            return
+
+        workspace_root = self.workspace / "skillspec"
+        if not self.skillspec_config.workspace_override_enabled:
+            workspace_root = self.workspace / "__skillspec_disabled__"
+
+        self._skillspec_registry = SkillSpecRegistry(workspace_root=workspace_root)
+        self._skillspec_registry.load()
+        self._skillspec_runtime = SkillSpecExecutor(
+            registry=self._skillspec_registry,
+            tools=self.tools,
+            output_guard=OutputGuard(),
+            user_memory=UserMemoryStore(self.workspace),
+        )
+
+        if self.skillspec_config.startup_report_enabled:
+            report = self._skillspec_registry.report
+            logger.info(
+                "Skillspec registry loaded={} overridden={} disabled={}",
+                len(report.loaded),
+                len(report.overridden),
+                len(report.disabled),
+            )
+            if self.skillspec_config.startup_report_include_invalid and report.invalid:
+                logger.warning("Skillspec invalid entries: {}", "; ".join(report.invalid))
 
     def _register_default_tools(self) -> None:
         """注册默认工具集。"""
@@ -764,6 +799,28 @@ class AgentLoop:
             self.sessions.invalidate(session.key)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
+
+        if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
+            continuation = self._skillspec_runtime.continue_from_session(session)
+            if continuation is not None and continuation.handled:
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=continuation.content,
+                    metadata={**(msg.metadata or {}), "_tool_turn": continuation.tool_turn},
+                )
+
+        if self._skillspec_runtime:
+            skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
+            if skillspec_result.handled:
+                self.sessions.save(session)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=skillspec_result.content,
+                    metadata={**(msg.metadata or {}), "_tool_turn": skillspec_result.tool_turn},
+                )
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):

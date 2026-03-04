@@ -9,3 +9,5 @@ skills:
     description: Search contract records by vendor, status, and value.
   - id: task_search
     description: Search task records by case context, assignee, and due date.
+  - id: task_update
+    description: Update task owner/assignee/status with two-step confirmation.
