@@ -251,7 +251,7 @@ class SkillSpecExecutor:
 
     def _find_token(self, value: Any) -> str | None:
         if isinstance(value, str):
-            if re.fullmatch(r"[a-zA-Z0-9]{8,64}", value):
+            if re.fullmatch(r"[a-zA-Z0-9]{4,128}", value):
                 return value
             maybe = self._safe_json(value)
             if maybe is not value:
