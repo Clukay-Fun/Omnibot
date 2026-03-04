@@ -1,7 +1,7 @@
 """Skill runtime foundations for skillspec v0.1."""
 
-from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.document_pipeline import process_document
+from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.executor import SkillExecutionResult, SkillSpecExecutor
 from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import ContinuationCache, GuardResult, OutputGuard
