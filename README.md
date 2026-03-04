@@ -65,3 +65,26 @@ Notes:
 - Built-in query skillspec files are stored in `nanobot/skills/skillspec/`.
 - The current built-in set includes case/task/contract query specs plus deadline overview.
 - Runtime should prefer workspace overrides under `workspace/skillspec/` when the same skillspec `id` exists, and fall back to built-in assets otherwise.
+
+## Skillspec embedding router (Phase D)
+
+Optional embedding-assisted ranking can be enabled for skillspec routing fallback. Deterministic rules should still run first.
+
+```yaml
+agents:
+  skillspec:
+    embedding_enabled: false
+    embedding_top_k: 3
+    embedding_model: "text-embedding-3-small"
+    embedding_timeout_seconds: 10
+    embedding_cache_ttl_seconds: 600
+providers:
+  siliconflow:
+    api_key: "${SILICONFLOW_API_KEY}"
+    api_base: "https://api.siliconflow.cn/v1" # optional
+```
+
+Notes:
+- `embedding_enabled=false` keeps lexical-only behavior (runtime-compatible default).
+- If SiliconFlow embedding config is missing or provider calls fail, router falls back to lexical scoring.
+- `embedding_cache_ttl_seconds` applies to both skill index vectors and recent query vectors.

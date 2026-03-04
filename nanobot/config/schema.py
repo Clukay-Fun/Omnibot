@@ -247,6 +247,11 @@ class SkillSpecConfig(Base):
     workspace_override_enabled: bool = True
     startup_report_enabled: bool = True
     startup_report_include_invalid: bool = True
+    embedding_enabled: bool = False
+    embedding_top_k: int = 3
+    embedding_model: str = ""
+    embedding_timeout_seconds: int = 10
+    embedding_cache_ttl_seconds: int = 600
 
 
 class AgentsConfig(Base):
