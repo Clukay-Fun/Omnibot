@@ -1,0 +1,104 @@
+meta:
+  id: case_detail
+  version: "0.1"
+  description: Retrieve a full case profile with linked tasks and contracts.
+  owner: built_in
+  domain: legal_ops
+params:
+  type: object
+  required:
+    - case_no
+  properties:
+    case_no:
+      type: string
+      description: Primary case number (for example CASE-2026-0007).
+    include_closed_tasks:
+      type: boolean
+      description: Whether closed tasks should be included in related task output.
+      default: false
+action:
+  kind: query
+  pagination_mode: data
+  cross_query:
+    mode: fanout
+    steps:
+      - id: case_base
+        data_source: bitable
+        table:
+          app_token: app_case_mgmt_001
+          table_id: tbl_case_registry_001
+        select_fields:
+          - case_id
+          - case_no
+          - title
+          - status
+          - owner
+          - client_name
+          - summary
+          - opened_at
+        filter_template:
+          op: eq
+          field: case_no
+          value: "{{ params.case_no }}"
+      - id: related_tasks
+        depends_on:
+          - case_base
+        data_source: bitable
+        table:
+          app_token: app_case_ops_001
+          table_id: tbl_case_tasks_001
+        select_fields:
+          - task_id
+          - case_id
+          - task_title
+          - assignee
+          - due_date
+          - status
+        filter_template:
+          op: and
+          conditions:
+            - field: case_id
+              op: eq
+              value: "{{ steps.case_base.rows[0].case_id }}"
+            - field: status
+              op: neq
+              value: closed
+              when: not params.include_closed_tasks
+        order_by:
+          - field: due_date
+            direction: asc
+      - id: related_contracts
+        depends_on:
+          - case_base
+        data_source: bitable
+        table:
+          app_token: app_contract_ops_001
+          table_id: tbl_contract_registry_001
+        select_fields:
+          - contract_id
+          - case_id
+          - contract_no
+          - vendor
+          - amount
+          - expiry_date
+        filter_template:
+          op: eq
+          field: case_id
+          value: "{{ steps.case_base.rows[0].case_id }}"
+response:
+  output_policy:
+    max_items: 5
+    include_total: true
+  view:
+    type: object
+    sections:
+      - title: Case
+        source: case_base
+      - title: Tasks
+        source: related_tasks
+      - title: Contracts
+        source: related_contracts
+error:
+  not_found_message: The requested case could not be found.
+  upstream_error_message: Case detail lookup failed due to an upstream query issue.
+  retryable: true

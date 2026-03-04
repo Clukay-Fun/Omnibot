@@ -1,0 +1,46 @@
+meta:
+  id: task_update
+  version: "0.1"
+  description: Update task owner/status fields in case task table.
+  owner: built_in
+  domain: legal_ops
+  match:
+    keywords:
+      - 更新任务
+      - task update
+      - 修改任务
+params:
+  type: object
+  required:
+    - record_id
+  properties:
+    record_id:
+      type: string
+      description: Target record id in Bitable.
+    owner:
+      type: string
+      description: New owner open_id.
+    assignee:
+      type: string
+      description: New assignee open_id.
+    status:
+      type: string
+      description: New status value.
+action:
+  kind: update
+  data_source: bitable
+  table:
+    app_token: app_case_ops_001
+    table_id: tbl_case_tasks_001
+  args:
+    record_id: "{{ params.record_id }}"
+    fields:
+      owner: "{{ params.owner }}"
+      assignee: "{{ params.assignee }}"
+      status: "{{ params.status }}"
+response:
+  output_policy:
+    max_chars: 1200
+error:
+  upstream_error_message: Task update failed.
+  retryable: true

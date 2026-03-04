@@ -110,6 +110,120 @@ MSG_TYPE_MAP = {
 }
 
 
+def _safe_get(source: Any, key: str, default: Any = None) -> Any:
+    """统一读取 dict/object 字段，失败时返回默认值。"""
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+
+def _safe_dig(source: Any, *keys: str, default: Any = None) -> Any:
+    """按路径读取 dict/object 嵌套字段。"""
+    current = source
+    for key in keys:
+        current = _safe_get(current, key, None)
+        if current is None:
+            return default
+    return current
+
+
+def _safe_json_loads(value: Any) -> Any:
+    """对字符串执行 JSON 解析，失败则返回原值。"""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return value
+
+
+def _to_plain_data(value: Any, *, _depth: int = 0) -> Any:
+    """将 SDK 对象转换为仅包含基础类型的结构。"""
+    if _depth >= 6:
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _to_plain_data(v, _depth=_depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_plain_data(v, _depth=_depth + 1) for v in value]
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): _to_plain_data(v, _depth=_depth + 1)
+            for k, v in vars(value).items()
+            if not k.startswith("_")
+        }
+    return str(value)
+
+
+def _safe_json_dumps(value: Any) -> str:
+    """安全序列化任意值为 JSON 字符串。"""
+    plain_value = _to_plain_data(value)
+    try:
+        return json.dumps(plain_value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(plain_value)
+
+
+def _extract_action_key(action_value: Any) -> str | None:
+    """从 action value 中提取可读动作 key。"""
+    if isinstance(action_value, str):
+        parsed = _safe_json_loads(action_value)
+        if isinstance(parsed, str):
+            return parsed.strip() or None
+        action_value = parsed
+
+    if not isinstance(action_value, dict):
+        return None
+
+    for key in ("action_key", "key", "action", "value", "name", "id"):
+        candidate = action_value.get(key)
+        if isinstance(candidate, (str, int, float)):
+            text = str(candidate).strip()
+            if text:
+                return text
+
+    if len(action_value) == 1:
+        first_key = next(iter(action_value.keys()), None)
+        if isinstance(first_key, str) and first_key.strip():
+            return first_key.strip()
+
+    return None
+
+
+def _build_card_action_content(action: Any) -> tuple[str, str | None, str | None]:
+    """抽取卡片回调中的动作信息并组装为入站文本。"""
+    action_tag = _safe_get(action, "tag", None)
+    action_value = _safe_json_loads(_safe_get(action, "value", None))
+    form_value = _safe_json_loads(_safe_get(action, "form_value", None))
+    option = _safe_json_loads(_safe_get(action, "option", None))
+
+    action_key = _extract_action_key(action_value)
+    if not action_key and isinstance(form_value, dict) and len(form_value) == 1:
+        first_key = next(iter(form_value.keys()), None)
+        if isinstance(first_key, str) and first_key.strip():
+            action_key = first_key.strip()
+
+    parts = ["[feishu card action trigger]"]
+    if action_tag:
+        parts.append(f"action_tag: {action_tag}")
+    if action_key:
+        parts.append(f"action_key: {action_key}")
+    if action_value not in (None, "", {}, []):
+        parts.append(f"action_value: {_safe_json_dumps(action_value)}")
+    if form_value not in (None, "", {}, []):
+        parts.append(f"form_value: {_safe_json_dumps(form_value)}")
+    if option not in (None, "", {}, []):
+        parts.append(f"option: {_safe_json_dumps(option)}")
+
+    return "\n".join(parts), action_key, action_tag
+
+
 def _extract_share_card_content(content_json: dict, msg_type: str) -> str:
     """从分享卡片和交互式消息中提取文本内容。"""
     parts = []
@@ -371,6 +485,14 @@ class FeishuChannel(BaseChannel):
         )
         if callable(register_chat_entered):
             event_handler_builder = register_chat_entered(lambda _event: None)
+
+        register_card_action = getattr(
+            event_handler_builder,
+            "register_p2_card_action_trigger",
+            None,
+        )
+        if callable(register_card_action):
+            event_handler_builder = register_card_action(self._on_card_action_sync)
 
         event_handler = event_handler_builder.build()
         
@@ -1297,15 +1419,18 @@ class FeishuChannel(BaseChannel):
     ) -> bool:
         """发送/更新飞书流式单卡内容；返回是否已处理。"""
         metadata = msg.metadata or {}
+        is_progress = bool(metadata.get("_progress"))
         source_message_id = metadata.get("message_id") or metadata.get("source_message_id")
         phase = str(metadata.get("_progress_phase") or "answer")
         reply_in_thread = self._resolve_reply_in_thread(metadata)
         show_thinking = bool(self.config.stream_card_show_thinking)
         if not source_message_id:
+            if is_progress:
+                logger.debug("Skip Feishu progress without source message_id")
+                return True
             return False
 
         self._cleanup_stream_states()
-        is_progress = bool(metadata.get("_progress"))
 
         if is_progress:
             state = self._stream_states.get(source_message_id)
@@ -1576,6 +1701,84 @@ class FeishuChannel(BaseChannel):
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
+
+    def _on_card_action_sync(self, data: Any) -> None:
+        """处理卡片动作回调的同步封装（由 WebSocket 线程触发）。"""
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._on_card_action(data), self._loop)
+
+    async def _on_card_action(self, data: Any) -> None:
+        """解析并转发 Feishu 卡片动作回调到统一入站流程。"""
+        try:
+            event = _safe_get(data, "event", None)
+            if event is None:
+                logger.warning("Skip Feishu card action callback without event")
+                return
+
+            action = _safe_get(event, "action", None)
+            if action is None:
+                logger.warning("Skip Feishu card action callback without action payload")
+                return
+
+            context = _safe_get(event, "context", None)
+            operator = _safe_get(event, "operator", None)
+
+            content, action_key, action_tag = _build_card_action_content(action)
+
+            sender_id = (
+                _safe_dig(operator, "operator_id", "open_id")
+                or _safe_dig(operator, "open_id")
+                or _safe_dig(operator, "operator_id", "user_id")
+                or _safe_dig(context, "open_id")
+                or _safe_dig(context, "user_id", "open_id")
+                or _safe_dig(context, "user_id")
+                or "unknown"
+            )
+            sender_id = str(sender_id)
+
+            open_message_id = (
+                _safe_dig(context, "open_message_id")
+                or _safe_dig(context, "message_id")
+                or _safe_dig(event, "open_message_id")
+                or _safe_dig(event, "message_id")
+            )
+            open_chat_id = (
+                _safe_dig(context, "open_chat_id")
+                or _safe_dig(event, "open_chat_id")
+                or _safe_dig(event, "chat_id")
+                or sender_id
+            )
+
+            event_type = (
+                _safe_dig(data, "header", "event_type")
+                or _safe_dig(event, "event_type")
+                or "card.action.trigger"
+            )
+
+            metadata = {
+                "source_event_type": event_type,
+                "msg_type": "card_action",
+            }
+            if action_tag:
+                metadata["action_tag"] = action_tag
+            if action_key:
+                metadata["action_key"] = action_key
+            if open_message_id:
+                metadata["message_id"] = str(open_message_id)
+                metadata["open_message_id"] = str(open_message_id)
+            chat_type = _safe_dig(context, "chat_type")
+            if chat_type:
+                metadata["chat_type"] = str(chat_type)
+
+            # 复用现有 _handle_message 做 allow-list 检查和统一入站分发
+            await self._handle_message(
+                sender_id=sender_id,
+                chat_id=str(open_chat_id),
+                content=content,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.exception("Error processing Feishu card action callback")
 
     def _on_message_sync(self, data: "P2ImMessageReceiveV1") -> None:
         """

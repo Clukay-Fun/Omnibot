@@ -240,11 +240,26 @@ class ResponseTemplateConfig(Base):
     max_list_items: int = 5
 
 
+class SkillSpecConfig(Base):
+    """SkillSpec runtime configuration."""
+
+    enabled: bool = True
+    workspace_override_enabled: bool = True
+    startup_report_enabled: bool = True
+    startup_report_include_invalid: bool = True
+    embedding_enabled: bool = False
+    embedding_top_k: int = 3
+    embedding_model: str = ""
+    embedding_timeout_seconds: int = 10
+    embedding_cache_ttl_seconds: int = 600
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
     response_templates: ResponseTemplateConfig = Field(default_factory=ResponseTemplateConfig)
+    skillspec: SkillSpecConfig = Field(default_factory=SkillSpecConfig)
 
 
 class ProviderConfig(Base):
@@ -382,6 +397,27 @@ class FeishuDataConfig(Base):
     confirm_token_ttl_seconds: int = 300
 
 
+class MinerURequestConfig(Base):
+    timeout_seconds: float = 30.0
+    max_retries: int = 2
+    retry_delay_seconds: float = 1.0
+
+
+class MinerUPollingConfig(Base):
+    interval_seconds: float = 1.5
+    timeout_seconds: float = 120.0
+
+
+class MinerUConfig(Base):
+    """MinerU document parsing configuration."""
+
+    enabled: bool = False
+    api_base: str = "https://api.mineru.net"
+    api_key: str = ""
+    request: MinerURequestConfig = Field(default_factory=MinerURequestConfig)
+    polling: MinerUPollingConfig = Field(default_factory=MinerUPollingConfig)
+
+
 class ToolsConfig(Base):
     """Tools configuration."""
 
@@ -390,6 +426,7 @@ class ToolsConfig(Base):
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     feishu_data: FeishuDataConfig = Field(default_factory=FeishuDataConfig)
+    mineru: MinerUConfig = Field(default_factory=MinerUConfig)
 
 
 class Config(BaseSettings):

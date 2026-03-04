@@ -308,6 +308,23 @@ async def test_streaming_skips_single_card_mode_without_source_message_id() -> N
         )
     )
 
+    assert _sent_message_count(client) == 0
+    assert not channel._stream_states
+
+
+@pytest.mark.asyncio
+async def test_non_progress_message_without_source_message_id_still_sends() -> None:
+    channel, client = _build_channel()
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="normal command response",
+            metadata={},
+        )
+    )
+
     assert _sent_message_count(client) == 1
     assert not channel._stream_states
 
