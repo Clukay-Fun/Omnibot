@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+from yaml import YAMLError
 
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 
@@ -73,7 +74,7 @@ class SkillSpecRegistry:
         for path in candidates:
             name = path.stem
             try:
-                raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+                raw = self._safe_load_yaml(path)
                 if not isinstance(raw, dict):
                     raise ValueError("skillspec must be a YAML object")
                 spec = SkillSpec.model_validate(raw)
@@ -81,3 +82,20 @@ class SkillSpecRegistry:
             except Exception as exc:
                 self.report.invalid.append(f"{source}:{name} ({exc})")
         return records
+
+    @staticmethod
+    def _safe_load_yaml(path: Path) -> object:
+        """Load YAML with a regex-friendly fallback for backslash escapes.
+
+        Many skill authors write regex in double quotes (e.g. "\\s+"), which can
+        trigger YAML escape parsing errors. If that happens, retry by escaping raw
+        backslashes so regex literals remain intact.
+        """
+        text = path.read_text(encoding="utf-8")
+        try:
+            return yaml.safe_load(text)
+        except YAMLError as exc:
+            if "unknown escape character" not in str(exc):
+                raise
+            escaped_text = text.replace("\\", "\\\\")
+            return yaml.safe_load(escaped_text)
