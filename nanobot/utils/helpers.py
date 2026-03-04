@@ -60,6 +60,16 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
             _write(item, workspace / item.name)
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
+
+    try:
+        extract_tpl = pkg_files("nanobot") / "skills" / "extract_templates"
+        if extract_tpl.is_dir():
+            for item in extract_tpl.iterdir():
+                if item.name.endswith((".yaml", ".yml")):
+                    _write(item, workspace / "extract" / item.name)
+    except Exception:
+        pass
+
     (workspace / "skills").mkdir(exist_ok=True)
     bootstrap_workspace_dirs(workspace)
 
@@ -74,3 +84,4 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     """Create runtime directories required by current features."""
     ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
+    ensure_dir(workspace / "extract")
