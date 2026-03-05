@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -410,6 +411,132 @@ error: {}
     assert result.handled is True
     assert captured["paths"] == ["/tmp/sample-contract.pdf"]
     assert captured["skill_id"] == "doc_recognize"
+
+
+@pytest.mark.asyncio
+async def test_executor_document_action_bridge_requires_confirm(tmp_path: Path, monkeypatch) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "doc_store",
+        """
+meta: {id: doc_store, version: "0.1", description: 文档入库}
+params:
+  type: object
+  properties:
+    paths:
+      type: array
+action:
+  kind: document_pipeline
+  args:
+    paths: "{{ params.paths }}"
+    skill_id: doc_store
+  write_bridge:
+    enabled: true
+    confirm_required: true
+    tool: bitable_create
+    args:
+      app_token: app_x
+      table_id: tbl_x
+      fields:
+        title: "{{ result.results[0].document_type }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"success": True, "record_id": "r-doc"})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    async def _fake_process_document(paths, skill_id, user_context):
+        return {
+            "results": [{"path": paths[0], "document_type": "invoice"}],
+            "errors": [],
+            "skill_id": skill_id,
+            "user_context": user_context,
+        }
+
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.process_document", _fake_process_document)
+
+    first = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill doc_store",
+            media=["/tmp/sample-contract.pdf"],
+        ),
+        session,
+    )
+
+    assert first.handled is True
+    assert "待确认写入" in first.content
+    match = re.search(r"确认\s+([a-z0-9]{10})", first.content)
+    assert match is not None
+    token = match.group(1)
+
+    confirm = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content=f"确认 {token}"),
+        session,
+    )
+    assert confirm.handled is True
+    assert "success" in confirm.content
+    assert create_tool.calls[-1]["confirm_token"] == token
+
+
+@pytest.mark.asyncio
+async def test_executor_document_action_bridge_supports_cancel(tmp_path: Path, monkeypatch) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "doc_store",
+        """
+meta: {id: doc_store, version: "0.1", description: 文档入库}
+params: {type: object, properties: {paths: {type: array}}}
+action:
+  kind: document_pipeline
+  args: {paths: "{{ params.paths }}", skill_id: doc_store}
+  write_bridge: {enabled: true, confirm_required: true, tool: bitable_create}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"success": True})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    async def _fake_process_document(paths, skill_id, user_context):
+        _ = (paths, skill_id, user_context)
+        return {"results": [{"document_type": "invoice"}], "errors": []}
+
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.process_document", _fake_process_document)
+
+    first = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill doc_store", media=["/tmp/a.pdf"]),
+        session,
+    )
+    token = re.search(r"取消\s+([a-z0-9]{10})", first.content).group(1)
+
+    cancelled = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content=f"取消 {token}"),
+        session,
+    )
+
+    assert cancelled.handled is True
+    assert "已取消" in cancelled.content
+    assert len(create_tool.calls) == 0
 
 
 @pytest.mark.asyncio

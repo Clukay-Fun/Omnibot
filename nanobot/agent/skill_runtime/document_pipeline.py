@@ -18,6 +18,7 @@ from nanobot.agent.skill_runtime.mineru_client import (
     SUPPORTED_DOCUMENT_EXTENSIONS,
     MinerUClient,
     MinerUClientError,
+    MinerUTimeoutError,
 )
 from nanobot.config.loader import load_config
 
@@ -65,12 +66,12 @@ async def process_document(
         if path.suffix.lower() not in SUPPORTED_DOCUMENT_EXTENSIONS:
             allowed = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
             errors.append(
-                f"Unsupported file format '{path.suffix or '<none>'}' for {path.name}. "
+                f"[UNSUPPORTED_FORMAT] Unsupported file format '{path.suffix or '<none>'}' for {path.name}. "
                 f"Allowed formats: {allowed}"
             )
             continue
         if not path.exists() or not path.is_file():
-            errors.append(f"Document file not found: {path}")
+            errors.append(f"[FILE_NOT_FOUND] Document file not found: {path}")
             continue
 
         if not config.tools.mineru.enabled:
@@ -109,8 +110,14 @@ async def process_document(
                     errors=item_errors,
                 )
             )
-        except (MinerUClientError, ExtractionQualityError, ExtractionError) as exc:
-            errors.append(f"{path.name}: {exc}")
+        except MinerUTimeoutError as exc:
+            errors.append(f"[API_TIMEOUT] {path.name}: {exc}")
+        except ExtractionQualityError as exc:
+            errors.append(f"[LOW_QUALITY_EXTRACTION] {path.name}: {exc}")
+        except MinerUClientError as exc:
+            errors.append(f"[API_ERROR] {path.name}: {exc}")
+        except ExtractionError as exc:
+            errors.append(f"[LOW_QUALITY_EXTRACTION] {path.name}: {exc}")
 
     return {
         "skill_id": skill_id,

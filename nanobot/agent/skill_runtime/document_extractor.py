@@ -54,11 +54,15 @@ def load_extract_templates(workspace_root: Path | None = None) -> dict[str, Extr
             templates[tpl.document_type] = tpl
 
     if workspace_root:
-        workspace_dir = workspace_root / "extract"
-        if workspace_dir.exists():
+        for workspace_dir in _workspace_template_dirs(workspace_root):
+            if not workspace_dir.exists():
+                continue
             for path in sorted(list(workspace_dir.glob("*.yaml")) + list(workspace_dir.glob("*.yml"))):
-                data = yaml.safe_load(path.read_text(encoding="utf-8"))
-                tpl = _parse_template(data, source=str(path))
+                try:
+                    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    tpl = _parse_template(data, source=str(path))
+                except (yaml.YAMLError, ExtractionError):
+                    continue
                 templates[tpl.document_type] = tpl
 
     return templates
@@ -144,3 +148,10 @@ def _compute_confidence(values: dict[str, str], missing_required: list[str], req
         return 1.0 if values else 0.0
     hit = required_total - len(missing_required)
     return max(0.0, min(1.0, hit / required_total))
+
+
+def _workspace_template_dirs(workspace_root: Path) -> list[Path]:
+    return [
+        workspace_root / "skillspec" / "extract",
+        workspace_root / "extract",
+    ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -148,6 +149,16 @@ class SkillSpecExecutor:
 
         if kind in {"document_pipeline", "document"}:
             payload = await self._run_document_action(action=action, params=params, runtime=runtime)
+            bridge_response = await self._run_document_write_bridge(
+                spec_id=selection.spec_id,
+                action=action,
+                params=params,
+                runtime=runtime,
+                payload=payload,
+                session=session,
+            )
+            if bridge_response is not None:
+                return SkillExecutionResult(handled=True, content=bridge_response, tool_turn=True)
             response = self._render_query_response(spec=spec, payload=payload, session=session)
             return SkillExecutionResult(
                 handled=True,
@@ -334,6 +345,61 @@ class SkillSpecExecutor:
             skill_id=str((resolved or {}).get("skill_id") or action.get("skill_id") or "document"),
             user_context=runtime.get("user_context") if isinstance(runtime, dict) else None,
         )
+
+    async def _run_document_write_bridge(
+        self,
+        *,
+        spec_id: str,
+        action: dict[str, Any],
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+        payload: Any,
+        session: Any,
+    ) -> str | None:
+        bridge = action.get("write_bridge")
+        if not isinstance(bridge, dict):
+            return None
+
+        bridge_enabled = bridge.get("enabled")
+        should_confirm = params.get("write_confirm", bridge_enabled)
+        if not bool(should_confirm):
+            return None
+
+        tool_name = str(bridge.get("tool") or "").strip()
+        if not tool_name:
+            return "技能配置错误：document write bridge 缺少 tool。"
+
+        bridge_runtime = dict(runtime)
+        bridge_runtime["document_result"] = payload
+        bridge_runtime["result"] = payload
+        args_template = bridge.get("args") if isinstance(bridge.get("args"), dict) else {}
+        args = self._resolve_templates(args_template, params=params, steps={}, runtime=bridge_runtime)
+        if not isinstance(args, dict):
+            args = {}
+
+        if not bool(bridge.get("confirm_required", True)):
+            result = await self._execute_tool_json(tool_name, args)
+            return self._stringify_payload(result)
+
+        token = str(bridge.get("confirm_token") or self._new_confirm_token())
+        pending = self._pending_writes(session)
+        pending[token] = {
+            "spec_id": spec_id,
+            "tool": tool_name,
+            "args": args,
+        }
+        session.metadata[self._SESSION_PENDING_WRITES] = pending
+
+        preview_template = bridge.get("preview")
+        if preview_template is None:
+            preview = payload if isinstance(payload, dict) else {"result": payload}
+        else:
+            preview = self._resolve_templates(preview_template, params=params, steps={}, runtime=bridge_runtime)
+        preview_text = json.dumps(preview, ensure_ascii=False)
+        return f"待确认写入：{preview_text}\n确认 {token}\n取消 {token}"
+
+    def _new_confirm_token(self) -> str:
+        return uuid.uuid4().hex[:10]
 
     async def _handle_write_confirmation(self, msg: InboundMessage, session: Any) -> SkillExecutionResult | None:
         pending = self._pending_writes(session)

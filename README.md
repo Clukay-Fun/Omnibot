@@ -83,6 +83,20 @@ Notes:
   - `sensitive: true` to mark group replies for private delivery to sender.
   - `confirm_required` + `confirm_respect_preference` to control write confirmation flow (default remains manual confirm).
 
+## Document pipeline hardening
+
+- Document pipeline failures now use explicit error categories to improve triage:
+  - `[UNSUPPORTED_FORMAT]`
+  - `[FILE_NOT_FOUND]`
+  - `[LOW_QUALITY_EXTRACTION]`
+  - `[API_TIMEOUT]`
+  - `[API_ERROR]`
+- Extract template precedence is deterministic and override-safe:
+  - bundled defaults: `nanobot/skills/extract_templates/*.yaml`
+  - optional workspace managed layer: `workspace/skillspec/extract/*.yaml`
+  - workspace local override (highest priority): `workspace/extract/*.yaml`
+- Document skills can opt into write-confirm bridge via `action.write_bridge`, reusing existing `确认 <token> / 取消 <token>` pending-write flow.
+
 ## Skillspec embedding router (Phase D)
 
 Optional embedding-assisted ranking can be enabled for skillspec routing fallback. Deterministic rules should still run first.
