@@ -9,6 +9,7 @@ from nanobot.agent.skill_runtime.executor import SkillSpecExecutor
 from nanobot.agent.skill_runtime.matcher import SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
+from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.base import Tool
@@ -665,3 +666,182 @@ error: {}
     assert "success" in result.content
     assert len(update_tool.calls) == 2
     assert update_tool.calls[1]["confirm_token"] == "tok456"
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_set_list_cancel_flow(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace_specs"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        workspace / "reminder_set.yaml",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}}}
+action: {kind: reminder_set}
+response: {}
+error: {}
+""",
+    )
+    _write_yaml(
+        workspace / "reminder_list.yaml",
+        """
+meta: {id: reminder_list, version: "0.1", description: 列出提醒}
+params: {type: object, properties: {}}
+action: {kind: reminder_list}
+response: {}
+error: {}
+""",
+    )
+    _write_yaml(
+        workspace / "reminder_cancel.yaml",
+        """
+meta: {id: reminder_cancel, version: "0.1", description: 取消提醒}
+params: {type: object, properties: {reminder_id: {type: string}}}
+action: {kind: reminder_cancel}
+response: {}
+error: {}
+""",
+    )
+    registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=tmp_path / "builtin_specs")
+    registry.load()
+
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    created = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=Pay_bill due_at=2026-03-06T10:00:00",
+        ),
+        session,
+    )
+    assert created.handled is True
+    assert "r000001" in created.content
+
+    listed = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_list"),
+        session,
+    )
+    assert listed.handled is True
+    assert "Pay_bill" in listed.content
+
+    cancelled = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_cancel reminder_id=r000001"),
+        session,
+    )
+    assert cancelled.handled is True
+    assert '"cancelled": true' in cancelled.content
+
+    listed_after_cancel = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_list"),
+        session,
+    )
+    assert "\"reminders\": []" in listed_after_cancel.content
+
+
+@pytest.mark.asyncio
+async def test_executor_daily_summary_generation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace_specs"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        workspace / "reminder_set.yaml",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}}}
+action: {kind: reminder_set}
+response: {}
+error: {}
+""",
+    )
+    _write_yaml(
+        workspace / "daily_summary.yaml",
+        """
+meta: {id: daily_summary, version: "0.1", description: 每日汇总}
+params: {type: object, properties: {date: {type: string}}}
+action: {kind: daily_summary}
+response: {}
+error: {}
+""",
+    )
+    registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=tmp_path / "builtin_specs")
+    registry.load()
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=TaskA due_at=2026-03-06T10:00:00",
+        ),
+        session,
+    )
+    await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=TaskB due_at=2026-03-07T10:00:00",
+        ),
+        session,
+    )
+
+    summary = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill daily_summary date=2026-03-06"),
+        session,
+    )
+    assert summary.handled is True
+    assert '"due_today_count": 1' in summary.content
+    assert "TaskA" in summary.content
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_set_graceful_when_calendar_unavailable(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_set",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}, calendar_sync: {type: boolean}}}
+action: {kind: reminder_set, calendar_enabled: true}
+response: {}
+error: {}
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    created = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=SyncTest due_at=2026-03-06T10:00:00 calendar_sync=true",
+        ),
+        session,
+    )
+
+    assert created.handled is True
+    assert '"status": "unavailable"' in created.content
+    assert "SyncTest" in created.content

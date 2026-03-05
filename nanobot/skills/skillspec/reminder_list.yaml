@@ -1,0 +1,30 @@
+meta:
+  id: reminder_list
+  version: "0.1"
+  title: List reminders
+  description: List active reminders for current user.
+  owner: built_in
+  domain: productivity
+params:
+  type: object
+  properties:
+    include_cancelled:
+      type: boolean
+      default: false
+action:
+  kind: reminder_list
+response:
+  type: structured
+  template: |
+    {% if reminders %}
+    当前提醒 {{ reminders | length }} 条：
+    {% for item in reminders %}
+    - {{ item.id }} | {{ item.due_at }} | {{ item.text }}
+    {% endfor %}
+    {% else %}
+    暂无提醒。
+    {% endif %}
+error:
+  code: REMINDER_LIST_ERROR
+  message: 无法读取提醒列表。
+  retryable: true

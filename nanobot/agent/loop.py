@@ -19,6 +19,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skill_runtime import (
     EmbeddingSkillRouter,
     OutputGuard,
+    ReminderRuntime,
     SkillSpecExecutor,
     SkillSpecRegistry,
     UserMemoryStore,
@@ -183,6 +184,7 @@ class AgentLoop:
             embedding_min_score=self.skillspec_config.embedding_min_score,
             route_log_enabled=self.skillspec_config.route_log_enabled,
             route_log_top_k=self.skillspec_config.route_log_top_k,
+            reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
         )
 
         if self.skillspec_config.startup_report_enabled:

@@ -6,6 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from loguru import logger
@@ -14,6 +15,7 @@ from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
+from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
@@ -46,6 +48,7 @@ class SkillSpecExecutor:
         embedding_min_score: float = 0.15,
         route_log_enabled: bool = False,
         route_log_top_k: int = 3,
+        reminder_runtime: ReminderRuntime | None = None,
     ):
         self.registry = registry
         self.tools = tools
@@ -55,6 +58,7 @@ class SkillSpecExecutor:
         self._embedding_min_score = max(0.0, float(embedding_min_score))
         self._route_log_enabled = bool(route_log_enabled)
         self._route_log_top_k = max(1, int(route_log_top_k))
+        self._reminder_runtime = reminder_runtime
         self.matcher = SkillSpecMatcher(
             registry.specs,
             embedding_router=self._embedding_router,
@@ -158,7 +162,12 @@ class SkillSpecExecutor:
                 session=session,
             )
             if bridge_response is not None:
-                return SkillExecutionResult(handled=True, content=bridge_response, tool_turn=True)
+                return SkillExecutionResult(
+                    handled=True,
+                    content=bridge_response,
+                    tool_turn=True,
+                    metadata=route_metadata,
+                )
             response = self._render_query_response(spec=spec, payload=payload, session=session)
             return SkillExecutionResult(
                 handled=True,
@@ -167,6 +176,11 @@ class SkillSpecExecutor:
                 reply_chat_id=self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg),
                 metadata={**self._build_sensitive_metadata(spec=spec, msg=msg), **route_metadata},
             )
+
+        if kind in {"reminder_set", "reminder_list", "reminder_cancel", "daily_summary"}:
+            payload = await self._run_reminder_action(kind=kind, params=params, runtime=runtime, action=action)
+            response = self._render_query_response(spec=spec, payload=payload, session=session)
+            return SkillExecutionResult(handled=True, content=response, tool_turn=True, metadata=route_metadata)
 
         return SkillExecutionResult(handled=False)
 
@@ -400,6 +414,50 @@ class SkillSpecExecutor:
 
     def _new_confirm_token(self) -> str:
         return uuid.uuid4().hex[:10]
+
+    async def _run_reminder_action(
+        self,
+        *,
+        kind: str,
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self._reminder_runtime is None:
+            return {"error": "reminder runtime unavailable"}
+
+        user_ctx = runtime.get("user_context") if isinstance(runtime.get("user_context"), dict) else {}
+        user_id = str(user_ctx.get("sender_id") or "")
+        chat_id = str(user_ctx.get("chat_id") or "")
+        channel = str(user_ctx.get("channel") or "")
+
+        if kind == "reminder_set":
+            text = str(params.get("text") or params.get("query") or "").strip()
+            due_at = str(params.get("due_at") or "").strip()
+            if not text or not due_at:
+                return {"error": "text and due_at are required"}
+            calendar_requested = bool(params.get("calendar_sync") or action.get("calendar_enabled"))
+            return await self._reminder_runtime.create_reminder(
+                user_id=user_id,
+                chat_id=chat_id,
+                text=text,
+                due_at=due_at,
+                channel=channel,
+                calendar_requested=calendar_requested,
+            )
+
+        if kind == "reminder_list":
+            include_cancelled = bool(params.get("include_cancelled", False))
+            return self._reminder_runtime.list_reminders(user_id=user_id, include_cancelled=include_cancelled)
+
+        if kind == "reminder_cancel":
+            reminder_id = str(params.get("reminder_id") or "").strip()
+            if not reminder_id:
+                return {"error": "reminder_id is required"}
+            return self._reminder_runtime.cancel_reminder(user_id=user_id, reminder_id=reminder_id)
+
+        date = str(params.get("date") or datetime.now(timezone.utc).date().isoformat())
+        return self._reminder_runtime.build_daily_summary(user_id=user_id, date=date)
 
     async def _handle_write_confirmation(self, msg: InboundMessage, session: Any) -> SkillExecutionResult | None:
         pending = self._pending_writes(session)

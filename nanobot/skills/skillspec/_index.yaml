@@ -13,3 +13,11 @@ skills:
     description: Update task owner/assignee/status with two-step confirmation.
   - id: doc_recognize
     description: Recognize uploaded documents and extract key fields with write-confirm flow.
+  - id: reminder_set
+    description: Create a personal reminder with optional calendar sync.
+  - id: reminder_list
+    description: List active reminders for current user.
+  - id: reminder_cancel
+    description: Cancel reminder by id.
+  - id: daily_summary
+    description: Build a daily summary from active reminders.

@@ -126,3 +126,16 @@ Notes:
 - If SiliconFlow embedding config is missing or provider calls fail, router falls back to lexical scoring.
 - `embedding_cache_ttl_seconds` applies to both skill index vectors and recent query vectors.
 - `route_log_enabled=true` adds lightweight route diagnostics (`skillspec_route`, optional top-k candidates) to message metadata and debug logs without exposing chain-of-thought to users.
+
+## Reminder MVP
+
+- Built-in reminder skillspec assets:
+  - `reminder_set`
+  - `reminder_list`
+  - `reminder_cancel`
+  - `daily_summary`
+- Reminder data is persisted in `workspace/reminders.json` for deterministic local runtime behavior.
+- Calendar sync is optional and best-effort (`calendar_sync=true` / action `calendar_enabled=true`):
+  - reminder record is always persisted first
+  - if no calendar hook is configured, response reports `calendar.status=unavailable`
+  - calendar failures never drop reminder records

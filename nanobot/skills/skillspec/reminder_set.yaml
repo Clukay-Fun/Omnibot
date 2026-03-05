@@ -1,0 +1,35 @@
+meta:
+  id: reminder_set
+  version: "0.1"
+  title: Set reminder
+  description: Create a personal reminder with optional calendar sync.
+  owner: built_in
+  domain: productivity
+params:
+  type: object
+  required:
+    - text
+    - due_at
+  properties:
+    text:
+      type: string
+      description: Reminder text.
+    due_at:
+      type: string
+      description: Due time in ISO-like text, for example 2026-03-06 10:00.
+    calendar_sync:
+      type: boolean
+      default: false
+action:
+  kind: reminder_set
+response:
+  type: structured
+  template: |
+    已创建提醒：{{ reminder.text }}
+    - ID: {{ reminder.id }}
+    - 时间: {{ reminder.due_at }}
+    - 日历同步: {{ calendar.status }}
+error:
+  code: REMINDER_SET_ERROR
+  message: 无法创建提醒，请检查输入后重试。
+  retryable: true
