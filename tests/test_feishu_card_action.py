@@ -180,6 +180,21 @@ async def test_group_message_allows_admin_prefix_bypass() -> None:
 
 
 @pytest.mark.asyncio
+async def test_group_message_allows_continuation_without_mention() -> None:
+    channel = _build_channel()
+    captured: dict[str, Any] = {}
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(_build_text_event(message_id="m-g-continue", text="继续"))
+
+    assert captured["content"] == "继续"
+
+
+@pytest.mark.asyncio
 async def test_topic_message_is_always_activated_by_default() -> None:
     channel = _build_channel()
     called = False

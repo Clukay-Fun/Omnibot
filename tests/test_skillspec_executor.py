@@ -477,7 +477,7 @@ error: {}
     )
 
     assert first.handled is True
-    assert "待确认写入" in first.content
+    assert "写入预览" in first.content
     match = re.search(r"确认\s+([a-z0-9]{10})", first.content)
     assert match is not None
     token = match.group(1)
@@ -528,7 +528,9 @@ error: {}
         InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill doc_store", media=["/tmp/a.pdf"]),
         session,
     )
-    token = re.search(r"取消\s+([a-z0-9]{10})", first.content).group(1)
+    token_match = re.search(r"取消\s+([a-z0-9]{10})", first.content)
+    assert token_match is not None
+    token = token_match.group(1)
 
     cancelled = await executor.execute_if_matched(
         InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content=f"取消 {token}"),
@@ -576,6 +578,105 @@ error: {}
 
     assert result.handled is True
     assert "A -> u1" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_renders_jinja_template_with_if_for_blocks(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_list",
+        """
+meta: {id: reminder_list, version: "0.1", description: 提醒列表}
+params: {type: object, properties: {}}
+action: {kind: reminder_list}
+response:
+  template: |
+    {% if reminders %}
+    当前提醒 {{ reminders | length }} 条：
+    {% for item in reminders %}
+    - {{ item.id }} | {{ item.text }}
+    {% endfor %}
+    {% else %}
+    暂无提醒。
+    {% endif %}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+    store = ReminderRuntime(tmp_path / "reminders.json")
+    await store.create_reminder(
+        user_id="u1",
+        chat_id="chat",
+        text="PayBill",
+        due_at="2026-03-06T10:00:00",
+        channel="feishu",
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_list"),
+        session,
+    )
+
+    assert result.handled is True
+    assert "当前提醒 1 条" in result.content
+    assert "PayBill" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_field_mapping_takes_precedence_in_template_context(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "mapped_query_priority",
+        """
+meta: {id: mapped_query_priority, version: "0.1", description: 映射优先级}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response:
+  field_mapping:
+    标题: title
+  template: "{{ 标题 }}"
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    tools.register(
+        _FakeTool(
+            "bitable_search",
+            {
+                "records": [
+                    {
+                        "fields": {"title": "MappedTitle", "标题": "RawTitle"},
+                    }
+                ]
+            },
+        )
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill mapped_query_priority alpha"),
+        session,
+    )
+
+    assert result.handled is True
+    assert "MappedTitle" in result.content
+    assert "RawTitle" not in result.content
 
 
 @pytest.mark.asyncio

@@ -22,7 +22,7 @@ class SkillSpecRegistryReport:
 
 @dataclass(slots=True)
 class _SkillSpecRecord:
-    name: str
+    spec_id: str
     spec: SkillSpec
     path: Path
     source: str
@@ -40,33 +40,33 @@ class SkillSpecRegistry:
 
     @property
     def specs(self) -> dict[str, SkillSpec]:
-        return {name: record.spec for name, record in self._specs.items()}
+        return {spec_id: record.spec for spec_id, record in self._specs.items()}
 
     def load(self) -> dict[str, SkillSpec]:
         self.report = SkillSpecRegistryReport()
         layers = [
-            ("builtin", self._load_root(self.builtin_root, source="builtin")),
+            ("bundled", self._load_root(self.builtin_root, source="bundled")),
             ("managed", self._load_root(self.managed_root, source="managed")),
             ("workspace", self._load_root(self.workspace_root, source="workspace")),
         ]
 
         merged: dict[str, _SkillSpecRecord] = {}
         for source, records in layers:
-            for name, record in records.items():
-                previous = merged.get(name)
+            for spec_id, record in records.items():
+                previous = merged.get(spec_id)
                 if previous is not None:
-                    self.report.overridden.append(name)
+                    self.report.overridden.append(spec_id)
                     self.report.source_collisions.append(
-                        f"{name}: {previous.source}:{previous.path.name} -> {source}:{record.path.name}"
+                        f"{spec_id}: {previous.source}:{previous.path} -> {source}:{record.path}"
                     )
-                merged[name] = record
+                merged[spec_id] = record
 
         active: dict[str, _SkillSpecRecord] = {}
-        for name, record in merged.items():
+        for spec_id, record in merged.items():
             if not record.spec.meta.enabled:
-                self.report.disabled.append(name)
+                self.report.disabled.append(spec_id)
                 continue
-            active[name] = record
+            active[spec_id] = record
 
         self._specs = active
         self.report.loaded = sorted(active)
@@ -83,15 +83,23 @@ class SkillSpecRegistry:
 
         candidates = sorted(list(root.glob("*.yaml")) + list(root.glob("*.yml")))
         for path in candidates:
-            name = path.stem
             try:
                 raw = self._safe_load_yaml(path)
                 if not isinstance(raw, dict):
                     raise ValueError("skillspec must be a YAML object")
                 spec = SkillSpec.model_validate(raw)
-                records[name] = _SkillSpecRecord(name=name, spec=spec, path=path, source=source)
+                spec_id = str(spec.meta.id).strip()
+                if not spec_id:
+                    raise ValueError("meta.id must not be empty")
+                record = _SkillSpecRecord(spec_id=spec_id, spec=spec, path=path, source=source)
+                previous = records.get(spec_id)
+                if previous is not None:
+                    self.report.source_collisions.append(
+                        f"{spec_id}: {source}:{previous.path} -> {source}:{record.path}"
+                    )
+                records[spec_id] = record
             except Exception as exc:
-                self.report.invalid.append(f"{source}:{name} ({exc})")
+                self.report.invalid.append(f"{source}:{path.stem} ({exc})")
         return records
 
     @staticmethod

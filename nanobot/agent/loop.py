@@ -841,6 +841,12 @@ class AgentLoop:
                     content=continuation.content,
                     metadata={**(msg.metadata or {}), "_tool_turn": continuation.tool_turn},
                 )
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="没有可继续的内容了。",
+                metadata={**(msg.metadata or {}), "_tool_turn": True},
+            )
 
         if self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)

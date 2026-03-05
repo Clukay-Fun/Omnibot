@@ -489,6 +489,10 @@ class FeishuChannel(BaseChannel):
         if _MENTION_MARKER_RE.search(text):
             return True
         return bool(_AT_TAG_RE.search(raw_content))
+
+    @staticmethod
+    def _is_continuation_command(text: str) -> bool:
+        return text.strip() in {"继续", "展开"}
     
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -1879,7 +1883,12 @@ class FeishuChannel(BaseChannel):
                     raw_content=raw_content,
                     text=text_for_activation,
                 )
-                if not mentioned and not self._has_admin_prefix_bypass(sender_id=sender_id, content=text_for_activation):
+                allow_continuation = chat_type == "group" and self._is_continuation_command(text_for_activation)
+                if (
+                    not mentioned
+                    and not allow_continuation
+                    and not self._has_admin_prefix_bypass(sender_id=sender_id, content=text_for_activation)
+                ):
                     logger.debug("Drop Feishu group message without activation mention")
                     return
 
