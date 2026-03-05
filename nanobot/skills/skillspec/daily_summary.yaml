@@ -1,0 +1,33 @@
+meta:
+  id: daily_summary
+  version: "0.1"
+  title: Daily reminder summary
+  description: Build daily summary payload from active reminders (for cron delivery).
+  owner: built_in
+  domain: productivity
+params:
+  type: object
+  properties:
+    date:
+      type: string
+      description: Target date in YYYY-MM-DD; defaults to today.
+action:
+  kind: daily_summary
+response:
+  type: structured
+  template: |
+    {{ date }} 提醒汇总：
+    - 活跃提醒: {{ active_count }}
+    - 今日到期: {{ due_today_count }}
+    {% if due_today %}
+    {% for item in due_today %}
+    - {{ item.id }} | {{ item.due_at }} | {{ item.text }}
+    {% endfor %}
+    {% endif %}
+    {% if bridges and bridges.summary_cron_bridge %}
+    - cron 桥接: {{ bridges.summary_cron_bridge.status }}
+    {% endif %}
+error:
+  code: DAILY_SUMMARY_ERROR
+  message: 生成提醒汇总失败。
+  retryable: true

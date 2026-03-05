@@ -18,6 +18,7 @@ from nanobot.agent.skill_runtime.mineru_client import (
     SUPPORTED_DOCUMENT_EXTENSIONS,
     MinerUClient,
     MinerUClientError,
+    MinerUTimeoutError,
 )
 from nanobot.config.loader import load_config
 
@@ -32,6 +33,9 @@ class DocumentPipelineItemResult:
     extracted_fields: dict[str, str]
     extraction_confidence: float
     errors: list[str]
+    template_id: str | None = None
+    status: str = "ready"
+    write_ready: bool = False
 
 
 async def process_document(
@@ -58,23 +62,29 @@ async def process_document(
 
     results: list[DocumentPipelineItemResult] = []
     errors: list[str] = []
+    error_details: list[dict[str, str]] = []
 
     for raw_path in paths:
         path = Path(raw_path).expanduser()
         item_errors: list[str] = []
         if path.suffix.lower() not in SUPPORTED_DOCUMENT_EXTENSIONS:
             allowed = ", ".join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))
-            errors.append(
-                f"Unsupported file format '{path.suffix or '<none>'}' for {path.name}. "
-                f"Allowed formats: {allowed}"
+            message = (
+                f"Unsupported file format '{path.suffix or '<none>'}' for {path.name}. Allowed formats: {allowed}"
             )
+            errors.append(f"[UNSUPPORTED_FORMAT] {message}")
+            error_details.append({"code": "UNSUPPORTED_FORMAT", "path": str(path), "message": message})
             continue
         if not path.exists() or not path.is_file():
-            errors.append(f"Document file not found: {path}")
+            message = f"Document file not found: {path}"
+            errors.append(f"[FILE_NOT_FOUND] {message}")
+            error_details.append({"code": "FILE_NOT_FOUND", "path": str(path), "message": message})
             continue
 
         if not config.tools.mineru.enabled:
-            errors.append("MinerU integration is disabled in config.tools.mineru.enabled")
+            message = "MinerU integration is disabled in config.tools.mineru.enabled"
+            errors.append(message)
+            error_details.append({"code": "MINERU_DISABLED", "path": str(path), "message": message})
             break
 
         try:
@@ -83,9 +93,10 @@ async def process_document(
             classification = classifier.classify(text=text, filename=path.name)
             template = _select_template(templates, classification.document_type)
             if not template:
-                item_errors.append(
-                    f"No extraction template found for classified type '{classification.document_type}'"
-                )
+                message = f"No extraction template found for classified type '{classification.document_type}'"
+                item_errors.append(message)
+                errors.append(f"[TEMPLATE_MISSING] {path.name}: {message}")
+                error_details.append({"code": "TEMPLATE_MISSING", "path": str(path), "message": message})
                 results.append(
                     DocumentPipelineItemResult(
                         path=str(path),
@@ -94,11 +105,34 @@ async def process_document(
                         extracted_fields={},
                         extraction_confidence=0.0,
                         errors=item_errors,
+                        status="template_missing",
+                        write_ready=False,
                     )
                 )
                 continue
 
-            extraction = extract_fields(text, template)
+            try:
+                extraction = extract_fields(text, template)
+            except ExtractionQualityError as exc:
+                message = str(exc)
+                item_errors.append(message)
+                errors.append(f"[LOW_QUALITY_EXTRACTION] {path.name}: {message}")
+                error_details.append({"code": "LOW_QUALITY_EXTRACTION", "path": str(path), "message": message})
+                results.append(
+                    DocumentPipelineItemResult(
+                        path=str(path),
+                        document_type=classification.document_type,
+                        classification_confidence=classification.confidence,
+                        extracted_fields={},
+                        extraction_confidence=0.0,
+                        errors=item_errors,
+                        template_id=template.template_id,
+                        status="low_quality",
+                        write_ready=False,
+                    )
+                )
+                continue
+
             results.append(
                 DocumentPipelineItemResult(
                     path=str(path),
@@ -107,15 +141,41 @@ async def process_document(
                     extracted_fields=extraction.fields,
                     extraction_confidence=extraction.confidence,
                     errors=item_errors,
+                    template_id=extraction.template_id,
+                    status="ready",
+                    write_ready=bool(extraction.fields),
                 )
             )
-        except (MinerUClientError, ExtractionQualityError, ExtractionError) as exc:
-            errors.append(f"{path.name}: {exc}")
+        except MinerUTimeoutError as exc:
+            message = str(exc)
+            errors.append(f"[API_TIMEOUT] {path.name}: {message}")
+            error_details.append({"code": "API_TIMEOUT", "path": str(path), "message": message})
+        except MinerUClientError as exc:
+            message = str(exc)
+            errors.append(f"[API_ERROR] {path.name}: {message}")
+            error_details.append({"code": "API_ERROR", "path": str(path), "message": message})
+        except ExtractionError as exc:
+            message = str(exc)
+            errors.append(f"[LOW_QUALITY_EXTRACTION] {path.name}: {message}")
+            error_details.append({"code": "LOW_QUALITY_EXTRACTION", "path": str(path), "message": message})
+            results.append(
+                DocumentPipelineItemResult(
+                    path=str(path),
+                    document_type="unknown",
+                    classification_confidence=0.0,
+                    extracted_fields={},
+                    extraction_confidence=0.0,
+                    errors=[message],
+                    status="low_quality",
+                    write_ready=False,
+                )
+            )
 
     return {
         "skill_id": skill_id,
         "results": [asdict(item) for item in results],
         "errors": errors,
+        "error_details": error_details,
     }
 
 

@@ -14,6 +14,7 @@ class MatchSelection:
     spec_id: str
     remainder: str
     reason: str
+    score: float | None = None
 
 
 class SkillSpecMatcher:
@@ -22,9 +23,11 @@ class SkillSpecMatcher:
         specs: dict[str, SkillSpec],
         *,
         embedding_router: EmbeddingSkillRouter | None = None,
+        embedding_min_score: float = 0.15,
     ):
         self._specs = specs
         self._embedding_router = embedding_router
+        self._embedding_min_score = max(0.0, float(embedding_min_score))
 
     def select(self, text: str) -> MatchSelection | None:
         content = text.strip()
@@ -107,8 +110,8 @@ class SkillSpecMatcher:
             return None
 
         spec_id, score = ranked[0]
-        if score <= 0:
+        if score < self._embedding_min_score:
             return None
         if spec_id not in self._specs:
             return None
-        return MatchSelection(spec_id=spec_id, remainder=text, reason="embedding")
+        return MatchSelection(spec_id=spec_id, remainder=text, reason="embedding", score=float(score))

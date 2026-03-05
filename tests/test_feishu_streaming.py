@@ -743,6 +743,7 @@ async def test_streaming_can_hide_thinking_section_and_progress_phases() -> None
 @pytest.mark.asyncio
 async def test_on_message_skips_missing_optional_thread_fields() -> None:
     channel, _ = _build_channel()
+    channel.config.activation_group_policy = "always"
     captured: dict[str, Any] = {}
 
     async def _fake_handle_message(**kwargs: Any) -> None:
@@ -774,6 +775,30 @@ async def test_on_message_skips_missing_optional_thread_fields() -> None:
     assert captured["metadata"]["message_id"] == "msg-no-threads"
     assert "upper_message_id" not in captured["metadata"]
     assert captured.get("session_key") is None
+
+
+@pytest.mark.asyncio
+async def test_send_uses_custom_interactive_content_when_provided() -> None:
+    channel, client = _build_channel()
+    custom_card = {
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": "# custom"},
+        ],
+    }
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="fallback text",
+            metadata={"interactive_content": json.dumps(custom_card, ensure_ascii=False)},
+        )
+    )
+
+    assert _sent_message_count(client) == 1
+    sent = _first_sent_card(client)
+    assert sent == custom_card
 
 
 @pytest.mark.asyncio

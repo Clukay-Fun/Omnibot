@@ -18,6 +18,10 @@ class ExtractionError(RuntimeError):
 class ExtractionQualityError(ExtractionError):
     """Raised when extraction quality is below acceptable threshold."""
 
+    def __init__(self, message: str, *, missing_required_fields: list[str] | None = None):
+        super().__init__(message)
+        self.missing_required_fields = list(missing_required_fields or [])
+
 
 @dataclass(slots=True)
 class ExtractFieldRule:
@@ -54,11 +58,15 @@ def load_extract_templates(workspace_root: Path | None = None) -> dict[str, Extr
             templates[tpl.document_type] = tpl
 
     if workspace_root:
-        workspace_dir = workspace_root / "extract"
-        if workspace_dir.exists():
+        for workspace_dir in _workspace_template_dirs(workspace_root):
+            if not workspace_dir.exists():
+                continue
             for path in sorted(list(workspace_dir.glob("*.yaml")) + list(workspace_dir.glob("*.yml"))):
-                data = yaml.safe_load(path.read_text(encoding="utf-8"))
-                tpl = _parse_template(data, source=str(path))
+                try:
+                    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    tpl = _parse_template(data, source=str(path))
+                except (yaml.YAMLError, ExtractionError):
+                    continue
                 templates[tpl.document_type] = tpl
 
     return templates
@@ -88,7 +96,8 @@ def extract_fields(text: str, template: ExtractTemplate) -> ExtractionResult:
         missing_text = ", ".join(missing_required)
         raise ExtractionQualityError(
             "Low-quality extraction: missing required fields "
-            f"[{missing_text}] for template '{template.template_id}'"
+            f"[{missing_text}] for template '{template.template_id}'",
+            missing_required_fields=missing_required,
         )
 
     return ExtractionResult(
@@ -144,3 +153,10 @@ def _compute_confidence(values: dict[str, str], missing_required: list[str], req
         return 1.0 if values else 0.0
     hit = required_total - len(missing_required)
     return max(0.0, min(1.0, hit / required_total))
+
+
+def _workspace_template_dirs(workspace_root: Path) -> list[Path]:
+    return [
+        workspace_root / "skillspec" / "extract",
+        workspace_root / "extract",
+    ]

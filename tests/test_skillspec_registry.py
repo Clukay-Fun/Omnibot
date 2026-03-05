@@ -50,6 +50,11 @@ def test_registry_applies_workspace_override_and_disabled() -> None:
         assert specs == {}
         assert registry.report.loaded == []
         assert registry.report.overridden == ["case_search"]
+        assert len(registry.report.source_collisions) == 1
+        collision = registry.report.source_collisions[0]
+        assert collision.startswith("case_search: bundled:")
+        assert " -> workspace:" in collision
+        assert "case_search.yaml" in collision
         assert registry.report.disabled == ["case_search"]
 
 
@@ -68,3 +73,157 @@ def test_registry_reports_invalid_yaml() -> None:
         assert registry.report.loaded == []
         assert len(registry.report.invalid) == 1
         assert "workspace:broken" in registry.report.invalid[0]
+
+
+def test_registry_applies_three_level_precedence_with_managed_layer() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        builtin = root / "builtin"
+        workspace = root / "workspace"
+        managed = workspace / "managed"
+
+        _write_yaml(
+            builtin / "task_search.yaml",
+            """
+            meta:
+              id: task_search
+              version: "0.1"
+              enabled: true
+              description: builtin
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+        _write_yaml(
+            managed / "task_search.yaml",
+            """
+            meta:
+              id: task_search
+              version: "0.1"
+              enabled: true
+              description: managed
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+        _write_yaml(
+            workspace / "task_search.yaml",
+            """
+            meta:
+              id: task_search
+              version: "0.1"
+              enabled: true
+              description: workspace
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=builtin)
+        specs = registry.load()
+
+        assert specs["task_search"].meta.description == "workspace"
+        assert registry.report.overridden == ["task_search"]
+        assert len(registry.report.source_collisions) == 2
+        assert registry.report.source_collisions[0].startswith("task_search: bundled:")
+        assert " -> managed:" in registry.report.source_collisions[0]
+        assert " -> workspace:" in registry.report.source_collisions[1]
+
+
+def test_registry_managed_layer_can_disable_builtin_when_workspace_missing() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        builtin = root / "builtin"
+        workspace = root / "workspace"
+        managed = workspace / "managed"
+
+        _write_yaml(
+            builtin / "deadline_overview.yaml",
+            """
+            meta:
+              id: deadline_overview
+              version: "0.1"
+              enabled: true
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+        _write_yaml(
+            managed / "deadline_overview.yaml",
+            """
+            meta:
+              id: deadline_overview
+              version: "0.1"
+              enabled: false
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=builtin)
+        specs = registry.load()
+
+        assert "deadline_overview" not in specs
+        assert registry.report.overridden == ["deadline_overview"]
+        assert registry.report.disabled == ["deadline_overview"]
+
+
+def test_registry_merges_by_meta_id_even_when_filename_differs() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        builtin = root / "builtin"
+        workspace = root / "workspace"
+
+        _write_yaml(
+            builtin / "legacy_name.yaml",
+            """
+            meta:
+              id: customer_search
+              version: "0.1"
+              enabled: true
+              description: bundled
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+        _write_yaml(
+            workspace / "new_name.yaml",
+            """
+            meta:
+              id: customer_search
+              version: "0.1"
+              enabled: true
+              description: workspace
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=builtin)
+        specs = registry.load()
+
+        assert specs["customer_search"].meta.description == "workspace"
+        assert registry.report.overridden == ["customer_search"]
+        assert len(registry.report.source_collisions) == 1
+        assert "legacy_name.yaml" in registry.report.source_collisions[0]
+        assert "new_name.yaml" in registry.report.source_collisions[0]

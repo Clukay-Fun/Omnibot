@@ -23,6 +23,10 @@ def test_skillspec_files_exist() -> None:
         "task_search.yaml",
         "task_update.yaml",
         "doc_recognize.yaml",
+        "reminder_set.yaml",
+        "reminder_list.yaml",
+        "reminder_cancel.yaml",
+        "daily_summary.yaml",
     }
     found = {p.name for p in SKILLSPEC_DIR.glob("*.yaml")}
     assert expected.issubset(found)

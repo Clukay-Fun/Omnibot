@@ -31,6 +31,21 @@ action:
     paths: "{{ params.paths }}"
     skill_id: "doc_recognize"
     user_context: "{{ runtime.user_context }}"
+  write_bridge:
+    enabled: true
+    tool: bitable_create
+    confirm_required: true
+    confirm_respect_preference: true
+    args:
+      table_id: "{{ params.target_table }}"
+      fields:
+        source_path: "{{ result.results[0].path }}"
+        document_type: "{{ result.results[0].document_type }}"
+        extracted_fields: "{{ result.results[0].extracted_fields }}"
+    preview:
+      document_type: "{{ result.results[0].document_type }}"
+      source_path: "{{ result.results[0].path }}"
+      extracted_fields: "{{ result.results[0].extracted_fields }}"
 response:
   type: structured
   template: |
