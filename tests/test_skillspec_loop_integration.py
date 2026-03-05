@@ -97,6 +97,25 @@ error: {}
 
 
 @pytest.mark.asyncio
+async def test_loop_returns_no_more_continuation_without_falling_back_to_llm(tmp_path) -> None:
+    provider = _DummyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="oc_group", content="继续")
+    )
+
+    assert response is not None
+    assert response.content == "没有可继续的内容了。"
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_loop_falls_back_to_llm_when_skillspec_not_matched(tmp_path) -> None:
     provider = _DummyProvider()
     loop = AgentLoop(

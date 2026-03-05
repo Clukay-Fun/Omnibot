@@ -11,6 +11,11 @@ from typing import Any
 
 from loguru import logger
 
+try:
+    from jinja2 import Environment
+except Exception:  # pragma: no cover - optional dependency fallback
+    Environment = None  # type: ignore[assignment]
+
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
@@ -59,6 +64,7 @@ class SkillSpecExecutor:
         self._route_log_enabled = bool(route_log_enabled)
         self._route_log_top_k = max(1, int(route_log_top_k))
         self._reminder_runtime = reminder_runtime
+        self._jinja_env = Environment(trim_blocks=True, lstrip_blocks=True) if Environment is not None else None
         self.matcher = SkillSpecMatcher(
             registry.specs,
             embedding_router=self._embedding_router,
@@ -334,8 +340,7 @@ class SkillSpecExecutor:
             }
             session.metadata[self._SESSION_PENDING_WRITES] = pending
             preview = payload.get("preview") or {}
-            preview_text = json.dumps(preview, ensure_ascii=False)
-            return f"待确认写入：{preview_text}\n确认 {token}\n取消 {token}"
+            return self._format_write_confirmation(preview=preview, token=token)
 
         return self._stringify_payload(payload)
 
@@ -350,12 +355,15 @@ class SkillSpecExecutor:
 
         args = action.get("args") if isinstance(action.get("args"), dict) else {}
         resolved = self._resolve_templates(args, params=params, steps={}, runtime=runtime)
-        paths = resolved.get("paths") if isinstance(resolved, dict) else None
-        if not isinstance(paths, list):
-            paths = params.get("paths") if isinstance(params.get("paths"), list) else []
+        resolved_paths = resolved.get("paths") if isinstance(resolved, dict) else None
+        param_paths = params.get("paths")
+        paths_raw: Any = resolved_paths if isinstance(resolved_paths, list) else param_paths
+        if not isinstance(paths_raw, list):
+            paths_raw = []
+        paths = [str(p) for p in paths_raw]
 
         return await process_document(
-            paths=[str(p) for p in paths],
+            paths=paths,
             skill_id=str((resolved or {}).get("skill_id") or action.get("skill_id") or "document"),
             user_context=runtime.get("user_context") if isinstance(runtime, dict) else None,
         )
@@ -409,8 +417,7 @@ class SkillSpecExecutor:
             preview = payload if isinstance(payload, dict) else {"result": payload}
         else:
             preview = self._resolve_templates(preview_template, params=params, steps={}, runtime=bridge_runtime)
-        preview_text = json.dumps(preview, ensure_ascii=False)
-        return f"待确认写入：{preview_text}\n确认 {token}\n取消 {token}"
+        return self._format_write_confirmation(preview=preview, token=token)
 
     def _new_confirm_token(self) -> str:
         return uuid.uuid4().hex[:10]
@@ -426,7 +433,9 @@ class SkillSpecExecutor:
         if self._reminder_runtime is None:
             return {"error": "reminder runtime unavailable"}
 
-        user_ctx = runtime.get("user_context") if isinstance(runtime.get("user_context"), dict) else {}
+        runtime_map: dict[str, Any] = runtime if isinstance(runtime, dict) else {}
+        user_ctx_raw = runtime_map.get("user_context")
+        user_ctx: dict[str, Any] = user_ctx_raw if isinstance(user_ctx_raw, dict) else {}
         user_id = str(user_ctx.get("sender_id") or "")
         chat_id = str(user_ctx.get("chat_id") or "")
         channel = str(user_ctx.get("channel") or "")
@@ -632,6 +641,12 @@ class SkillSpecExecutor:
         if isinstance(response_cfg, dict):
             template = str(response_cfg.get("template") or "").strip()
 
+        records = self._extract_records(payload)
+        if template:
+            if isinstance(records, list) and self._is_record_row_template(template):
+                return [self._render_record_template(template, row) for row in records]
+            return self._render_template(template=template, payload=payload)
+
         if isinstance(payload, dict) and isinstance(payload.get("steps"), dict):
             lines: list[str] = []
             for step_id, step_data in payload["steps"].items():
@@ -642,12 +657,9 @@ class SkillSpecExecutor:
                         lines.append(self._stringify_row(row))
             return lines or "未查询到数据。"
 
-        records = self._extract_records(payload)
         if isinstance(records, list):
             if not records:
                 return "未查询到数据。"
-            if template:
-                return [self._render_record_template(template, row) for row in records]
             return records
 
         return self._stringify_payload(payload)
@@ -684,8 +696,13 @@ class SkillSpecExecutor:
             return record
 
         out = dict(record)
-        existing_fields_text = out.get("fields_text") if isinstance(out.get("fields_text"), dict) else {}
-        out["fields_text"] = {**existing_fields_text, **mapped_fields}
+        existing_fields_text_raw = out.get("fields_text")
+        existing_fields_text: dict[str, Any] = (
+            existing_fields_text_raw if isinstance(existing_fields_text_raw, dict) else {}
+        )
+        merged_fields_text = dict(existing_fields_text)
+        merged_fields_text.update(mapped_fields)
+        out["fields_text"] = merged_fields_text
         return out
 
     def _resolve_record_value(self, record: dict[str, Any], source: Any) -> Any:
@@ -696,7 +713,8 @@ class SkillSpecExecutor:
         if not text:
             return ""
 
-        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        fields_raw = record.get("fields")
+        fields: dict[str, Any] = fields_raw if isinstance(fields_raw, dict) else {}
         if text in fields:
             return fields[text]
 
@@ -705,6 +723,16 @@ class SkillSpecExecutor:
     def _render_record_template(self, template: str, row: Any) -> str:
         if not isinstance(row, dict):
             return str(row)
+
+        context = self._build_row_template_context(row)
+        if self._jinja_env is not None:
+            try:
+                rendered = self._jinja_env.from_string(template).render(context)
+                normalized = rendered.strip()
+                if normalized:
+                    return normalized
+            except Exception:
+                logger.debug("Failed to render row template via jinja2; fallback to legacy formatter")
 
         def _replace(found: re.Match[str]) -> str:
             resolved = self._resolve_template_path(found.group(1).strip(), row=row)
@@ -715,6 +743,52 @@ class SkillSpecExecutor:
             return str(resolved)
 
         return re.sub(r"\{\{\s*(.*?)\s*\}\}", _replace, template)
+
+    def _render_template(self, *, template: str, payload: Any) -> str:
+        context = self._build_payload_template_context(payload)
+        if self._jinja_env is not None:
+            try:
+                rendered = self._jinja_env.from_string(template).render(context)
+                normalized = rendered.strip()
+                if normalized:
+                    return normalized
+            except Exception:
+                logger.debug("Failed to render payload template via jinja2; fallback to JSON")
+        return self._stringify_payload(payload)
+
+    def _build_payload_template_context(self, payload: Any) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "result": payload,
+            "payload": payload,
+        }
+        if isinstance(payload, dict):
+            context.update(payload)
+            records = payload.get("records")
+            if isinstance(records, list):
+                context["records"] = [self._build_row_template_context(row) for row in records]
+        elif isinstance(payload, list):
+            rows = [self._build_row_template_context(row) for row in payload]
+            context["records"] = rows
+            context["items"] = rows
+        return context
+
+    @staticmethod
+    def _is_record_row_template(template: str) -> bool:
+        return "{%" not in template and "records" not in template and "result" not in template
+
+    def _build_row_template_context(self, row: Any) -> Any:
+        if not isinstance(row, dict):
+            return row
+        fields_raw = row.get("fields")
+        fields: dict[str, Any] = fields_raw if isinstance(fields_raw, dict) else {}
+        fields_text_raw = row.get("fields_text")
+        fields_text: dict[str, Any] = fields_text_raw if isinstance(fields_text_raw, dict) else {}
+        merged_fields = dict(fields)
+        merged_fields.update(fields_text)
+        context = dict(merged_fields)
+        context["row"] = row
+        context["fields"] = merged_fields
+        return context
 
     def _resolve_template_path(self, path: str, *, row: dict[str, Any]) -> Any:
         fields = row.get("fields_text") if isinstance(row.get("fields_text"), dict) else {}
@@ -781,7 +855,13 @@ class SkillSpecExecutor:
         chat_type = str((msg.metadata or {}).get("chat_type") or "")
         if chat_type != "group":
             return None
-        return msg.sender_id
+        sender_id = str(msg.sender_id or "").strip()
+        return sender_id or None
+
+    @staticmethod
+    def _format_write_confirmation(*, preview: Any, token: str) -> str:
+        preview_text = json.dumps(preview, ensure_ascii=False)
+        return f"写入预览：{preview_text}\n请回复「确认 {token}」继续，或回复「取消 {token}」终止。"
 
     def _build_sensitive_metadata(self, *, spec: Any, msg: InboundMessage) -> dict[str, Any]:
         private_chat_id = self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg)
