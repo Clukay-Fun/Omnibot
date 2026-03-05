@@ -101,6 +101,9 @@ _THINKING_GENERIC_BASE = {
     "已获取数据，正在整理答案",
 }
 
+_MENTION_MARKER_RE = re.compile(r"@_user_\d+")
+_AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+
 # 消息类型展示映射
 MSG_TYPE_MAP = {
     "image": "[image]",
@@ -449,6 +452,43 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
+
+    def _resolve_activation_policy(self, *, chat_type: str, is_topic: bool) -> str:
+        if chat_type != "group":
+            return str(self.config.activation_private_policy or "always").lower()
+        if is_topic:
+            return str(self.config.activation_topic_policy or "always").lower()
+        return str(self.config.activation_group_policy or "mention").lower()
+
+    @staticmethod
+    def _is_topic_message(message: Any) -> bool:
+        thread_id = _safe_get(message, "thread_id", None)
+        if thread_id:
+            return True
+        root_id = _safe_get(message, "root_id", None)
+        parent_id = _safe_get(message, "parent_id", None)
+        message_id = _safe_get(message, "message_id", None)
+        return bool(root_id and parent_id and message_id and parent_id != message_id)
+
+    def _has_admin_prefix_bypass(self, *, sender_id: str, content: str) -> bool:
+        prefix = str(self.config.activation_admin_prefix_bypass or "").strip()
+        if not prefix or not content:
+            return False
+        if sender_id not in set(self.config.activation_admin_open_ids or []):
+            return False
+        return content.lstrip().startswith(prefix)
+
+    @staticmethod
+    def _is_mentioned(event_message: Any, *, content_json: dict[str, Any], raw_content: str, text: str) -> bool:
+        payload_mentions = _safe_get(event_message, "mentions", None)
+        if isinstance(payload_mentions, list) and payload_mentions:
+            return True
+        json_mentions = content_json.get("mentions")
+        if isinstance(json_mentions, list) and json_mentions:
+            return True
+        if _MENTION_MARKER_RE.search(text):
+            return True
+        return bool(_AT_TAG_RE.search(raw_content))
     
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -1814,6 +1854,35 @@ class FeishuChannel(BaseChannel):
             chat_type = message.chat_type
             msg_type = message.message_type
 
+            raw_content = message.content or ""
+
+            try:
+                content_json = json.loads(raw_content) if raw_content else {}
+            except json.JSONDecodeError:
+                content_json = {}
+
+            text_for_activation = ""
+            if msg_type == "text":
+                text_for_activation = str(content_json.get("text", ""))
+            elif msg_type == "post":
+                text_for_activation = _extract_post_text(content_json)
+
+            is_topic = self._is_topic_message(message)
+            activation_policy = self._resolve_activation_policy(chat_type=chat_type, is_topic=is_topic)
+            if activation_policy == "off":
+                logger.debug("Drop Feishu inbound due to activation policy=off")
+                return
+            if activation_policy == "mention":
+                mentioned = self._is_mentioned(
+                    message,
+                    content_json=content_json,
+                    raw_content=raw_content,
+                    text=text_for_activation,
+                )
+                if not mentioned and not self._has_admin_prefix_bypass(sender_id=sender_id, content=text_for_activation):
+                    logger.debug("Drop Feishu group message without activation mention")
+                    return
+
             # Add reaction (optional)
             if self.config.react_enabled:
                 await self._add_reaction(message_id, self.config.react_emoji)
@@ -1821,11 +1890,6 @@ class FeishuChannel(BaseChannel):
             # Parse content
             content_parts = []
             media_paths = []
-
-            try:
-                content_json = json.loads(message.content) if message.content else {}
-            except json.JSONDecodeError:
-                content_json = {}
 
             if msg_type == "text":
                 text = content_json.get("text", "")

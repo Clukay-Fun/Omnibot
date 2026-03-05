@@ -28,6 +28,13 @@ channels:
     stream_card_show_thinking: true
     stream_answer_warmup_chars: 24
     stream_answer_warmup_ms: 300
+
+    # Activation gate
+    activation_private_policy: always
+    activation_group_policy: mention
+    activation_topic_policy: always
+    activation_admin_open_ids: []
+    activation_admin_prefix_bypass: "/bot"
 ```
 
 Notes:
@@ -43,6 +50,8 @@ Notes:
 - `stream_card_header_title`: Card 2.0 header title; empty string means no header title.
 - `stream_card_show_thinking`: show/hide thinking section in the streaming card.
 - `stream_answer_warmup_chars` / `stream_answer_warmup_ms`: first answer streaming trigger threshold (lower values start earlier, reducing first-screen large chunk).
+- `activation_private_policy` / `activation_group_policy` / `activation_topic_policy`: inbound activation policy (`always`, `mention`, `off`). Default policy is private always, group mention, topic always.
+- `activation_admin_open_ids` + `activation_admin_prefix_bypass`: optional bypass when group policy is `mention`; listed admins can trigger processing with a prefix such as `/bot`.
 - 推荐平衡配置：`stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120`、`stream_card_print_frequency_ms=50`、`stream_card_print_step=2`。
 - Thinking section uses quoted markdown style for a lighter look; exact font-size values are controlled by Feishu client and are not configurable in this payload mode.
 - Runtime path is Card 2.0 first (`id_convert` + `card_element.content` update). The same card maintains a subtle quoted thinking block and an answer block.

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,6 +11,36 @@ from nanobot.config.schema import FeishuConfig
 
 def _build_channel() -> FeishuChannel:
     return FeishuChannel(config=FeishuConfig(), bus=MessageBus())
+
+
+def _build_text_event(
+    *,
+    message_id: str,
+    text: str,
+    chat_type: str = "group",
+    sender_id: str = "ou_sender",
+    mentions: list[Any] | None = None,
+    thread_id: str | None = None,
+) -> Any:
+    return SimpleNamespace(
+        event=SimpleNamespace(
+            message=SimpleNamespace(
+                message_id=message_id,
+                chat_id="oc_chat_1",
+                chat_type=chat_type,
+                message_type="text",
+                content=json.dumps({"text": text}, ensure_ascii=False),
+                mentions=mentions,
+                thread_id=thread_id,
+                root_id=thread_id,
+                parent_id=thread_id,
+            ),
+            sender=SimpleNamespace(
+                sender_type="user",
+                sender_id=SimpleNamespace(open_id=sender_id),
+            ),
+        )
+    )
 
 
 def test_build_card_action_content_extracts_structured_fields() -> None:
@@ -86,3 +117,85 @@ async def test_on_card_action_ignores_malformed_payload() -> None:
     await channel._on_card_action(SimpleNamespace(event=SimpleNamespace()))
 
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_group_message_requires_mention_by_default() -> None:
+    channel = _build_channel()
+    called = False
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(_build_text_event(message_id="m-g-1", text="hello"))
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_group_message_allows_payload_mention_signal() -> None:
+    channel = _build_channel()
+    called = False
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(
+        _build_text_event(
+            message_id="m-g-2",
+            text="hello",
+            mentions=[{"name": "bot"}],
+        )
+    )
+
+    assert called is True
+
+
+@pytest.mark.asyncio
+async def test_group_message_allows_admin_prefix_bypass() -> None:
+    channel = FeishuChannel(
+        config=FeishuConfig(
+            activation_admin_open_ids=["ou_admin"],
+            activation_admin_prefix_bypass="/bot",
+        ),
+        bus=MessageBus(),
+    )
+    called = False
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(_build_text_event(message_id="m-g-3", text="/bot run", sender_id="ou_admin"))
+
+    assert called is True
+
+
+@pytest.mark.asyncio
+async def test_topic_message_is_always_activated_by_default() -> None:
+    channel = _build_channel()
+    called = False
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(
+        _build_text_event(
+            message_id="m-topic-1",
+            text="hello",
+            thread_id="omt_topic_1",
+        )
+    )
+
+    assert called is True

@@ -57,6 +57,11 @@ class FeishuConfig(Base):
     stream_card_show_thinking: bool = True  # Show thinking section in streaming card
     stream_answer_warmup_chars: int = 24  # Min streamed chars before answer starts rendering
     stream_answer_warmup_ms: int = 300  # Min wait before first streamed answer render
+    activation_private_policy: Literal["always", "mention", "off"] = "always"
+    activation_group_policy: Literal["always", "mention", "off"] = "mention"
+    activation_topic_policy: Literal["always", "mention", "off"] = "always"
+    activation_admin_open_ids: list[str] = Field(default_factory=list)
+    activation_admin_prefix_bypass: str = ""
 
 
 class DingTalkConfig(Base):
