@@ -743,6 +743,7 @@ async def test_streaming_can_hide_thinking_section_and_progress_phases() -> None
 @pytest.mark.asyncio
 async def test_on_message_skips_missing_optional_thread_fields() -> None:
     channel, _ = _build_channel()
+    channel.config.activation_group_policy = "always"
     captured: dict[str, Any] = {}
 
     async def _fake_handle_message(**kwargs: Any) -> None:
