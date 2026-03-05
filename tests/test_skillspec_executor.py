@@ -794,6 +794,84 @@ error: {}
 
 
 @pytest.mark.asyncio
+async def test_executor_reminder_guard_blocks_non_reminder_text_but_allows_explicit(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_list",
+        """
+meta: {id: reminder_list, version: "0.1", description: 提醒列表}
+params: {type: object, properties: {}}
+action: {kind: reminder_list}
+response: {}
+error: {}
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        embedding_router=cast(Any, _FixedEmbeddingRouter([("reminder_list", 0.91)])),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    blocked = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="叫我什么"),
+        session,
+    )
+    assert blocked.handled is False
+
+    explicit = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_list"),
+        session,
+    )
+    assert explicit.handled is True
+
+
+@pytest.mark.asyncio
+async def test_executor_smalltalk_guard_blocks_embedding_false_positive(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_query",
+        """
+meta: {id: task_query, version: "0.1", description: 查询任务数据}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        embedding_router=cast(Any, _FixedEmbeddingRouter([("task_query", 0.95)])),
+    )
+    session = Session("feishu:chat")
+
+    blocked = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="您能干嘛"),
+        session,
+    )
+    assert blocked.handled is False
+    assert search.calls == []
+
+    routed = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="查任务"),
+        session,
+    )
+    assert routed.handled is True
+    assert len(search.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_executor_field_mapping_takes_precedence_in_template_context(tmp_path: Path) -> None:
     registry = _build_registry(
         tmp_path,

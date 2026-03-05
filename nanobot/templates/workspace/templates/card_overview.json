@@ -1,0 +1,8 @@
+{
+  "header": "【跨表总览 | cross.OVERVIEW】",
+  "source_title": "- 数据来源统计:",
+  "preview_title": "- 结果预览:",
+  "empty_source": "- 数据源: —",
+  "empty_preview": "- —",
+  "overflow_hint": "- ... 其余 {omitted} 条请回复“{continue_command}”"
+}

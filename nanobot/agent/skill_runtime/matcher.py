@@ -24,10 +24,16 @@ class SkillSpecMatcher:
         *,
         embedding_router: EmbeddingSkillRouter | None = None,
         embedding_min_score: float = 0.15,
+        case_query_keywords: tuple[str, ...] | None = None,
+        case_query_prefixes: tuple[str, ...] | None = None,
+        case_query_suffixes: tuple[str, ...] | None = None,
     ):
         self._specs = specs
         self._embedding_router = embedding_router
         self._embedding_min_score = max(0.0, float(embedding_min_score))
+        self._case_query_keywords = tuple(case_query_keywords or ("case",))
+        self._case_query_prefixes = tuple(case_query_prefixes or ())
+        self._case_query_suffixes = tuple(case_query_suffixes or ())
 
     def select(self, text: str) -> MatchSelection | None:
         content = text.strip()
@@ -58,17 +64,20 @@ class SkillSpecMatcher:
             )
         return None
 
-    @staticmethod
-    def _looks_like_case_query(text: str) -> bool:
+    def _looks_like_case_query(self, text: str) -> bool:
         lowered = text.lower()
-        keywords = ("案子", "案件", "案号", "项目id", "开庭", "主办律师", "委托人")
-        return any(keyword in lowered for keyword in keywords)
+        return any(keyword and keyword.lower() in lowered for keyword in self._case_query_keywords)
 
-    @staticmethod
-    def _extract_case_query(text: str) -> str:
+    def _extract_case_query(self, text: str) -> str:
         segment = re.split(r"[，,。！？!?\n]", text.strip(), maxsplit=1)[0].strip()
-        segment = re.sub(r"^(请|帮我|麻烦|查找|查询|搜索|查下|查一下|看看|找一下|找)\s*", "", segment)
-        segment = re.sub(r"(?:的)?(?:案子|案件|案)\s*$", "", segment)
+        if self._case_query_prefixes:
+            prefix_pattern = "|".join(re.escape(token) for token in self._case_query_prefixes if token)
+            if prefix_pattern:
+                segment = re.sub(rf"^(?:{prefix_pattern})\s*", "", segment)
+        if self._case_query_suffixes:
+            suffix_pattern = "|".join(re.escape(token) for token in self._case_query_suffixes if token)
+            if suffix_pattern:
+                segment = re.sub(rf"(?:的)?(?:{suffix_pattern})\s*$", "", segment)
         segment = re.sub(r"\s+", " ", segment).strip()
         return segment or text.strip()
 

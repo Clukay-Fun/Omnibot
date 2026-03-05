@@ -1,0 +1,14 @@
+{
+  "header": "【合同卡片 | contract.HT-T1】",
+  "lines": [
+    "- 合同编号: {contract_no}",
+    "- 合同名称: {name}",
+    "- 对方主体: {counterparty}",
+    "- 负责人: {owner}",
+    "- 合同金额: {amount}",
+    "- 状态: {status}",
+    "- 签订日期: {sign_date}",
+    "- 命中记录: {total}",
+    "- 详情链接: {url}"
+  ]
+}

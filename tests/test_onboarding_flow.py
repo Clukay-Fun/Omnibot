@@ -58,7 +58,7 @@ async def test_first_feishu_message_triggers_single_onboarding_card(tmp_path) ->
     assert response.metadata.get("onboarding_stage") == "single"
     assert "interactive_content" in response.metadata
     card = json.loads(response.metadata["interactive_content"])
-    assert card["header"]["title"]["content"] == "👋 欢迎使用 Omnibot"
+    assert card["header"]["title"]["content"] == "👋 你好，我是 Omnibot"
     assert card["config"]["update_multi"] is True
     assert card["elements"][2]["tag"] == "form"
     assert card["elements"][2]["name"] == "onboarding_form"
@@ -238,6 +238,37 @@ async def test_completed_onboarding_card_click_is_idempotent(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_user_greeting_uses_llm_instead_of_fixed_reply(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+    store = UserMemoryStore(tmp_path)
+    store.write(
+        "feishu",
+        "ou_greeting",
+        {
+            "identity": {"name": "张三"},
+            "preferences": {"preferred_name": "张律"},
+            "dynamic": {},
+            "skillspec": {"confirm_preference": "manual"},
+            "onboarding": {"status": "completed", "step": "completed"},
+        },
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_greeting",
+            chat_id="oc_group",
+            content="您好",
+            metadata={"chat_type": "group", "message_id": "m-intro-2"},
+        )
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_setup_command_restarts_onboarding_after_completion(tmp_path) -> None:
     loop, _ = _build_loop(tmp_path)
     store = UserMemoryStore(tmp_path)
@@ -268,3 +299,42 @@ async def test_setup_command_restarts_onboarding_after_completion(tmp_path) -> N
     profile = store.read("feishu", "ou_existing")
     assert profile["onboarding"]["status"] == "pending"
     assert profile["onboarding"]["step"] == "identity"
+
+
+@pytest.mark.asyncio
+async def test_status_command_returns_current_preferences(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+    store = UserMemoryStore(tmp_path)
+    store.write(
+        "feishu",
+        "ou_status",
+        {
+            "identity": {"name": "张三", "role": "lawyer"},
+            "preferences": {
+                "response_style": "concise",
+                "preferred_name": "张律",
+                "query_scope": "all",
+            },
+            "dynamic": {},
+            "skillspec": {"confirm_preference": "auto"},
+            "onboarding": {"status": "completed", "step": "completed"},
+        },
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_status",
+            chat_id="oc_group",
+            content="/status",
+            metadata={"chat_type": "group", "message_id": "m-status"},
+        )
+    )
+
+    assert response is not None
+    assert "📌 当前设置" in response.content
+    assert "怎么称呼您：张律" in response.content
+    assert "回复风格：简洁" in response.content
+    assert "录入数据时：直接写入，不用每次确认" in response.content
+    assert "查案件时默认范围：查全部" in response.content
+    assert provider.calls == 0

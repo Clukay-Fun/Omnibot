@@ -22,6 +22,7 @@ from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
@@ -40,7 +41,6 @@ class SkillSpecExecutor:
     _SESSION_CONTINUATION_TOKEN = "skillspec_continuation_token"
     _SESSION_CONTINUATION_POLICY = "skillspec_continuation_policy"
     _SESSION_PENDING_WRITES = "skillspec_pending_writes"
-    _CONTINUE_COMMANDS = {"继续", "展开"}
 
     def __init__(
         self,
@@ -54,7 +54,51 @@ class SkillSpecExecutor:
         route_log_enabled: bool = False,
         route_log_top_k: int = 3,
         reminder_runtime: ReminderRuntime | None = None,
+        runtime_text: RuntimeTextCatalog | None = None,
     ):
+        self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
+        self._continue_commands = {
+            cmd.strip()
+            for cmd in self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue", "more"]
+            )
+            if cmd.strip()
+        }
+        self._reminder_domain_keywords = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("domain_hints", "reminder_keywords", ["reminder"])
+            if keyword.strip()
+        )
+        self._cancel_intent_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("domain_hints", "cancel_intent_tokens", ["cancel"])
+            if token.strip()
+        )
+        self._smalltalk_hints = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("smalltalk_triggers", "smalltalk_hints", ["hello"])
+            if keyword.strip()
+        )
+        self._business_hints = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("domain_hints", "business_keywords", ["task"])
+            if keyword.strip()
+        )
+        self._ability_subject_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_subject_tokens", ["you"])
+            if token.strip()
+        )
+        self._ability_aux_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_aux_tokens", ["can"])
+            if token.strip()
+        )
+        self._ability_action_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_action_tokens", ["do"])
+            if token.strip()
+        )
         self.registry = registry
         self.tools = tools
         self.output_guard = output_guard
@@ -69,6 +113,15 @@ class SkillSpecExecutor:
             registry.specs,
             embedding_router=self._embedding_router,
             embedding_min_score=self._embedding_min_score,
+            case_query_keywords=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_keywords", ["case"])
+            ),
+            case_query_prefixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_prefixes", [])
+            ),
+            case_query_suffixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_suffixes", [])
+            ),
         )
         self.param_parser = SkillSpecParamParser()
 
@@ -77,10 +130,19 @@ class SkillSpecExecutor:
             self.registry.specs,
             embedding_router=self._embedding_router,
             embedding_min_score=self._embedding_min_score,
+            case_query_keywords=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_keywords", ["case"])
+            ),
+            case_query_prefixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_prefixes", [])
+            ),
+            case_query_suffixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_suffixes", [])
+            ),
         )
 
     def can_handle_continuation(self, text: str) -> bool:
-        return text.strip() in self._CONTINUE_COMMANDS
+        return text.strip() in self._continue_commands
 
     def continue_from_session(self, session: Any) -> SkillExecutionResult | None:
         token = str(session.metadata.get(self._SESSION_CONTINUATION_TOKEN, "")).strip()
@@ -90,7 +152,10 @@ class SkillSpecExecutor:
         session.metadata.pop(self._SESSION_CONTINUATION_TOKEN, None)
         policy = session.metadata.get(self._SESSION_CONTINUATION_POLICY, {})
         if payload is None:
-            return SkillExecutionResult(handled=True, content="没有可继续的内容了。")
+            return SkillExecutionResult(
+                handled=True,
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "No more content."),
+            )
         return SkillExecutionResult(
             handled=True,
             content=self._render_guarded(payload, policy=policy, session=session),
@@ -127,6 +192,15 @@ class SkillSpecExecutor:
         }
         action = spec.action if isinstance(spec.action, dict) else {}
         kind = str(action.get("kind", "")).lower()
+
+        if selection.reason != "explicit" and self._looks_like_smalltalk(msg.content):
+            self._log_route_miss(msg.content)
+            return SkillExecutionResult(handled=False)
+
+        if kind in {"reminder_set", "reminder_list", "reminder_cancel", "daily_summary"}:
+            if not self._is_reminder_intent(msg=msg, selection=selection, kind=kind):
+                self._log_route_miss(msg.content)
+                return SkillExecutionResult(handled=False)
 
         if kind == "query":
             payload = await self._run_query_action(action=action, params=params, runtime=runtime)
@@ -190,6 +264,43 @@ class SkillSpecExecutor:
             return SkillExecutionResult(handled=True, content=response, tool_turn=True, metadata=route_metadata)
 
         return SkillExecutionResult(handled=False)
+
+    def _is_reminder_intent(self, *, msg: InboundMessage, selection: MatchSelection, kind: str) -> bool:
+        if selection.reason == "explicit":
+            return True
+
+        content = msg.content.strip().lower()
+        if not content:
+            return False
+
+        if any(keyword in content for keyword in self._reminder_domain_keywords):
+            return True
+
+        if kind == "reminder_cancel":
+            has_cancel = any(token in content for token in self._cancel_intent_tokens)
+            has_reminder_id = re.search(r"\br\d{4,}\b", content) is not None
+            return has_cancel and has_reminder_id
+
+        return False
+
+    def _looks_like_smalltalk(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).strip().lower().rstrip("。.!！?？")
+        if not compact:
+            return False
+
+        if any(keyword in compact for keyword in self._business_hints):
+            return False
+
+        if compact in self._smalltalk_hints:
+            return True
+
+        if any(token in compact for token in self._ability_subject_tokens) and any(
+            token in compact for token in self._ability_aux_tokens
+        ):
+            if any(token in compact for token in self._ability_action_tokens):
+                return True
+
+        return False
 
     def _build_route_metadata(self, selection: MatchSelection, source_text: str) -> dict[str, Any]:
         route: dict[str, Any] = {
@@ -822,7 +933,12 @@ class SkillSpecExecutor:
         policy = self._resolve_output_policy(spec)
         response_cfg = spec.response if isinstance(spec.response, dict) else {}
         mapped_payload = self._apply_response_field_mapping(payload, response_cfg=response_cfg)
-        rendered = self._render_payload(mapped_payload, response_cfg=response_cfg)
+        not_found_message = self._resolve_not_found_message(spec)
+        rendered = self._render_payload(
+            mapped_payload,
+            response_cfg=response_cfg,
+            not_found_message=not_found_message,
+        )
         if isinstance(rendered, list):
             result = self.output_guard.guard_items(rendered, max_items=int(policy.get("max_items", 5)))
             return self._persist_guard_result(result, policy=policy, session=session)
@@ -831,6 +947,14 @@ class SkillSpecExecutor:
             result = self.output_guard.guard_text(str(rendered), max_chars=int(policy["max_chars"]))
             return self._persist_guard_result(result, policy=policy, session=session)
         return str(rendered)
+
+    def _resolve_not_found_message(self, spec: Any) -> str:
+        error_cfg = spec.error if isinstance(getattr(spec, "error", None), dict) else {}
+        for key in ("not_found", "not_found_message"):
+            value = error_cfg.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self._runtime_text.prompt_text("pagination", "not_found_data", "No data found.")
 
     def _render_guarded(self, payload: Any, *, policy: dict[str, Any], session: Any) -> str:
         if isinstance(payload, list):
@@ -857,7 +981,14 @@ class SkillSpecExecutor:
         else:
             content = str(result.content)
         if result.truncated:
-            return f"{content}\n\n回复“继续”查看剩余内容"
+            continuation_commands = self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue"]
+            )
+            continuation_cmd = continuation_commands[0] if continuation_commands else "continue"
+            hint_template = self._runtime_text.prompt_text(
+                "pagination", "continuation_hint", "Reply '{continue_command}' to continue."
+            )
+            return f"{content}\n\n{hint_template.format(continue_command=continuation_cmd)}"
         return content
 
     def _resolve_output_policy(self, spec: Any) -> dict[str, Any]:
@@ -872,7 +1003,13 @@ class SkillSpecExecutor:
         policy.setdefault("max_items", 5)
         return policy
 
-    def _render_payload(self, payload: Any, *, response_cfg: dict[str, Any] | None = None) -> str | list[Any]:
+    def _render_payload(
+        self,
+        payload: Any,
+        *,
+        response_cfg: dict[str, Any] | None = None,
+        not_found_message: str,
+    ) -> str | list[Any]:
         template = ""
         if isinstance(response_cfg, dict):
             template = str(response_cfg.get("template") or "").strip()
@@ -891,11 +1028,11 @@ class SkillSpecExecutor:
                     lines.append(f"[{step_id}] 命中 {len(rows)} 条")
                     for row in rows[:3]:
                         lines.append(self._stringify_row(row))
-            return lines or "未查询到数据。"
+            return lines or not_found_message
 
         if isinstance(records, list):
             if not records:
-                return "未查询到数据。"
+                return not_found_message
             return records
 
         return self._stringify_payload(payload)
@@ -1094,10 +1231,12 @@ class SkillSpecExecutor:
         sender_id = str(msg.sender_id or "").strip()
         return sender_id or None
 
-    @staticmethod
-    def _format_write_confirmation(*, preview: Any, token: str) -> str:
+    def _format_write_confirmation(self, *, preview: Any, token: str) -> str:
         preview_text = json.dumps(preview, ensure_ascii=False)
-        return f"写入预览：{preview_text}\n确认 {token} / 取消 {token}"
+        template = self._runtime_text.template("card_confirm").get("text")
+        if isinstance(template, str) and template.strip():
+            return template.format(preview=preview_text, token=token)
+        return f"{preview_text}\nconfirm {token} / cancel {token}"
 
     def _build_sensitive_metadata(self, *, spec: Any, msg: InboundMessage) -> dict[str, Any]:
         private_chat_id = self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg)

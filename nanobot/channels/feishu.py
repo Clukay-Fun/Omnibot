@@ -16,6 +16,7 @@ from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig
 
@@ -84,21 +85,6 @@ class _FeishuStreamState:
 
 _STREAM_THINKING_ELEMENT_ID = "thinking_text"
 _STREAM_ANSWER_ELEMENT_ID = "answer_text"
-_THINKING_COLLAPSED_SUMMARY = "思考完成"
-_THINKING_GENERIC_LINES = {
-    "思考中",
-    "思考完成",
-    "正在思考中...",
-    "正在分析问题与检索数据...",
-    "已获取数据，正在整理答案...",
-}
-_THINKING_GENERIC_BASE = {
-    "思考中",
-    "思考完成",
-    "正在思考中",
-    "正在分析问题与检索数据",
-    "已获取数据，正在整理答案",
-}
 
 _MENTION_MARKER_RE = re.compile(r"@_user_\d+")
 _AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
@@ -450,9 +436,35 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
 
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
+    def __init__(self, config: FeishuConfig, bus: MessageBus, workspace: Path | None = None):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
+        self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._continuation_commands = {
+            cmd.strip()
+            for cmd in self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue", "more"]
+            )
+            if cmd.strip()
+        }
+        self._thinking_collapsed_summary = self._runtime_text.prompt_text(
+            "progress", "thinking_collapsed_summary", "Thinking complete"
+        )
+        self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "Thinking")
+        self._thinking_placeholder_markdown = self._runtime_text.prompt_text(
+            "progress", "thinking_placeholder_markdown", "> Thinking"
+        )
+        generic_lines = self._runtime_text.prompt_lines(
+            "progress",
+            "thinking_generic_lines",
+            ["Thinking", "Thinking complete"],
+        )
+        self._thinking_generic_lines = {line.strip() for line in generic_lines if line.strip()}
+        self._thinking_generic_base = {
+            re.sub(r"[。\.!！?？…]+$", "", line.strip())
+            for line in self._thinking_generic_lines
+            if line.strip()
+        }
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -498,9 +510,8 @@ class FeishuChannel(BaseChannel):
             return True
         return bool(_AT_TAG_RE.search(raw_content))
 
-    @staticmethod
-    def _is_continuation_command(text: str) -> bool:
-        return text.strip() in {"继续", "展开"}
+    def _is_continuation_command(self, text: str) -> bool:
+        return text.strip() in self._continuation_commands
 
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -1154,7 +1165,7 @@ class FeishuChannel(BaseChannel):
 
     def _format_thinking_block(self, thinking_text: str, collapsed: bool) -> str:
         """格式化思考区文本（浅色/小块风格）。"""
-        summary = _THINKING_COLLAPSED_SUMMARY if collapsed else "思考中"
+        summary = self._thinking_collapsed_summary if collapsed else self._thinking_active
         if not self.config.stream_card_show_thinking:
             return ""
 
@@ -1177,26 +1188,23 @@ class FeishuChannel(BaseChannel):
         normalized = re.sub(r"[。\.！!？?…]+$", "", normalized)
         return normalized.strip()
 
-    @classmethod
-    def _is_generic_thinking_line(cls, line: str) -> bool:
+    def _is_generic_thinking_line(self, line: str) -> bool:
         """判断是否为通用占位思考文本。"""
-        normalized = cls._normalize_thinking_line(line)
+        normalized = self._normalize_thinking_line(line)
         if not normalized:
             return True
-        return normalized in _THINKING_GENERIC_BASE or normalized in _THINKING_GENERIC_LINES
+        return normalized in self._thinking_generic_base or normalized in self._thinking_generic_lines
 
-    @classmethod
-    def _extract_specific_thinking_lines(cls, thinking_text: str | None) -> list[str]:
+    def _extract_specific_thinking_lines(self, thinking_text: str | None) -> list[str]:
         """提取可展示的具体思考行，自动过滤占位词。"""
         if not thinking_text:
             return []
         lines = [line.strip() for line in str(thinking_text).splitlines() if line.strip()]
-        return [line for line in lines if not cls._is_generic_thinking_line(line)]
+        return [line for line in lines if not self._is_generic_thinking_line(line)]
 
-    @classmethod
-    def _has_specific_thinking_content(cls, thinking_text: str | None) -> bool:
+    def _has_specific_thinking_content(self, thinking_text: str | None) -> bool:
         """判断是否包含可展示的具体思考内容。"""
-        return bool(cls._extract_specific_thinking_lines(thinking_text))
+        return bool(self._extract_specific_thinking_lines(thinking_text))
 
     def _build_streaming_body_elements(self, thinking_content: str, answer_content: str) -> list[dict[str, Any]]:
         """构造流式卡片 body elements。"""
@@ -1211,7 +1219,7 @@ class FeishuChannel(BaseChannel):
 
         # 始终保留 thinking 元素，避免后续 CardKit 增量更新找不到 element_id。
         if not thinking_content.strip():
-            thinking_content = "> 思考中"
+            thinking_content = self._thinking_placeholder_markdown
 
         return [
             {

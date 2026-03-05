@@ -16,6 +16,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
     EmbeddingSkillRouter,
     OutputGuard,
@@ -63,7 +64,6 @@ class AgentLoop:
 
     _TOOL_RESULT_MAX_CHARS = 500
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
-    _ANSWER_PLACEHOLDER_TEXT = "🐈努力回答中..."
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
 
@@ -121,6 +121,10 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._answer_placeholder_text = self._runtime_text.prompt_text(
+            "progress", "answer_placeholder", "Working..."
+        )
         self._user_memory_store = UserMemoryStore(self.workspace)
         self.subagents = SubagentManager(
             provider=provider,
@@ -146,8 +150,11 @@ class AgentLoop:
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._processing_lock = asyncio.Lock()
-        self._template_router = TemplateRouter()
-        self._template_renderer = TemplateRenderer(self.response_template_config.max_list_items)
+        self._template_router = TemplateRouter(runtime_text=self._runtime_text)
+        self._template_renderer = TemplateRenderer(
+            self.response_template_config.max_list_items,
+            runtime_text=self._runtime_text,
+        )
         self._stream_warmup_chars = 24
         self._stream_warmup_ms = 300
         if self.channels_config:
@@ -188,6 +195,7 @@ class AgentLoop:
             route_log_enabled=self.skillspec_config.route_log_enabled,
             route_log_top_k=self.skillspec_config.route_log_top_k,
             reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
+            runtime_text=self._runtime_text,
         )
 
         if self.skillspec_config.startup_report_enabled:
@@ -349,14 +357,33 @@ class AgentLoop:
         identity = cast(dict[str, Any], normalized_profile["identity"])
         preferences = cast(dict[str, Any], normalized_profile["preferences"])
         skillspec = cast(dict[str, Any], normalized_profile["skillspec"])
+        onboarding_tpl = self._runtime_text.template("onboarding_form")
+
+        header_tpl = onboarding_tpl.get("header") if isinstance(onboarding_tpl.get("header"), dict) else {}
+        labels_tpl = onboarding_tpl.get("labels") if isinstance(onboarding_tpl.get("labels"), dict) else {}
+        placeholders_tpl = (
+            onboarding_tpl.get("placeholders") if isinstance(onboarding_tpl.get("placeholders"), dict) else {}
+        )
+        sections_tpl = onboarding_tpl.get("sections") if isinstance(onboarding_tpl.get("sections"), dict) else {}
+        buttons_tpl = onboarding_tpl.get("buttons") if isinstance(onboarding_tpl.get("buttons"), dict) else {}
+        tone_options_tpl = onboarding_tpl.get("tone_options") if isinstance(onboarding_tpl.get("tone_options"), list) else []
+        confirm_write_options_tpl = (
+            onboarding_tpl.get("confirm_write_options")
+            if isinstance(onboarding_tpl.get("confirm_write_options"), list)
+            else []
+        )
+        query_scope_options_tpl = (
+            onboarding_tpl.get("query_scope_options")
+            if isinstance(onboarding_tpl.get("query_scope_options"), list)
+            else []
+        )
 
         defaults = self._onboarding_defaults()
         user_name_default = self._normalize_form_value(identity.get("name"))
-        role_default = self._normalize_form_value(identity.get("role"))
-        team_default = self._normalize_form_value(identity.get("team"))
+        role_for_guess = self._normalize_form_value(identity.get("role"))
         display_name_default = self._normalize_form_value(preferences.get("preferred_name"))
         if not display_name_default:
-            display_name_default = self._guess_preferred_name(user_name_default, role_default)
+            display_name_default = self._guess_preferred_name(user_name_default, role_for_guess)
 
         tone_default = self._normalize_form_value(preferences.get("response_style"))
         if tone_default not in {"concise", "standard", "detailed"}:
@@ -369,71 +396,20 @@ class AgentLoop:
         confirm_pref = self._normalize_form_value(skillspec.get("confirm_preference"))
         confirm_write_default = "no" if confirm_pref == "auto" else "yes"
 
-        role_options = [
-            {
-                "text": {"tag": "plain_text", "content": str(role)},
-                "value": str(role),
-            }
-            for role in getattr(feishu_cfg, "onboarding_role_options", [])
-            if str(role).strip()
-        ]
-        if not role_options:
-            role_options = [
-                {"text": {"tag": "plain_text", "content": "律师"}, "value": "lawyer"},
-                {"text": {"tag": "plain_text", "content": "助理"}, "value": "assistant"},
-                {"text": {"tag": "plain_text", "content": "实习生"}, "value": "intern"},
-                {"text": {"tag": "plain_text", "content": "其他"}, "value": "other"},
-            ]
-
-        team_options = [
-            {
-                "text": {"tag": "plain_text", "content": str(team)},
-                "value": str(team),
-            }
-            for team in getattr(feishu_cfg, "onboarding_team_options", [])
-            if str(team).strip()
-        ]
-        if not team_options:
-            team_options = [
-                {"text": {"tag": "plain_text", "content": "诉讼一部"}, "value": "litigation_1"},
-                {"text": {"tag": "plain_text", "content": "诉讼二部"}, "value": "litigation_2"},
-                {"text": {"tag": "plain_text", "content": "非诉"}, "value": "non_litigation"},
-                {"text": {"tag": "plain_text", "content": "其他"}, "value": "other"},
-            ]
-
-        role_select = {
-            "tag": "select_static",
-            "name": "role",
-            "label": {"tag": "plain_text", "content": "职位"},
-            "placeholder": {"tag": "plain_text", "content": "请选择"},
-            "options": role_options,
-        }
-        role_values = {self._normalize_form_value(option.get("value")) for option in role_options}
-        if role_default and role_default in role_values:
-            role_select["initial_option"] = role_default
-
-        team_select = {
-            "tag": "select_static",
-            "name": "team",
-            "label": {"tag": "plain_text", "content": "团队"},
-            "placeholder": {"tag": "plain_text", "content": "请选择"},
-            "options": team_options,
-        }
-        team_values = {self._normalize_form_value(option.get("value")) for option in team_options}
-        if team_default and team_default in team_values:
-            team_select["initial_option"] = team_default
-
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
             "header": {
                 "template": "blue",
-                "title": {"tag": "plain_text", "content": "👋 欢迎使用 Omnibot"},
-                "subtitle": {"tag": "plain_text", "content": "花 1 分钟完成设置，我能更好地帮你"},
+                "title": {"tag": "plain_text", "content": str(header_tpl.get("title") or "Welcome")},
+                "subtitle": {
+                    "tag": "plain_text",
+                    "content": str(header_tpl.get("subtitle") or "Complete setup in one minute."),
+                },
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "我是团队的智能助手，可以帮你：\n📋 查询和管理案件、合同、投标信息\n📝 快速录入案件和合同（说一段话我来整理）\n⏰ 设置开庭、到期等重要提醒\n📄 识别和分析 PDF / Word 文件",
+                    "content": str(onboarding_tpl.get("intro_markdown") or ""),
                 },
                 {
                     "tag": "hr",
@@ -444,60 +420,41 @@ class AgentLoop:
                     "elements": [
                         {
                             "tag": "markdown",
-                            "content": "**👤 基本信息**",
+                            "content": str(sections_tpl.get("identity") or "**Basic Info**"),
                         },
                         {
                             "tag": "input",
                             "name": "user_name",
-                            "label": {"tag": "plain_text", "content": "姓名"},
-                            "placeholder": {"tag": "plain_text", "content": "不填则自动获取飞书昵称"},
+                            "label": {"tag": "plain_text", "content": str(labels_tpl.get("name") or "Name")},
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": str(placeholders_tpl.get("name") or "Auto-filled from profile"),
+                            },
                             "default_value": user_name_default,
                             "required": False,
-                        },
-                        {
-                            "tag": "column_set",
-                            "flex_mode": "bisect",
-                            "columns": [
-                                {
-                                    "tag": "column",
-                                    "width": "weighted",
-                                    "weight": 1,
-                                    "elements": [role_select],
-                                },
-                                {
-                                    "tag": "column",
-                                    "width": "weighted",
-                                    "weight": 1,
-                                    "elements": [team_select],
-                                },
-                            ],
                         },
                         {
                             "tag": "hr",
                         },
                         {
                             "tag": "markdown",
-                            "content": "**⚙️ 偏好设置**",
+                            "content": str(sections_tpl.get("preferences") or "**Preferences**"),
                         },
                         {
                             "tag": "select_static",
                             "name": "tone",
-                            "label": {"tag": "plain_text", "content": "回复风格"},
-                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                            "label": {"tag": "plain_text", "content": str(labels_tpl.get("tone") or "Tone")},
+                            "placeholder": {"tag": "plain_text", "content": str(placeholders_tpl.get("select") or "Select")},
                             "initial_option": tone_default,
                             "options": [
                                 {
-                                    "text": {"tag": "plain_text", "content": "简洁 — 只给关键信息"},
-                                    "value": "concise",
-                                },
-                                {
-                                    "text": {"tag": "plain_text", "content": "标准 — 适当解释（推荐）"},
-                                    "value": "standard",
-                                },
-                                {
-                                    "text": {"tag": "plain_text", "content": "详细 — 完整说明"},
-                                    "value": "detailed",
-                                },
+                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                    "value": str(item.get("value") or ""),
+                                }
+                                for item in tone_options_tpl
+                                if isinstance(item, dict)
+                                and str(item.get("text") or "").strip()
+                                and str(item.get("value") or "").strip()
                             ],
                         },
                         {
@@ -512,12 +469,24 @@ class AgentLoop:
                                         {
                                             "tag": "select_static",
                                             "name": "confirm_write",
-                                            "label": {"tag": "plain_text", "content": "录入案件/合同时"},
-                                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                                            "label": {
+                                                "tag": "plain_text",
+                                                "content": str(labels_tpl.get("confirm_write") or "Write behavior"),
+                                            },
+                                            "placeholder": {
+                                                "tag": "plain_text",
+                                                "content": str(placeholders_tpl.get("select") or "Select"),
+                                            },
                                             "initial_option": confirm_write_default,
                                             "options": [
-                                                {"text": {"tag": "plain_text", "content": "先确认再写入"}, "value": "yes"},
-                                                {"text": {"tag": "plain_text", "content": "直接写入"}, "value": "no"},
+                                                {
+                                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                                    "value": str(item.get("value") or ""),
+                                                }
+                                                for item in confirm_write_options_tpl
+                                                if isinstance(item, dict)
+                                                and str(item.get("text") or "").strip()
+                                                and str(item.get("value") or "").strip()
                                             ],
                                         }
                                     ],
@@ -530,12 +499,24 @@ class AgentLoop:
                                         {
                                             "tag": "select_static",
                                             "name": "query_scope",
-                                            "label": {"tag": "plain_text", "content": "查案件默认范围"},
-                                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                                            "label": {
+                                                "tag": "plain_text",
+                                                "content": str(labels_tpl.get("query_scope") or "Default scope"),
+                                            },
+                                            "placeholder": {
+                                                "tag": "plain_text",
+                                                "content": str(placeholders_tpl.get("select") or "Select"),
+                                            },
                                             "initial_option": query_scope_default,
                                             "options": [
-                                                {"text": {"tag": "plain_text", "content": "只查我参与的"}, "value": "self"},
-                                                {"text": {"tag": "plain_text", "content": "查全部"}, "value": "all"},
+                                                {
+                                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                                    "value": str(item.get("value") or ""),
+                                                }
+                                                for item in query_scope_options_tpl
+                                                if isinstance(item, dict)
+                                                and str(item.get("text") or "").strip()
+                                                and str(item.get("value") or "").strip()
                                             ],
                                         }
                                     ],
@@ -545,14 +526,20 @@ class AgentLoop:
                         {
                             "tag": "input",
                             "name": "display_name",
-                            "label": {"tag": "plain_text", "content": "怎么称呼你"},
-                            "placeholder": {"tag": "plain_text", "content": "选填，如「张律」「小王」"},
+                            "label": {
+                                "tag": "plain_text",
+                                "content": str(labels_tpl.get("display_name") or "Preferred name"),
+                            },
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": str(placeholders_tpl.get("display_name") or "Optional"),
+                            },
                             "default_value": display_name_default,
                             "required": False,
                         },
                         {
                             "tag": "markdown",
-                            "content": "*以上设置随时可改，直接对我说「以后简洁点回复」或「叫我XX」即可*",
+                            "content": str(onboarding_tpl.get("footer_hint") or ""),
                         },
                         {
                             "tag": "column_set",
@@ -565,7 +552,10 @@ class AgentLoop:
                                     "elements": [
                                         {
                                             "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "✅ 完成设置"},
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": str(buttons_tpl.get("submit") or "Submit"),
+                                            },
                                             "type": "primary",
                                             "action_type": "form_submit",
                                             "name": "submit_onboarding",
@@ -579,7 +569,10 @@ class AgentLoop:
                                     "elements": [
                                         {
                                             "tag": "button",
-                                            "text": {"tag": "plain_text", "content": "跳过，用默认值"},
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": str(buttons_tpl.get("skip") or "Skip"),
+                                            },
                                             "type": "default",
                                             "action_type": "form_submit",
                                             "name": "skip_onboarding",
@@ -610,28 +603,45 @@ class AgentLoop:
             "skillspec_confirm_preference": "manual",
         }
 
-    @staticmethod
-    def _build_onboarding_guide_message() -> str:
-        return "\n".join([
-            "初始化已完成，欢迎使用 Omnibot。",
-            "你可以试试：",
-            "- 查一下最近的案件",
-            "- 帮我录入一个新案件",
-            "- 本周有什么截止日",
-            "提示：随时可发送 `/setup` 或“重新设置”调整偏好。",
-        ])
+    def _resolve_profile_display_name(self, profile: dict[str, Any] | None = None) -> str:
+        normalized_profile = self._normalize_profile(profile or {})
+        identity = cast(dict[str, Any], normalized_profile["identity"])
+        preferences = cast(dict[str, Any], normalized_profile["preferences"])
 
-    def _build_onboarding_completed_card(self) -> str:
+        preferred_name = self._normalize_form_value(preferences.get("preferred_name"))
+        if preferred_name:
+            return preferred_name
+
+        user_name = self._normalize_form_value(identity.get("name"))
+        role = self._normalize_form_value(identity.get("role"))
+        guessed = self._guess_preferred_name(user_name, role)
+        if guessed:
+            return guessed
+        if user_name:
+            return user_name
+        return "你"
+
+    def _build_onboarding_guide_message(self, profile: dict[str, Any] | None = None) -> str:
+        lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+        preferred_name = self._resolve_profile_display_name(profile)
+        rendered_lines = [line.replace("{preferred_name}", preferred_name) for line in lines]
+        return "\n".join(rendered_lines)
+
+    def _build_onboarding_completed_card(self, profile: dict[str, Any] | None = None) -> str:
+        onboarding_tpl = self._runtime_text.template("onboarding_form")
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": "turquoise",
-                "title": {"tag": "plain_text", "content": "初始化完成"},
+                "title": {
+                    "tag": "plain_text",
+                    "content": str(onboarding_tpl.get("completed_card_title") or "Completed"),
+                },
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": self._build_onboarding_guide_message().replace("\n", "  \n"),
+                    "content": self._build_onboarding_guide_message(profile).replace("\n", "  \n"),
                 }
             ],
         }
@@ -696,7 +706,9 @@ class AgentLoop:
                 msg,
                 card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
                 stage="single",
-                intro_text="欢迎回来，我们重新快速设置一次。",
+                intro_text=self._runtime_text.prompt_text(
+                    "onboarding", "intro_reentry", "Welcome back, let's set up again quickly."
+                ),
             )
 
         onboarding_action_keys = {
@@ -720,9 +732,13 @@ class AgentLoop:
             if status == "completed":
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(),
+                    card_payload=self._build_onboarding_completed_card(profile),
                     stage="completed",
-                    intro_text="初始化已完成。如需重置，请发送 /setup。",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding",
+                        "intro_completed_reentry",
+                        "Setup already completed. Send /setup to reset.",
+                    ),
                     update_message_id=callback_message_id or None,
                 )
 
@@ -740,7 +756,9 @@ class AgentLoop:
                     msg,
                     card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
                     stage="single",
-                    intro_text="开始设置吧，完成后我会按你的偏好工作。",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_start", "Let's begin setup."
+                    ),
                     update_message_id=callback_message_id or None,
                 )
 
@@ -836,9 +854,11 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(),
+                    card_payload=self._build_onboarding_completed_card(profile),
                     stage="completed",
-                    intro_text="初始化完成，欢迎使用 Omnibot。",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_submit_done", "Setup completed."
+                    ),
                     update_message_id=callback_message_id or None,
                 )
 
@@ -885,9 +905,11 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(),
+                    card_payload=self._build_onboarding_completed_card(profile),
                     stage="completed",
-                    intro_text="已跳过初始化，已使用默认设置开始。",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_skip_done", "Skipped setup and applied defaults."
+                    ),
                     update_message_id=callback_message_id or None,
                 )
 
@@ -910,7 +932,9 @@ class AgentLoop:
             msg,
             card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
             stage="single",
-            intro_text="欢迎使用 Omnibot，请先完成初始化设置。",
+            intro_text=self._runtime_text.prompt_text(
+                "onboarding", "intro_first", "Welcome, please complete setup first."
+            ),
         )
 
     def _register_default_tools(self) -> None:
@@ -1061,35 +1085,7 @@ class AgentLoop:
         timings: list[dict[str, int | str | bool]],
         total_ms: int,
     ) -> str | None:
-        if not self.response_template_config.enabled:
-            return fallback_text
-
-        from nanobot.agent.response_templates import (
-            build_audit_summary,
-            collect_tool_payloads,
-            uses_structured_feishu_data,
-        )
-
-        payloads = collect_tool_payloads(turn_messages)
-        if not payloads or not uses_structured_feishu_data(payloads):
-            return fallback_text
-
-        decision = self._template_router.route(user_text=user_text, payloads=payloads)
-        if decision.template_id == "chat.PLAIN":
-            return fallback_text
-
-        if not self.response_template_config.strict_mode and decision.template_id == "generic.SUMMARY":
-            return fallback_text
-
-        rendered = self._template_renderer.render(decision=decision, payloads=payloads, fallback_text=fallback_text)
-        audit = build_audit_summary(decision=decision, payloads=payloads, timings=timings, total_ms=total_ms)
-        if self.response_template_config.log_audit_summary:
-            logger.info("Template audit: {}", audit.replace("\n", " | "))
-
-        if not self.response_template_config.show_audit_summary:
-            return rendered
-
-        return f"{audit}\n\n{rendered}"
+        return fallback_text
 
     # endregion
 
@@ -1145,7 +1141,8 @@ class AgentLoop:
                 if not on_progress or not name or name in announced_tool_names:
                     return
                 announced_tool_names.add(name)
-                await _emit_progress(f"准备调用 {name}", phase="thinking")
+                template = self._runtime_text.prompt_text("progress", "prepare_tool", "Preparing {tool}")
+                await _emit_progress(template.format(tool=name), phase="thinking")
                 thinking_detail_emitted = True
 
             async def _emit_answer_placeholder() -> None:
@@ -1154,7 +1151,7 @@ class AgentLoop:
                 await asyncio.sleep(self._ANSWER_PLACEHOLDER_DELAY_MS / 1000)
                 if published_stream or thinking_detail_emitted:
                     return
-                await _emit_progress(self._ANSWER_PLACEHOLDER_TEXT, phase="answer")
+                await _emit_progress(self._answer_placeholder_text, phase="answer")
 
             if on_progress and iteration == 1:
                 answer_placeholder_task = asyncio.create_task(_emit_answer_placeholder())
@@ -1210,10 +1207,19 @@ class AgentLoop:
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     args_preview = self._short_text(tool_call.arguments, limit=160)
                     if args_preview:
-                        await _emit_progress(f"调用 {tool_call.name}，参数：{args_preview}", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "call_tool_with_args", "Calling {tool}: {args}"
+                        )
+                        await _emit_progress(
+                            template.format(tool=tool_call.name, args=args_preview),
+                            phase="thinking",
+                        )
                         thinking_detail_emitted = True
                     else:
-                        await _emit_progress(f"正在调用 {tool_call.name} ...", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "call_tool_no_args", "Calling {tool}..."
+                        )
+                        await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     tool_started = time.perf_counter()
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
@@ -1223,15 +1229,27 @@ class AgentLoop:
                     })
                     result_preview = self._short_text(result, limit=200)
                     if result_preview:
-                        await _emit_progress(f"{tool_call.name} 结果：{result_preview}", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "tool_result", "{tool} result: {result}"
+                        )
+                        await _emit_progress(
+                            template.format(tool=tool_call.name, result=result_preview),
+                            phase="thinking",
+                        )
                         thinking_detail_emitted = True
                     else:
-                        await _emit_progress(f"{tool_call.name} 完成，继续思考中...", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "tool_done", "{tool} done, continuing..."
+                        )
+                        await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
 
-                await _emit_progress("已获取数据，正在整理答案...", phase="thinking")
+                await _emit_progress(
+                    self._runtime_text.prompt_text("progress", "data_ready", "Data ready, composing answer..."),
+                    phase="thinking",
+                )
                 thinking_detail_emitted = True
             else:
                 clean = self._strip_think(response.content)
@@ -1243,7 +1261,10 @@ class AgentLoop:
                     break
 
                 if on_progress and not thinking_done_sent and thinking_detail_emitted:
-                    await _emit_progress("思考完成", phase="thinking_done")
+                    await _emit_progress(
+                        self._runtime_text.prompt_text("progress", "thinking_done", "Thinking complete"),
+                        phase="thinking_done",
+                    )
                     thinking_done_sent = True
 
                 if on_progress and clean and not published_stream:
@@ -1340,18 +1361,55 @@ class AgentLoop:
 
     # region [消息处理核心逻辑]
 
-    @staticmethod
-    def _build_commands_help_text() -> str:
+    def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
+        return self._runtime_text.prompt_text("help", "commands_help_text", "")
+
+    def _build_status_text(self, msg: InboundMessage) -> str:
+        profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
+        preferences = cast(dict[str, Any], profile["preferences"])
+        skillspec = cast(dict[str, Any], profile["skillspec"])
+        onboarding = cast(dict[str, Any], profile["onboarding"])
+
+        display_name = self._resolve_profile_display_name(profile)
+
+        style = self._normalize_form_value(preferences.get("response_style")).lower()
+        style_label = {
+            "concise": "简洁",
+            "detailed": "详细",
+        }.get(style, "标准")
+
+        confirm_pref = self._normalize_form_value(
+            skillspec.get("confirm_preference")
+            or profile.get("confirm_preference")
+            or profile.get("write_confirm")
+        ).lower()
+        if confirm_pref in {"auto", "skip", "none", "no_confirm", "no-confirm", "off", "no", "false"}:
+            confirm_label = "直接写入，不用每次确认"
+        else:
+            confirm_label = "先确认再写入"
+
+        query_scope = self._normalize_form_value(preferences.get("query_scope")).lower()
+        scope_label = "查全部" if query_scope == "all" else "只查我参与的"
+
+        onboarding_status = self._normalize_form_value(onboarding.get("status")).lower()
+        status_label = {
+            "completed": "已完成",
+            "pending": "进行中",
+        }.get(onboarding_status, "未设置")
+
         return (
-            "🐈 可用指令\n\n"
-            "- /help 或 /commands：显示全部指令说明\n"
-            "- /new：归档并清空当前会话\n"
-            "- /stop：停止当前会话中的进行中任务\n"
-            "- /session：查看会话子命令\n"
-            "- /session new [标题]：创建飞书话题会话\n"
-            "- /session list：列出当前聊天下的会话\n"
-            "- /session del [id|main]：删除指定会话"
+            "📌 当前设置\n\n"
+            f"怎么称呼您：{display_name}\n"
+            f"回复风格：{style_label}\n"
+            f"录入数据时：{confirm_label}\n"
+            f"查案件时默认范围：{scope_label}\n"
+            f"引导状态：{status_label}\n\n"
+            "可用快捷调整：\n"
+            "- 叫我XX\n"
+            "- 以后简洁点 / 以后详细点\n"
+            "- 不用确认直接录入\n"
+            "- /setup"
         )
 
     def _list_chat_session_keys(self, channel: str, chat_id: str, current_key: str) -> list[str]:
@@ -1406,12 +1464,7 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = (
-                "会话子命令：\n\n"
-                "- /session new [标题]：创建飞书话题会话（缺省为 会话-YYYYMMDD-HHMM）\n"
-                "- /session list：列出当前聊天下的会话\n"
-                "- /session del [id|main]：删除当前/指定会话"
-            )
+            content = self._runtime_text.prompt_text("help", "session_help_text", "")
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -1563,6 +1616,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_commands_help_text(),
             )
+        if cmd == "/status":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_status_text(msg),
+            )
         if cmd.startswith("/session"):
             return self._handle_session_command(msg, key, raw_cmd)
         if cmd == "/new":
@@ -1607,7 +1666,7 @@ class AgentLoop:
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="没有可继续的内容了。",
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "No more content."),
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
 

@@ -70,6 +70,23 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     except Exception:
         pass
 
+    try:
+        workspace_tpl = pkg_files("nanobot") / "templates" / "workspace"
+
+        def _copy_tree(src, dest_prefix: Path) -> None:
+            for node in src.iterdir():
+                dest = dest_prefix / node.name
+                if node.is_dir():
+                    _copy_tree(node, dest)
+                    continue
+                if node.name.endswith((".yaml", ".yml", ".json", ".md")):
+                    _write(node, workspace / dest)
+
+        if workspace_tpl.is_dir():
+            _copy_tree(workspace_tpl, Path())
+    except Exception:
+        pass
+
     (workspace / "skills").mkdir(exist_ok=True)
     bootstrap_workspace_dirs(workspace)
 
@@ -85,3 +102,6 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
     ensure_dir(workspace / "extract")
+    ensure_dir(workspace / "prompts")
+    ensure_dir(workspace / "routing")
+    ensure_dir(workspace / "templates")
