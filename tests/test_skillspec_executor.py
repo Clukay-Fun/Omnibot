@@ -376,3 +376,131 @@ error: {}
     assert result.handled is True
     assert captured["paths"] == ["/tmp/sample-contract.pdf"]
     assert captured["skill_id"] == "doc_recognize"
+
+
+@pytest.mark.asyncio
+async def test_executor_renders_query_with_field_mapping_and_template(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "mapped_query",
+        """
+meta: {id: mapped_query, version: "0.1", description: 映射模板查询}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response:
+  field_mapping:
+    标题: title
+    负责人: owner
+  template: "{{ 标题 }} -> {{ 负责人 }}"
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    tools.register(_FakeTool("bitable_search", {"records": [{"fields": {"title": "A", "owner": "u1"}}]}))
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill mapped_query alpha"),
+        session,
+    )
+
+    assert result.handled is True
+    assert "A -> u1" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_marks_sensitive_group_result_for_private_delivery(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "sensitive_query",
+        """
+meta: {id: sensitive_query, version: "0.1", description: 敏感查询}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response:
+  sensitive: true
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    tools.register(_FakeTool("bitable_search", {"records": [{"fields": {"title": "A"}}]}))
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    result = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u-sensitive",
+            chat_id="oc_group",
+            content="/skill sensitive_query alpha",
+            metadata={"chat_type": "group"},
+        ),
+        session,
+    )
+
+    assert result.handled is True
+    assert result.reply_chat_id == "u-sensitive"
+    assert result.metadata["private_delivery"] is True
+
+
+@pytest.mark.asyncio
+async def test_executor_confirm_respects_user_preference_for_auto_confirm(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_update_pref",
+        """
+meta: {id: task_update_pref, version: "0.1", description: 更新任务}
+params:
+  type: object
+  properties:
+    record_id: {type: string}
+action:
+  kind: update
+  table: {app_token: app_x, table_id: tbl_x}
+  args:
+    record_id: "{{ params.record_id }}"
+    fields:
+      status: done
+response:
+  confirm_required: true
+  confirm_respect_preference: true
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    update_tool = _FakeTool("bitable_update", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tok456"})
+    tools.register(update_tool)
+    store = UserMemoryStore(tmp_path)
+    store.write("feishu", "u-auto", {"skillspec": {"confirm_preference": "auto"}})
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=store,
+    )
+    session = Session("feishu:chat")
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u-auto", chat_id="chat", content="/skill task_update_pref record_id=r1"),
+        session,
+    )
+
+    assert result.handled is True
+    assert "success" in result.content
+    assert len(update_tool.calls) == 2
+    assert update_tool.calls[1]["confirm_token"] == "tok456"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
@@ -22,6 +22,8 @@ class SkillExecutionResult:
     handled: bool
     content: str = ""
     tool_turn: bool = False
+    reply_chat_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class SkillSpecExecutor:
@@ -106,22 +108,36 @@ class SkillSpecExecutor:
                     payload = dict(payload)
                     payload["records"] = records
             response = self._render_query_response(spec=spec, payload=payload, session=session)
-            return SkillExecutionResult(handled=True, content=response, tool_turn=True)
+            return SkillExecutionResult(
+                handled=True,
+                content=response,
+                tool_turn=True,
+                reply_chat_id=self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg),
+                metadata=self._build_sensitive_metadata(spec=spec, msg=msg),
+            )
 
         if kind in {"create", "update", "delete"}:
+            require_manual_confirm = self._should_require_manual_confirm(spec=spec, msg=msg)
             content = await self._run_write_dry_run(
                 spec_id=selection.spec_id,
                 action=action,
                 params=params,
                 runtime=runtime,
                 session=session,
+                require_manual_confirm=require_manual_confirm,
             )
             return SkillExecutionResult(handled=True, content=content, tool_turn=True)
 
         if kind in {"document_pipeline", "document"}:
             payload = await self._run_document_action(action=action, params=params, runtime=runtime)
             response = self._render_query_response(spec=spec, payload=payload, session=session)
-            return SkillExecutionResult(handled=True, content=response, tool_turn=True)
+            return SkillExecutionResult(
+                handled=True,
+                content=response,
+                tool_turn=True,
+                reply_chat_id=self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg),
+                metadata=self._build_sensitive_metadata(spec=spec, msg=msg),
+            )
 
         return SkillExecutionResult(handled=False)
 
@@ -208,6 +224,7 @@ class SkillSpecExecutor:
         params: dict[str, Any],
         runtime: dict[str, Any],
         session: Any,
+        require_manual_confirm: bool,
     ) -> str:
         tool_name = {
             "create": "bitable_create",
@@ -224,6 +241,12 @@ class SkillSpecExecutor:
 
         if payload.get("dry_run") is True and payload.get("confirm_token"):
             token = str(payload["confirm_token"])
+            if not require_manual_confirm:
+                args_with_token = dict(tool_args)
+                args_with_token["confirm_token"] = token
+                confirmed_payload = await self._execute_tool_json(tool_name, args_with_token)
+                return self._stringify_payload(confirmed_payload)
+
             pending = self._pending_writes(session)
             pending[token] = {
                 "spec_id": spec_id,
@@ -374,7 +397,9 @@ class SkillSpecExecutor:
 
     def _render_query_response(self, *, spec: Any, payload: Any, session: Any) -> str:
         policy = self._resolve_output_policy(spec)
-        rendered = self._render_payload(payload)
+        response_cfg = spec.response if isinstance(spec.response, dict) else {}
+        mapped_payload = self._apply_response_field_mapping(payload, response_cfg=response_cfg)
+        rendered = self._render_payload(mapped_payload, response_cfg=response_cfg)
         if isinstance(rendered, list):
             result = self.output_guard.guard_items(rendered, max_items=int(policy.get("max_items", 5)))
             return self._persist_guard_result(result, policy=policy, session=session)
@@ -424,7 +449,11 @@ class SkillSpecExecutor:
         policy.setdefault("max_items", 5)
         return policy
 
-    def _render_payload(self, payload: Any) -> str | list[Any]:
+    def _render_payload(self, payload: Any, *, response_cfg: dict[str, Any] | None = None) -> str | list[Any]:
+        template = ""
+        if isinstance(response_cfg, dict):
+            template = str(response_cfg.get("template") or "").strip()
+
         if isinstance(payload, dict) and isinstance(payload.get("steps"), dict):
             lines: list[str] = []
             for step_id, step_data in payload["steps"].items():
@@ -439,6 +468,8 @@ class SkillSpecExecutor:
         if isinstance(records, list):
             if not records:
                 return "未查询到数据。"
+            if template:
+                return [self._render_record_template(template, row) for row in records]
             return records
 
         return self._stringify_payload(payload)
@@ -449,6 +480,141 @@ class SkillSpecExecutor:
             if isinstance(records, list):
                 return records
         return None
+
+    def _apply_response_field_mapping(self, payload: Any, *, response_cfg: dict[str, Any]) -> Any:
+        mapping = response_cfg.get("field_mapping") if isinstance(response_cfg, dict) else None
+        if not isinstance(mapping, dict) or not mapping:
+            return payload
+
+        if isinstance(payload, dict) and isinstance(payload.get("records"), list):
+            updated = dict(payload)
+            updated["records"] = [self._map_record_fields(record, mapping) for record in payload["records"]]
+            return updated
+        return payload
+
+    def _map_record_fields(self, record: Any, mapping: dict[str, Any]) -> Any:
+        if not isinstance(record, dict):
+            return record
+
+        mapped_fields: dict[str, Any] = {}
+        for target, source in mapping.items():
+            if not isinstance(target, str) or not target.strip():
+                continue
+            mapped_fields[target] = self._resolve_record_value(record, source)
+
+        if not mapped_fields:
+            return record
+
+        out = dict(record)
+        existing_fields_text = out.get("fields_text") if isinstance(out.get("fields_text"), dict) else {}
+        out["fields_text"] = {**existing_fields_text, **mapped_fields}
+        return out
+
+    def _resolve_record_value(self, record: dict[str, Any], source: Any) -> Any:
+        if not isinstance(source, str):
+            return source
+
+        text = source.strip()
+        if not text:
+            return ""
+
+        fields = record.get("fields") if isinstance(record.get("fields"), dict) else {}
+        if text in fields:
+            return fields[text]
+
+        return self._resolve_template_path(text, row=record)
+
+    def _render_record_template(self, template: str, row: Any) -> str:
+        if not isinstance(row, dict):
+            return str(row)
+
+        def _replace(found: re.Match[str]) -> str:
+            resolved = self._resolve_template_path(found.group(1).strip(), row=row)
+            if resolved is None:
+                return ""
+            if isinstance(resolved, (dict, list)):
+                return json.dumps(resolved, ensure_ascii=False)
+            return str(resolved)
+
+        return re.sub(r"\{\{\s*(.*?)\s*\}\}", _replace, template)
+
+    def _resolve_template_path(self, path: str, *, row: dict[str, Any]) -> Any:
+        fields = row.get("fields_text") if isinstance(row.get("fields_text"), dict) else {}
+        if not fields:
+            fields = row.get("fields") if isinstance(row.get("fields"), dict) else {}
+
+        if path.startswith("row."):
+            return self._resolve_dot_path(row, path[len("row.") :])
+        if path.startswith("fields."):
+            return self._resolve_dot_path(fields, path[len("fields.") :])
+        return self._resolve_dot_path(fields, path)
+
+    @staticmethod
+    def _resolve_dot_path(root: Any, path: str) -> Any:
+        if path == "":
+            return root
+        cur = root
+        for token in path.split("."):
+            if isinstance(cur, dict):
+                cur = cur.get(token)
+            else:
+                return None
+        return cur
+
+    def _should_require_manual_confirm(self, *, spec: Any, msg: InboundMessage) -> bool:
+        response = spec.response if isinstance(spec.response, dict) else {}
+        confirm_required = response.get("confirm_required")
+        require_manual = True if confirm_required is None else bool(confirm_required)
+        if not require_manual:
+            return False
+        if not bool(response.get("confirm_respect_preference")):
+            return True
+        return not self._preference_allows_auto_confirm(msg)
+
+    def _preference_allows_auto_confirm(self, msg: InboundMessage) -> bool:
+        profile = self.user_memory.read(msg.channel, msg.sender_id)
+        candidates = [
+            profile.get("confirm_preference"),
+            profile.get("write_confirm"),
+        ]
+        skillspec_pref = profile.get("skillspec")
+        if isinstance(skillspec_pref, dict):
+            candidates.extend(
+                [
+                    skillspec_pref.get("confirm_preference"),
+                    skillspec_pref.get("write_confirm"),
+                ]
+            )
+        for value in candidates:
+            if isinstance(value, bool):
+                return not value
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"auto", "skip", "none", "no_confirm", "no-confirm", "off"}:
+                    return True
+                if normalized in {"manual", "confirm", "always", "on"}:
+                    return False
+        return False
+
+    def _resolve_sensitive_reply_chat_id(self, *, spec: Any, msg: InboundMessage) -> str | None:
+        response = spec.response if isinstance(spec.response, dict) else {}
+        if not bool(response.get("sensitive")):
+            return None
+        chat_type = str((msg.metadata or {}).get("chat_type") or "")
+        if chat_type != "group":
+            return None
+        return msg.sender_id
+
+    def _build_sensitive_metadata(self, *, spec: Any, msg: InboundMessage) -> dict[str, Any]:
+        private_chat_id = self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg)
+        if not private_chat_id:
+            return {}
+        return {
+            "private_delivery": True,
+            "private_delivery_target": private_chat_id,
+            "_reply_in_thread": False,
+            "sensitive": True,
+        }
 
     def _apply_soft_permission_filter(self, msg: InboundMessage, records: list[Any] | None) -> list[Any] | None:
         if records is None:

@@ -78,6 +78,10 @@ Notes:
   - `workspace/skillspec/managed/*.yaml`
   - `nanobot/skills/skillspec/*.yaml`
 - `workspace/skillspec/managed/` is intended for centrally managed specs that should override bundled defaults but still be overridable by local workspace specs.
+- Skillspec `response` supports deterministic rendering knobs for runtime safety:
+  - `template` + `field_mapping` for query output formatting.
+  - `sensitive: true` to mark group replies for private delivery to sender.
+  - `confirm_required` + `confirm_respect_preference` to control write confirmation flow (default remains manual confirm).
 
 ## Skillspec embedding router (Phase D)
 

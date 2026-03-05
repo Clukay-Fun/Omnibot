@@ -841,11 +841,18 @@ class AgentLoop:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
                 self.sessions.save(session)
+                outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
+                outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
+                if skillspec_result.reply_chat_id:
+                    for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
+                        outbound_metadata.pop(key, None)
+                    outbound_metadata["_reply_in_thread"] = False
+                outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
                 return OutboundMessage(
                     channel=msg.channel,
-                    chat_id=msg.chat_id,
+                    chat_id=outbound_chat_id,
                     content=skillspec_result.content,
-                    metadata={**(msg.metadata or {}), "_tool_turn": skillspec_result.tool_turn},
+                    metadata=outbound_metadata,
                 )
 
         unconsolidated = len(session.messages) - session.last_consolidated
