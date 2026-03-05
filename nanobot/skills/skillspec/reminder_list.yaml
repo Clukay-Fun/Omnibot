@@ -2,7 +2,7 @@ meta:
   id: reminder_list
   version: "0.1"
   title: List reminders
-  description: List active reminders for current user.
+  description: List active reminders for current user with bridge metadata.
   owner: built_in
   domain: productivity
 params:
@@ -19,7 +19,7 @@ response:
     {% if reminders %}
     当前提醒 {{ reminders | length }} 条：
     {% for item in reminders %}
-    - {{ item.id }} | {{ item.due_at }} | {{ item.text }}
+    - {{ item.id }} | {{ item.due_at }} | {{ item.text }} | {{ item.status }}
     {% endfor %}
     {% else %}
     暂无提醒。

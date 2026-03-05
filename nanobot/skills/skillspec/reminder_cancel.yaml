@@ -2,7 +2,7 @@ meta:
   id: reminder_cancel
   version: "0.1"
   title: Cancel reminder
-  description: Cancel an existing reminder by id.
+  description: Cancel an existing reminder by id (record-first runtime).
   owner: built_in
   domain: productivity
 params:
@@ -20,6 +20,7 @@ response:
   template: |
     {% if cancelled %}
     已取消提醒 {{ reminder.id }}。
+    - 状态: {{ reminder.status }}
     {% else %}
     未取消提醒：{{ reason or reminder_id }}。
     {% endif %}

@@ -2,7 +2,7 @@ meta:
   id: daily_summary
   version: "0.1"
   title: Daily reminder summary
-  description: Build daily summary payload from active reminders.
+  description: Build daily summary payload from active reminders (for cron delivery).
   owner: built_in
   domain: productivity
 params:
@@ -23,6 +23,9 @@ response:
     {% for item in due_today %}
     - {{ item.id }} | {{ item.due_at }} | {{ item.text }}
     {% endfor %}
+    {% endif %}
+    {% if bridges and bridges.summary_cron_bridge %}
+    - cron 桥接: {{ bridges.summary_cron_bridge.status }}
     {% endif %}
 error:
   code: DAILY_SUMMARY_ERROR
