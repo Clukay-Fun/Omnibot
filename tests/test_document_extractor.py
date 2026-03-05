@@ -135,9 +135,49 @@ async def test_process_document_reports_low_quality_error(monkeypatch, tmp_path:
 
     payload = await process_document([str(document)], skill_id="doc_recognize", user_context=None)
 
-    assert payload["results"] == []
+    assert len(payload["results"]) == 1
+    assert payload["results"][0]["status"] == "low_quality"
+    assert payload["results"][0]["write_ready"] is False
     assert payload["errors"]
     assert payload["errors"][0].startswith("[LOW_QUALITY_EXTRACTION]")
+    assert payload["error_details"][0]["code"] == "LOW_QUALITY_EXTRACTION"
+
+
+@pytest.mark.asyncio
+async def test_process_document_template_missing_has_structured_result(monkeypatch, tmp_path: Path) -> None:
+    document = tmp_path / "contract.pdf"
+    document.write_bytes(b"pdf")
+
+    class _MinerU:
+        def __init__(self, config):
+            _ = config
+
+        async def submit_and_wait(self, path: Path) -> dict:
+            _ = path
+            return {"result": {"text": "This is a contract document."}}
+
+    class _Classifier:
+        def classify(self, text: str, filename: str):
+            _ = (text, filename)
+            return SimpleNamespace(document_type="custom_contract", confidence=0.95)
+
+    cfg = SimpleNamespace(
+        workspace_path=tmp_path,
+        tools=SimpleNamespace(mineru=SimpleNamespace(enabled=True)),
+    )
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_config", lambda: cfg)
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.MinerUClient", _MinerU)
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.DocumentClassifier", _Classifier)
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_extract_templates", lambda _: {})
+
+    payload = await process_document([str(document)], skill_id="doc_recognize", user_context=None)
+
+    assert len(payload["results"]) == 1
+    assert payload["results"][0]["status"] == "template_missing"
+    assert payload["results"][0]["write_ready"] is False
+    assert payload["results"][0]["document_type"] == "custom_contract"
+    assert payload["errors"][0].startswith("[TEMPLATE_MISSING]")
+    assert payload["error_details"][0]["code"] == "TEMPLATE_MISSING"
 
 
 @pytest.mark.asyncio

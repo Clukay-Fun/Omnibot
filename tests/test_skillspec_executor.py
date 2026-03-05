@@ -457,7 +457,14 @@ error: {}
 
     async def _fake_process_document(paths, skill_id, user_context):
         return {
-            "results": [{"path": paths[0], "document_type": "invoice"}],
+            "results": [
+                {
+                    "path": paths[0],
+                    "document_type": "invoice",
+                    "extracted_fields": {"invoice_number": "INV-1", "total_amount": "$20.00"},
+                    "write_ready": True,
+                }
+            ],
             "errors": [],
             "skill_id": skill_id,
             "user_context": user_context,
@@ -481,6 +488,7 @@ error: {}
     match = re.search(r"确认\s+([a-z0-9]{10})", first.content)
     assert match is not None
     token = match.group(1)
+    assert token in (session.metadata.get("skillspec_pending_writes") or {})
 
     confirm = await executor.execute_if_matched(
         InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content=f"确认 {token}"),
@@ -489,6 +497,70 @@ error: {}
     assert confirm.handled is True
     assert "success" in confirm.content
     assert create_tool.calls[-1]["confirm_token"] == token
+    assert create_tool.calls[-1]["fields"]["title"] == "invoice"
+    assert session.metadata.get("skillspec_pending_writes") == {}
+
+
+@pytest.mark.asyncio
+async def test_executor_document_action_bridge_blocks_when_errors_without_writable_result(tmp_path: Path, monkeypatch) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "doc_store",
+        """
+meta: {id: doc_store, version: "0.1", description: 文档入库}
+params: {type: object, properties: {paths: {type: array}}}
+action:
+  kind: document_pipeline
+  args: {paths: "{{ params.paths }}", skill_id: doc_store}
+  write_bridge:
+    enabled: true
+    confirm_required: true
+    tool: bitable_create
+    args:
+      fields:
+        extracted_fields: "{{ result.results[0].extracted_fields }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"success": True})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+    session = Session("feishu:chat")
+
+    async def _fake_process_document(paths, skill_id, user_context):
+        _ = (paths, skill_id, user_context)
+        return {
+            "results": [
+                {
+                    "path": "/tmp/a.pdf",
+                    "document_type": "invoice",
+                    "extracted_fields": {},
+                    "write_ready": False,
+                    "status": "template_missing",
+                }
+            ],
+            "errors": ["[TEMPLATE_MISSING] /tmp/a.pdf: no template"],
+        }
+
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.process_document", _fake_process_document)
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill doc_store", media=["/tmp/a.pdf"]),
+        session,
+    )
+
+    assert result.handled is True
+    assert "无可写入结果" in result.content
+    assert "确认" not in result.content
+    assert len(create_tool.calls) == 0
+    assert session.metadata.get("skillspec_pending_writes") in ({}, None)
 
 
 @pytest.mark.asyncio
@@ -540,6 +612,66 @@ error: {}
     assert cancelled.handled is True
     assert "已取消" in cancelled.content
     assert len(create_tool.calls) == 0
+    assert session.metadata.get("skillspec_pending_writes") == {}
+
+
+@pytest.mark.asyncio
+async def test_executor_document_bridge_respects_auto_confirm_preference(tmp_path: Path, monkeypatch) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "doc_store",
+        """
+meta: {id: doc_store, version: "0.1", description: 文档入库}
+params: {type: object, properties: {paths: {type: array}}}
+action:
+  kind: document_pipeline
+  args: {paths: "{{ params.paths }}", skill_id: doc_store}
+  write_bridge:
+    enabled: true
+    confirm_required: true
+    confirm_respect_preference: true
+    tool: bitable_create
+    args:
+      fields:
+        document_type: "{{ result.results[0].document_type }}"
+        channel: "{{ runtime.user_context.channel }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"success": True, "record_id": "r-auto"})
+    tools.register(create_tool)
+    store = UserMemoryStore(tmp_path)
+    store.write("feishu", "u-auto", {"skillspec": {"confirm_preference": "auto"}})
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=store,
+    )
+    session = Session("feishu:chat")
+
+    async def _fake_process_document(paths, skill_id, user_context):
+        _ = (paths, skill_id, user_context)
+        return {
+            "results": [{"document_type": "invoice", "extracted_fields": {"invoice_number": "INV-1"}, "write_ready": True}],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.process_document", _fake_process_document)
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u-auto", chat_id="chat", content="/skill doc_store", media=["/tmp/a.pdf"]),
+        session,
+    )
+
+    assert result.handled is True
+    assert "success" in result.content
+    assert "确认" not in result.content
+    assert len(create_tool.calls) == 1
+    assert create_tool.calls[0]["fields"]["document_type"] == "invoice"
+    assert create_tool.calls[0]["fields"]["channel"] == "feishu"
 
 
 @pytest.mark.asyncio

@@ -166,6 +166,7 @@ class SkillSpecExecutor:
                 runtime=runtime,
                 payload=payload,
                 session=session,
+                msg=msg,
             )
             if bridge_response is not None:
                 return SkillExecutionResult(
@@ -377,15 +378,19 @@ class SkillSpecExecutor:
         runtime: dict[str, Any],
         payload: Any,
         session: Any,
+        msg: InboundMessage,
     ) -> str | None:
         bridge = action.get("write_bridge")
         if not isinstance(bridge, dict):
             return None
 
-        bridge_enabled = bridge.get("enabled")
-        should_confirm = params.get("write_confirm", bridge_enabled)
-        if not bool(should_confirm):
+        if bridge.get("enabled") is False:
             return None
+        if params.get("write_confirm") is False:
+            return None
+
+        if self._document_bridge_should_abort(payload):
+            return self._format_document_bridge_error(payload)
 
         tool_name = str(bridge.get("tool") or "").strip()
         if not tool_name:
@@ -399,7 +404,8 @@ class SkillSpecExecutor:
         if not isinstance(args, dict):
             args = {}
 
-        if not bool(bridge.get("confirm_required", True)):
+        require_manual_confirm = self._should_require_bridge_manual_confirm(bridge=bridge, msg=msg)
+        if not require_manual_confirm:
             result = await self._execute_tool_json(tool_name, args)
             return self._stringify_payload(result)
 
@@ -418,6 +424,47 @@ class SkillSpecExecutor:
         else:
             preview = self._resolve_templates(preview_template, params=params, steps={}, runtime=bridge_runtime)
         return self._format_write_confirmation(preview=preview, token=token)
+
+    def _should_require_bridge_manual_confirm(self, *, bridge: dict[str, Any], msg: InboundMessage) -> bool:
+        confirm_required = bridge.get("confirm_required")
+        require_manual = True if confirm_required is None else bool(confirm_required)
+        if not require_manual:
+            return False
+        if not bool(bridge.get("confirm_respect_preference")):
+            return True
+        return not self._preference_allows_auto_confirm(msg)
+
+    def _document_bridge_should_abort(self, payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        errors = payload.get("errors")
+        if not isinstance(errors, list) or not errors:
+            return False
+        return not self._document_bridge_has_valid_result(payload)
+
+    def _document_bridge_has_valid_result(self, payload: dict[str, Any]) -> bool:
+        results = payload.get("results")
+        if not isinstance(results, list):
+            return False
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            if bool(item.get("write_ready")):
+                return True
+            extracted_fields = item.get("extracted_fields")
+            if isinstance(extracted_fields, dict) and extracted_fields:
+                return True
+        return False
+
+    @staticmethod
+    def _format_document_bridge_error(payload: Any) -> str:
+        if isinstance(payload, dict):
+            errors = payload.get("errors")
+            if isinstance(errors, list):
+                clean_errors = [str(item).strip() for item in errors if str(item).strip()]
+                if clean_errors:
+                    return f"文档提取失败：存在错误且无可写入结果。{'; '.join(clean_errors[:3])}"
+        return "文档提取失败：存在错误且无可写入结果。"
 
     def _new_confirm_token(self) -> str:
         return uuid.uuid4().hex[:10]
@@ -861,7 +908,7 @@ class SkillSpecExecutor:
     @staticmethod
     def _format_write_confirmation(*, preview: Any, token: str) -> str:
         preview_text = json.dumps(preview, ensure_ascii=False)
-        return f"写入预览：{preview_text}\n请回复「确认 {token}」继续，或回复「取消 {token}」终止。"
+        return f"写入预览：{preview_text}\n确认 {token} / 取消 {token}"
 
     def _build_sensitive_metadata(self, *, spec: Any, msg: InboundMessage) -> dict[str, Any]:
         private_chat_id = self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg)
@@ -971,6 +1018,11 @@ class SkillSpecExecutor:
         elif path.startswith("runtime."):
             root = runtime
             path = path[len("runtime.") :]
+        elif path == "result":
+            return runtime.get("result") if isinstance(runtime, dict) else None
+        elif path.startswith("result."):
+            root = runtime.get("result") if isinstance(runtime, dict) else None
+            path = path[len("result.") :]
         else:
             return None
 
