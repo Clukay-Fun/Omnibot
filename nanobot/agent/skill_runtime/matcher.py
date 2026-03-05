@@ -38,11 +38,39 @@ class SkillSpecMatcher:
         if explicit:
             return explicit
 
+        by_domain_hint = self._select_domain_hint(content)
+        if by_domain_hint:
+            return by_domain_hint
+
         by_regex = self._select_regex(content)
         if by_regex:
             return by_regex
 
         return self._select_by_keywords(content)
+
+    def _select_domain_hint(self, text: str) -> MatchSelection | None:
+        case_skill = "case_search"
+        if case_skill in self._specs and self._looks_like_case_query(text):
+            return MatchSelection(
+                spec_id=case_skill,
+                remainder=self._extract_case_query(text),
+                reason="domain_hint",
+            )
+        return None
+
+    @staticmethod
+    def _looks_like_case_query(text: str) -> bool:
+        lowered = text.lower()
+        keywords = ("案子", "案件", "案号", "项目id", "开庭", "主办律师", "委托人")
+        return any(keyword in lowered for keyword in keywords)
+
+    @staticmethod
+    def _extract_case_query(text: str) -> str:
+        segment = re.split(r"[，,。！？!?\n]", text.strip(), maxsplit=1)[0].strip()
+        segment = re.sub(r"^(请|帮我|麻烦|查找|查询|搜索|查下|查一下|看看|找一下|找)\s*", "", segment)
+        segment = re.sub(r"(?:的)?(?:案子|案件|案)\s*$", "", segment)
+        segment = re.sub(r"\s+", " ", segment).strip()
+        return segment or text.strip()
 
     def _select_explicit(self, text: str) -> MatchSelection | None:
         match = re.match(r"^/skill\s+([a-zA-Z0-9_\-]+)\s*(.*)$", text, re.IGNORECASE)

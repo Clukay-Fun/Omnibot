@@ -4,6 +4,13 @@ meta:
   description: Retrieve a full case profile with linked tasks and contracts.
   owner: built_in
   domain: legal_ops
+  match:
+    regex: "(案号|项目ID|案件详情|案件信息)"
+    keywords:
+      - 案件详情
+      - 案件信息
+      - 项目ID
+      - 案号
 params:
   type: object
   required:
@@ -24,9 +31,7 @@ action:
     steps:
       - id: case_base
         data_source: bitable
-        table:
-          app_token: app_case_mgmt_001
-          table_id: tbl_case_registry_001
+        table: {}
         select_fields:
           - case_id
           - case_no
@@ -44,9 +49,7 @@ action:
         depends_on:
           - case_base
         data_source: bitable
-        table:
-          app_token: app_case_ops_001
-          table_id: tbl_case_tasks_001
+        table: {}
         select_fields:
           - task_id
           - case_id
@@ -71,9 +74,7 @@ action:
         depends_on:
           - case_base
         data_source: bitable
-        table:
-          app_token: app_contract_ops_001
-          table_id: tbl_contract_registry_001
+        table: {}
         select_fields:
           - contract_id
           - case_id

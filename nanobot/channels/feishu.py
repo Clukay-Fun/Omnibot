@@ -1191,7 +1191,7 @@ class FeishuChannel(BaseChannel):
 
     def _build_streaming_body_elements(self, thinking_content: str, answer_content: str) -> list[dict[str, Any]]:
         """构造流式卡片 body elements。"""
-        if not self.config.stream_card_show_thinking or not thinking_content.strip():
+        if not self.config.stream_card_show_thinking:
             return [
                 {
                     "tag": "markdown",
@@ -1199,6 +1199,10 @@ class FeishuChannel(BaseChannel):
                     "content": answer_content,
                 }
             ]
+
+        # 始终保留 thinking 元素，避免后续 CardKit 增量更新找不到 element_id。
+        if not thinking_content.strip():
+            thinking_content = "> 思考中"
 
         return [
             {
@@ -1728,10 +1732,23 @@ class FeishuChannel(BaseChannel):
                     else:
                         fallback_payload = self._build_interactive_card_content(msg.content)
 
+                    update_message_id = str(metadata.get("_update_message_id") or "").strip()
+                    if update_message_id:
+                        updated = await loop.run_in_executor(
+                            None,
+                            self._update_message_sync,
+                            update_message_id,
+                            "interactive",
+                            fallback_payload,
+                        )
+                        if updated:
+                            return
+
                     replied = False
                     source_message_id = metadata.get("message_id")
                     reply_in_thread = self._resolve_reply_in_thread(metadata)
-                    if self.config.reply_to_message and source_message_id:
+                    disable_reply_to_message = bool(metadata.get("_disable_reply_to_message"))
+                    if self.config.reply_to_message and source_message_id and not disable_reply_to_message:
                         ok, _ = await loop.run_in_executor(
                             None,
                             self._reply_message_detail_sync,

@@ -181,6 +181,60 @@ class TestAgentSlashCommands:
         assert "thread_a（当前）" in response.content
 
     @pytest.mark.asyncio
+    async def test_session_list_includes_pending_topic_created_by_session_new(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+
+        new_resp = await loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="u1",
+                chat_id="oc_1",
+                content="/session new 立案推进",
+                metadata={"message_id": "m-new-1"},
+            )
+        )
+        assert new_resp is not None
+
+        list_resp = await loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="u1",
+                chat_id="oc_1",
+                content="/session list",
+            )
+        )
+
+        assert list_resp is not None
+        assert "待激活话题：" in list_resp.content
+        assert "立案推进（待激活）" in list_resp.content
+
+    @pytest.mark.asyncio
+    async def test_session_list_consumes_one_pending_topic_after_entering_thread(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+
+        await loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="u1",
+                chat_id="oc_1",
+                content="/session new 合同审查",
+                metadata={"message_id": "m-new-2"},
+            )
+        )
+
+        in_thread = await loop._process_message(
+            InboundMessage(
+                channel="feishu",
+                sender_id="u1",
+                chat_id="oc_1",
+                content="/session list",
+                session_key_override="feishu:oc_1:thread_created",
+            )
+        )
+        assert in_thread is not None
+        assert "待激活话题：" not in in_thread.content
+
+    @pytest.mark.asyncio
     async def test_session_del_main_removes_main_session(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
         main = loop.sessions.get_or_create("feishu:oc_1")

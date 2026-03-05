@@ -10,7 +10,7 @@ import weakref
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
@@ -65,6 +65,7 @@ class AgentLoop:
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
     _ANSWER_PLACEHOLDER_TEXT = "🐈努力回答中..."
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
+    _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
 
     # region [初始化与配置]
 
@@ -455,6 +456,22 @@ class AgentLoop:
             "提示：随时可发送 `/setup` 或“重新设置”调整偏好。",
         ])
 
+    def _build_onboarding_completed_card(self) -> str:
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "turquoise",
+                "title": {"tag": "plain_text", "content": "初始化完成"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": self._build_onboarding_guide_message().replace("\n", "  \n"),
+                }
+            ],
+        }
+        return json.dumps(card, ensure_ascii=False)
+
     def _build_onboarding_card_outbound(
         self,
         msg: InboundMessage,
@@ -462,12 +479,16 @@ class AgentLoop:
         card_payload: str,
         stage: str,
         intro_text: str,
+        update_message_id: str | None = None,
     ) -> OutboundMessage:
         metadata = dict(msg.metadata or {})
         metadata["interactive_content"] = card_payload
         metadata["onboarding"] = True
         metadata["onboarding_stage"] = stage
         metadata["_reply_in_thread"] = False
+        metadata["_disable_reply_to_message"] = True
+        if update_message_id:
+            metadata["_update_message_id"] = update_message_id
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -501,6 +522,7 @@ class AgentLoop:
 
         is_card_action = str((msg.metadata or {}).get("msg_type") or "") == "card_action"
         action_key, action_value, form_value = self._extract_onboarding_action(msg)
+        callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
 
         if is_reentry:
             onboarding.update({"status": "pending", "step": "identity", "updated_at": self._now_iso()})
@@ -513,6 +535,33 @@ class AgentLoop:
             )
 
         if is_card_action and action_key.startswith("onboarding_"):
+            if status == "completed":
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(),
+                    stage="completed",
+                    intro_text="初始化已完成。如需重置，请发送 /setup。",
+                    update_message_id=callback_message_id or None,
+                )
+
+            if action_key.startswith("onboarding_identity") and step == "preference":
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_preference_card(),
+                    stage="preference",
+                    intro_text="身份信息已提交，请继续完成偏好设置。",
+                    update_message_id=callback_message_id or None,
+                )
+
+            if action_key.startswith("onboarding_pref") and step == "identity":
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_identity_card(feishu_cfg),
+                    stage="identity",
+                    intro_text="请先完成身份信息后再设置偏好。",
+                    update_message_id=callback_message_id or None,
+                )
+
             if action_key == "onboarding_identity_submit":
                 merged_form = {**action_value, **form_value}
                 display_name = self._normalize_form_value(merged_form.get("display_name"))
@@ -533,6 +582,7 @@ class AgentLoop:
                     card_payload=self._build_onboarding_preference_card(),
                     stage="preference",
                     intro_text="身份信息已保存，请继续设置偏好。",
+                    update_message_id=callback_message_id or None,
                 )
 
             if action_key == "onboarding_identity_skip":
@@ -546,11 +596,12 @@ class AgentLoop:
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(),
+                    stage="completed",
+                    intro_text="已跳过初始化表单，后续可随时 /setup 重设。",
+                    update_message_id=callback_message_id or None,
                 )
 
             if action_key == "onboarding_pref_submit":
@@ -565,7 +616,12 @@ class AgentLoop:
                 if preferred_name:
                     preferences["preferred_name"] = preferred_name
 
-                skillspec_pref = profile.get("skillspec") if isinstance(profile.get("skillspec"), dict) else {}
+                skillspec_raw = profile.get("skillspec")
+                skillspec_pref: dict[str, Any]
+                if isinstance(skillspec_raw, dict):
+                    skillspec_pref = cast(dict[str, Any], skillspec_raw)
+                else:
+                    skillspec_pref = {}
                 if write_confirm in {"auto", "skip"}:
                     skillspec_pref["confirm_preference"] = "auto"
                 elif write_confirm:
@@ -581,11 +637,12 @@ class AgentLoop:
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(),
+                    stage="completed",
+                    intro_text="初始化完成，欢迎使用 Omnibot。",
+                    update_message_id=callback_message_id or None,
                 )
 
             if action_key == "onboarding_pref_skip":
@@ -599,11 +656,12 @@ class AgentLoop:
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(),
+                    stage="completed",
+                    intro_text="已完成初始化（偏好使用默认值）。",
+                    update_message_id=callback_message_id or None,
                 )
 
             return None
@@ -1090,6 +1148,41 @@ class AgentLoop:
                 keys.add(key)
         return sorted(keys, key=lambda x: (0 if x == base_key else 1, x))
 
+    def _list_pending_topic_titles(self, base_key: str) -> list[str]:
+        session = self.sessions.get_or_create(base_key)
+        raw = session.metadata.get(self._PENDING_TOPIC_METADATA_KEY)
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for item in raw:
+            title = str(item).strip()
+            if title:
+                out.append(title)
+        return out
+
+    def _save_pending_topic_titles(self, base_key: str, titles: list[str]) -> None:
+        session = self.sessions.get_or_create(base_key)
+        session.metadata[self._PENDING_TOPIC_METADATA_KEY] = titles
+        self.sessions.save(session)
+
+    def _add_pending_topic_title(self, base_key: str, title: str) -> None:
+        cleaned = title.strip()
+        if not cleaned:
+            return
+        pending = self._list_pending_topic_titles(base_key)
+        if cleaned in pending:
+            return
+        pending.append(cleaned)
+        self._save_pending_topic_titles(base_key, pending)
+
+    def _consume_one_pending_topic_title(self, base_key: str, current_key: str) -> None:
+        if current_key == base_key or not current_key.startswith(f"{base_key}:"):
+            return
+        pending = self._list_pending_topic_titles(base_key)
+        if not pending:
+            return
+        self._save_pending_topic_titles(base_key, pending[1:])
+
     def _handle_session_command(self, msg: InboundMessage, current_key: str, raw_cmd: str) -> OutboundMessage:
         """处理 /session 子命令。"""
         parts = raw_cmd.split()
@@ -1118,6 +1211,8 @@ class AgentLoop:
             if not title:
                 title = datetime.now().strftime("会话-%Y%m%d-%H%M")
 
+            self._add_pending_topic_title(base_key, title)
+
             meta = dict(msg.metadata or {})
             meta["_start_topic_session"] = True
             meta["_reply_in_thread"] = True
@@ -1139,6 +1234,12 @@ class AgentLoop:
                     label = key.removeprefix(f"{base_key}:")
                 marker = "（当前）" if key == current_key else ""
                 lines.append(f"{idx}. {label}{marker}")
+
+            pending_titles = self._list_pending_topic_titles(base_key)
+            if pending_titles:
+                lines.append("待激活话题：")
+                for title in pending_titles:
+                    lines.append(f"- {title}（待激活）")
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -1228,6 +1329,8 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        base_key = f"{msg.channel}:{msg.chat_id}"
+        self._consume_one_pending_topic_title(base_key, key)
 
         # 斜杠命令 (Slash commands)
         raw_cmd = msg.content.strip()

@@ -227,3 +227,38 @@ def test_registry_merges_by_meta_id_even_when_filename_differs() -> None:
         assert len(registry.report.source_collisions) == 1
         assert "legacy_name.yaml" in registry.report.source_collisions[0]
         assert "new_name.yaml" in registry.report.source_collisions[0]
+
+
+def test_registry_skips_internal_underscore_prefixed_files() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        workspace = root / "workspace"
+
+        _write_yaml(
+            workspace / "_index.yaml",
+            """
+            skills:
+              - case_search
+            """,
+        )
+        _write_yaml(
+            workspace / "case_search.yaml",
+            """
+            meta:
+              id: case_search
+              version: "0.1"
+              enabled: true
+            action:
+              kind: query
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=root / "builtin")
+        specs = registry.load()
+
+        assert "case_search" in specs
+        assert all("_index" not in item for item in registry.report.invalid)

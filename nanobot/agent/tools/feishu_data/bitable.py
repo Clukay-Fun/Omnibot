@@ -27,6 +27,7 @@ class BitableSearchTool(Tool):
     def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
         self.config = config
         self.client = client
+        self._fallback_scan_page_size = 50
         cache_cfg = self.config.cache
         self._mapping_cache = TTLCache[str, dict[str, Any]](
             ttl_seconds=cache_cfg.field_mapping_ttl_seconds if cache_cfg.enabled else 0,
@@ -186,7 +187,13 @@ class BitableSearchTool(Tool):
             try:
                 fallback_payload = payload.copy()
                 fallback_payload.pop("filter", None)
-                response = await self.client.request("POST", path, params=params, json_body=fallback_payload)
+                fallback_page_size = max(page_size, self._fallback_scan_page_size)
+                response = await self.client.request(
+                    "POST",
+                    path,
+                    params={"page_size": fallback_page_size},
+                    json_body=fallback_payload,
+                )
                 items = response.get("data", {}).get("items", [])
                 normalized = self._normalize_records(
                     items=items,
@@ -197,7 +204,7 @@ class BitableSearchTool(Tool):
                 )
                 return {
                     "table_id": table_id,
-                    "records": normalized,
+                    "records": normalized[:page_size],
                     "total": len(normalized),
                     "warning": "部分搜索字段不存在，已回退到全量匹配模式。",
                 }
@@ -622,6 +629,9 @@ class BitableSearchPersonTool(Tool):
         limit = kwargs.get("limit") or self.config.bitable.search.default_limit
         if self.config.bitable.search.max_records > 0:
             limit = min(limit, self.config.bitable.search.max_records)
+        scan_page_size = max(limit, 50)
+        if self.config.bitable.search.max_records > 0:
+            scan_page_size = min(scan_page_size, self.config.bitable.search.max_records)
 
         view_id = kwargs.get("view_id") or self.config.bitable.default_view_id
 
@@ -667,7 +677,7 @@ class BitableSearchPersonTool(Tool):
                 payload["filter"] = pn_filter
 
         path = FeishuEndpoints.bitable_records_search(app_token, table_id)
-        params = {"page_size": limit}
+        params = {"page_size": scan_page_size}
 
         logger.info(f"Bitable search_person: app={app_token}, table={table_id}, name={person_name}")
         start_time = time.time()
@@ -701,7 +711,7 @@ class BitableSearchPersonTool(Tool):
                     })
 
             response_payload = {
-                "records": matched,
+                "records": matched[:limit],
                 "total": len(matched)
             }
             self._person_cache.set(cache_key, response_payload)
@@ -737,7 +747,7 @@ class BitableSearchPersonTool(Tool):
                             })
 
                     response_payload = {
-                        "records": matched,
+                        "records": matched[:limit],
                         "total": len(matched),
                         "warning": "部分人员搜索字段在表中未找到，已回退到全量扫描模式。"
                     }

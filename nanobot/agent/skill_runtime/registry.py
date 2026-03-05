@@ -83,6 +83,8 @@ class SkillSpecRegistry:
 
         candidates = sorted(list(root.glob("*.yaml")) + list(root.glob("*.yml")))
         for path in candidates:
+            if path.name.startswith("_"):
+                continue
             try:
                 raw = self._safe_load_yaml(path)
                 if not isinstance(raw, dict):

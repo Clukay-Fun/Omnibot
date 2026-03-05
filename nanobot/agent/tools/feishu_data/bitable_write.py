@@ -1,7 +1,10 @@
 """飞书多维表格写入工具：提供对 Bitable 数据的创建、更新和删除功能（两阶段安全机制）。"""
 
 import json
+import re
+from datetime import UTC, datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
@@ -10,6 +13,64 @@ from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.config.schema import FeishuDataConfig
 
 # region [写入工具]
+
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_DATE_ONLY_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%Y.%m.%d")
+_DATE_TIME_FORMATS = ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y.%m.%d %H:%M")
+_DATE_FIELD_RE = re.compile(r"(日|日期|date|deadline)$", re.IGNORECASE)
+
+
+def _looks_like_date_field(field_name: str) -> bool:
+    return bool(_DATE_FIELD_RE.search(field_name.strip()))
+
+
+def _to_utc_millis(dt: datetime) -> int:
+    return int(dt.astimezone(UTC).timestamp() * 1000)
+
+
+def _normalize_date_field_value(value: Any) -> Any:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return value
+
+        for fmt in _DATE_ONLY_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                local_midnight = datetime.combine(parsed.date(), time.min, tzinfo=_SHANGHAI_TZ)
+                return _to_utc_millis(local_midnight)
+            except ValueError:
+                continue
+
+        for fmt in _DATE_TIME_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt).replace(tzinfo=_SHANGHAI_TZ)
+                return _to_utc_millis(parsed)
+            except ValueError:
+                continue
+        return value
+
+    if isinstance(value, (int, float)):
+        ts_ms = int(value)
+        if abs(ts_ms) < 10**11:
+            ts_ms *= 1000
+        dt_local = datetime.fromtimestamp(ts_ms / 1000, tz=_SHANGHAI_TZ)
+        local_midnight = datetime.combine(dt_local.date(), time.min, tzinfo=_SHANGHAI_TZ)
+        return _to_utc_millis(local_midnight)
+
+    return value
+
+
+def _normalize_fields_for_write(fields: Any) -> Any:
+    if not isinstance(fields, dict):
+        return fields
+    normalized: dict[str, Any] = {}
+    for key, value in fields.items():
+        if _looks_like_date_field(str(key)):
+            normalized[key] = _normalize_date_field_value(value)
+        else:
+            normalized[key] = value
+    return normalized
 
 
 class BitableCreateTool(Tool):
@@ -71,6 +132,8 @@ class BitableCreateTool(Tool):
             return json.dumps({"error": "Missing app_token or table_id."}, ensure_ascii=False)
         if not fields:
             return json.dumps({"error": "Missing fields."}, ensure_ascii=False)
+
+        fields = _normalize_fields_for_write(fields)
 
         # 构建操作负载（用于 token 绑定验证）
         op_payload = {"action": "create", "app_token": app_token, "table_id": table_id, "fields": fields}
@@ -169,6 +232,8 @@ class BitableUpdateTool(Tool):
             return json.dumps({"error": "Missing record_id."}, ensure_ascii=False)
         if not fields:
             return json.dumps({"error": "Missing fields."}, ensure_ascii=False)
+
+        fields = _normalize_fields_for_write(fields)
 
         op_payload = {
             "action": "update", "app_token": app_token, "table_id": table_id,
