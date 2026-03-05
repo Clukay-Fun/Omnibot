@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -13,6 +14,14 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 from nanobot.session.manager import Session
+
+
+class _FixedEmbeddingRouter:
+    def __init__(self, ranked: list[tuple[str, float]]):
+        self._ranked = ranked
+
+    def rank(self, query: str, specs: dict[str, Any]) -> list[tuple[str, float]]:  # noqa: ARG002
+        return list(self._ranked)
 
 
 class _FakeTool(Tool):
@@ -90,6 +99,29 @@ error: {}
     assert by_keywords.reason == "keywords"
 
 
+def test_matcher_rejects_low_score_embedding_match(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_query",
+        """
+meta: {id: task_query, version: "0.1", description: 查任务}
+params: {type: object, properties: {query: {type: string}}}
+action: {kind: query, table: {app_token: app, table_id: tbl}}
+response: {}
+error: {}
+""",
+    )
+    matcher = SkillSpecMatcher(
+        registry.specs,
+        embedding_router=cast(Any, _FixedEmbeddingRouter([("task_query", 0.08)])),
+        embedding_min_score=0.15,
+    )
+
+    selection = matcher.select("no lexical hit")
+
+    assert selection is None
+
+
 def test_param_parser_extracts_key_value_and_query() -> None:
     parser = SkillSpecParamParser()
     schema = {
@@ -160,6 +192,8 @@ error: {}
     )
 
     assert result.handled is True
+    assert result.metadata["skillspec_route"]["spec_id"] == "task_query"
+    assert result.metadata["skillspec_route"]["reason"] == "explicit"
     assert "owner=u-intern" in result.content
     assert "someone-else" not in result.content
     assert search.calls[0]["app_token"] == "app_x"

@@ -257,6 +257,9 @@ class SkillSpecConfig(Base):
     embedding_model: str = ""
     embedding_timeout_seconds: int = 10
     embedding_cache_ttl_seconds: int = 600
+    embedding_min_score: float = 0.15
+    route_log_enabled: bool = False
+    route_log_top_k: int = 3
 
 
 class AgentsConfig(Base):

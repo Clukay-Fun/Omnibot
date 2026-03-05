@@ -180,6 +180,9 @@ class AgentLoop:
             output_guard=OutputGuard(),
             user_memory=UserMemoryStore(self.workspace),
             embedding_router=embedding_router,
+            embedding_min_score=self.skillspec_config.embedding_min_score,
+            route_log_enabled=self.skillspec_config.route_log_enabled,
+            route_log_top_k=self.skillspec_config.route_log_top_k,
         )
 
         if self.skillspec_config.startup_report_enabled:

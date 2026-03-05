@@ -4,7 +4,7 @@ from typing import Any
 
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
-from nanobot.config.schema import ProviderConfig
+from nanobot.config.schema import ProviderConfig, SkillSpecConfig
 
 
 def _build_spec(skill_id: str, description: str) -> SkillSpec:
@@ -149,3 +149,11 @@ def test_embedding_router_uses_query_and_index_cache() -> None:
 
     assert first == second
     assert counter["post_calls"] == 2
+
+
+def test_skillspec_config_defaults_include_route_hardening() -> None:
+    cfg = SkillSpecConfig()
+
+    assert cfg.embedding_min_score == 0.15
+    assert cfg.route_log_enabled is False
+    assert cfg.route_log_top_k == 3

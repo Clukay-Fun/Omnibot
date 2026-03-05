@@ -87,6 +87,8 @@ Notes:
 
 Optional embedding-assisted ranking can be enabled for skillspec routing fallback. Deterministic rules should still run first.
 
+Routing priority is fixed and deterministic: `explicit > regex > keyword > embedding`.
+
 ```yaml
 agents:
   skillspec:
@@ -95,6 +97,9 @@ agents:
     embedding_model: "text-embedding-3-small"
     embedding_timeout_seconds: 10
     embedding_cache_ttl_seconds: 600
+    embedding_min_score: 0.15
+    route_log_enabled: false
+    route_log_top_k: 3
 providers:
   siliconflow:
     api_key: "${SILICONFLOW_API_KEY}"
@@ -103,5 +108,7 @@ providers:
 
 Notes:
 - `embedding_enabled=false` keeps lexical-only behavior (runtime-compatible default).
+- `embedding_min_score` gates low-confidence embedding routes; low-score candidates fall back to the normal LLM loop.
 - If SiliconFlow embedding config is missing or provider calls fail, router falls back to lexical scoring.
 - `embedding_cache_ttl_seconds` applies to both skill index vectors and recent query vectors.
+- `route_log_enabled=true` adds lightweight route diagnostics (`skillspec_route`, optional top-k candidates) to message metadata and debug logs without exposing chain-of-thought to users.

@@ -85,6 +85,7 @@ error: {}
     assert first is not None
     assert "RowA" in first.content
     assert "继续" in first.content
+    assert first.metadata["skillspec_route"]["reason"] == "explicit"
     assert provider.calls == 0
 
     second = await loop._process_message(

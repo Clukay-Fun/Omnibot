@@ -7,8 +7,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
-from nanobot.agent.skill_runtime.matcher import SkillSpecMatcher
+from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
@@ -40,17 +42,31 @@ class SkillSpecExecutor:
         output_guard: OutputGuard,
         user_memory: UserMemoryStore,
         embedding_router: EmbeddingSkillRouter | None = None,
+        embedding_min_score: float = 0.15,
+        route_log_enabled: bool = False,
+        route_log_top_k: int = 3,
     ):
         self.registry = registry
         self.tools = tools
         self.output_guard = output_guard
         self.user_memory = user_memory
         self._embedding_router = embedding_router
-        self.matcher = SkillSpecMatcher(registry.specs, embedding_router=self._embedding_router)
+        self._embedding_min_score = max(0.0, float(embedding_min_score))
+        self._route_log_enabled = bool(route_log_enabled)
+        self._route_log_top_k = max(1, int(route_log_top_k))
+        self.matcher = SkillSpecMatcher(
+            registry.specs,
+            embedding_router=self._embedding_router,
+            embedding_min_score=self._embedding_min_score,
+        )
         self.param_parser = SkillSpecParamParser()
 
     def reload(self) -> None:
-        self.matcher = SkillSpecMatcher(self.registry.specs, embedding_router=self._embedding_router)
+        self.matcher = SkillSpecMatcher(
+            self.registry.specs,
+            embedding_router=self._embedding_router,
+            embedding_min_score=self._embedding_min_score,
+        )
 
     def can_handle_continuation(self, text: str) -> bool:
         return text.strip() in self._CONTINUE_COMMANDS
@@ -77,6 +93,7 @@ class SkillSpecExecutor:
 
         selection = self.matcher.select(msg.content)
         if not selection:
+            self._log_route_miss(msg.content)
             return SkillExecutionResult(handled=False)
 
         session.metadata.pop(self._SESSION_CONTINUATION_TOKEN, None)
@@ -85,6 +102,7 @@ class SkillSpecExecutor:
         spec = self.registry.specs.get(selection.spec_id)
         if spec is None:
             return SkillExecutionResult(handled=False)
+        route_metadata = self._build_route_metadata(selection, msg.content)
 
         params = self.param_parser.parse(selection.remainder, param_schema=spec.params)
         if msg.media and not params.get("paths"):
@@ -113,7 +131,7 @@ class SkillSpecExecutor:
                 content=response,
                 tool_turn=True,
                 reply_chat_id=self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg),
-                metadata=self._build_sensitive_metadata(spec=spec, msg=msg),
+                metadata={**self._build_sensitive_metadata(spec=spec, msg=msg), **route_metadata},
             )
 
         if kind in {"create", "update", "delete"}:
@@ -126,7 +144,7 @@ class SkillSpecExecutor:
                 session=session,
                 require_manual_confirm=require_manual_confirm,
             )
-            return SkillExecutionResult(handled=True, content=content, tool_turn=True)
+            return SkillExecutionResult(handled=True, content=content, tool_turn=True, metadata=route_metadata)
 
         if kind in {"document_pipeline", "document"}:
             payload = await self._run_document_action(action=action, params=params, runtime=runtime)
@@ -136,10 +154,46 @@ class SkillSpecExecutor:
                 content=response,
                 tool_turn=True,
                 reply_chat_id=self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg),
-                metadata=self._build_sensitive_metadata(spec=spec, msg=msg),
+                metadata={**self._build_sensitive_metadata(spec=spec, msg=msg), **route_metadata},
             )
 
         return SkillExecutionResult(handled=False)
+
+    def _build_route_metadata(self, selection: MatchSelection, source_text: str) -> dict[str, Any]:
+        route: dict[str, Any] = {
+            "spec_id": selection.spec_id,
+            "reason": selection.reason,
+        }
+        if selection.score is not None:
+            route["score"] = round(float(selection.score), 6)
+        metadata: dict[str, Any] = {"skillspec_route": route}
+        self._log_route_hit(route)
+        if self._route_log_enabled:
+            metadata["skillspec_route_top_candidates"] = self._top_embedding_candidates(source_text)
+        return metadata
+
+    def _top_embedding_candidates(self, text: str) -> list[dict[str, Any]]:
+        if not self._embedding_router:
+            return []
+        ranked = self._embedding_router.rank(text, self.registry.specs)
+        top = ranked[: self._route_log_top_k]
+        return [{"spec_id": spec_id, "score": round(float(score), 6)} for spec_id, score in top]
+
+    def _log_route_hit(self, route: dict[str, Any]) -> None:
+        if not self._route_log_enabled:
+            return
+        logger.debug(
+            "Skillspec route hit spec_id={} reason={} score={}",
+            route.get("spec_id"),
+            route.get("reason"),
+            route.get("score"),
+        )
+
+    def _log_route_miss(self, text: str) -> None:
+        if not self._route_log_enabled:
+            return
+        candidates = self._top_embedding_candidates(text)
+        logger.debug("Skillspec route miss text={} top_candidates={}", text, candidates)
 
     async def _run_query_action(
         self,
