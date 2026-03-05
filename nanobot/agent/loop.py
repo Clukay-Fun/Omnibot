@@ -293,21 +293,82 @@ class AgentLoop:
     def _extract_onboarding_action(self, msg: InboundMessage) -> tuple[str, dict[str, Any], dict[str, Any]]:
         metadata = msg.metadata or {}
         action_key = str(metadata.get("action_key") or "").strip()
+        action_name = str(metadata.get("action_name") or "").strip()
         if not action_key:
             for line in msg.content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("action_key:"):
                     action_key = stripped.split(":", 1)[1].strip()
                     break
+        if not action_name:
+            for line in msg.content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("action_name:"):
+                    action_name = stripped.split(":", 1)[1].strip()
+                    break
 
+        action_payload = self._extract_card_json_block(msg.content, "action")
         action_value = self._extract_card_json_block(msg.content, "action_value")
         if not action_key and isinstance(action_value, dict):
-            action_key = self._normalize_form_value(action_value.get("action_key") or action_value.get("action"))
+            action_key = self._normalize_form_value(
+                action_value.get("action_key") or action_value.get("action") or action_value.get("name")
+            )
+        if not action_key and isinstance(action_payload, dict):
+            action_key = self._normalize_form_value(
+                action_payload.get("action_key") or action_payload.get("action") or action_payload.get("name")
+            )
+        if not action_name and isinstance(action_payload, dict):
+            action_name = self._normalize_form_value(action_payload.get("name"))
+        if not action_key and action_name:
+            action_key = action_name
 
         form_value = self._extract_card_json_block(msg.content, "form_value")
+        if not form_value and isinstance(action_payload, dict):
+            payload_form = action_payload.get("form_value")
+            if isinstance(payload_form, dict):
+                form_value = payload_form
+        if isinstance(form_value, dict) and len(form_value) == 1:
+            nested = form_value.get("onboarding_form")
+            if isinstance(nested, dict):
+                form_value = nested
+
         return action_key, action_value, form_value
 
-    def _build_onboarding_identity_card(self, feishu_cfg: Any) -> str:
+    @staticmethod
+    def _guess_preferred_name(user_name: str, role: str) -> str:
+        if not user_name:
+            return ""
+        if user_name.endswith("律师") and len(user_name) > 2:
+            return f"{user_name[:-2]}律"
+        if role in {"lawyer", "律师"} and not user_name.endswith("律"):
+            return f"{user_name}律"
+        return ""
+
+    def _build_onboarding_single_card(self, feishu_cfg: Any, profile: dict[str, Any] | None = None) -> str:
+        normalized_profile = self._normalize_profile(profile or {})
+        identity = cast(dict[str, Any], normalized_profile["identity"])
+        preferences = cast(dict[str, Any], normalized_profile["preferences"])
+        skillspec = cast(dict[str, Any], normalized_profile["skillspec"])
+
+        defaults = self._onboarding_defaults()
+        user_name_default = self._normalize_form_value(identity.get("name"))
+        role_default = self._normalize_form_value(identity.get("role"))
+        team_default = self._normalize_form_value(identity.get("team"))
+        display_name_default = self._normalize_form_value(preferences.get("preferred_name"))
+        if not display_name_default:
+            display_name_default = self._guess_preferred_name(user_name_default, role_default)
+
+        tone_default = self._normalize_form_value(preferences.get("response_style"))
+        if tone_default not in {"concise", "standard", "detailed"}:
+            tone_default = str(defaults["preferences"]["response_style"])
+
+        query_scope_default = self._normalize_form_value(preferences.get("query_scope"))
+        if query_scope_default not in {"self", "all"}:
+            query_scope_default = str(defaults["preferences"]["query_scope"])
+
+        confirm_pref = self._normalize_form_value(skillspec.get("confirm_preference"))
+        confirm_write_default = "no" if confirm_pref == "auto" else "yes"
+
         role_options = [
             {
                 "text": {"tag": "plain_text", "content": str(role)},
@@ -318,9 +379,10 @@ class AgentLoop:
         ]
         if not role_options:
             role_options = [
-                {"text": {"tag": "plain_text", "content": "律师"}, "value": "律师"},
-                {"text": {"tag": "plain_text", "content": "助理"}, "value": "助理"},
-                {"text": {"tag": "plain_text", "content": "实习生"}, "value": "实习生"},
+                {"text": {"tag": "plain_text", "content": "律师"}, "value": "lawyer"},
+                {"text": {"tag": "plain_text", "content": "助理"}, "value": "assistant"},
+                {"text": {"tag": "plain_text", "content": "实习生"}, "value": "intern"},
+                {"text": {"tag": "plain_text", "content": "其他"}, "value": "other"},
             ]
 
         team_options = [
@@ -333,54 +395,198 @@ class AgentLoop:
         ]
         if not team_options:
             team_options = [
-                {"text": {"tag": "plain_text", "content": "诉讼组"}, "value": "诉讼组"},
-                {"text": {"tag": "plain_text", "content": "合同组"}, "value": "合同组"},
-                {"text": {"tag": "plain_text", "content": "招投标组"}, "value": "招投标组"},
-                {"text": {"tag": "plain_text", "content": "综合组"}, "value": "综合组"},
+                {"text": {"tag": "plain_text", "content": "诉讼一部"}, "value": "litigation_1"},
+                {"text": {"tag": "plain_text", "content": "诉讼二部"}, "value": "litigation_2"},
+                {"text": {"tag": "plain_text", "content": "非诉"}, "value": "non_litigation"},
+                {"text": {"tag": "plain_text", "content": "其他"}, "value": "other"},
             ]
 
+        role_select = {
+            "tag": "select_static",
+            "name": "role",
+            "label": {"tag": "plain_text", "content": "职位"},
+            "placeholder": {"tag": "plain_text", "content": "请选择"},
+            "options": role_options,
+        }
+        role_values = {self._normalize_form_value(option.get("value")) for option in role_options}
+        if role_default and role_default in role_values:
+            role_select["initial_option"] = role_default
+
+        team_select = {
+            "tag": "select_static",
+            "name": "team",
+            "label": {"tag": "plain_text", "content": "团队"},
+            "placeholder": {"tag": "plain_text", "content": "请选择"},
+            "options": team_options,
+        }
+        team_values = {self._normalize_form_value(option.get("value")) for option in team_options}
+        if team_default and team_default in team_values:
+            team_select["initial_option"] = team_default
+
         card = {
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "update_multi": True},
             "header": {
                 "template": "blue",
-                "title": {"tag": "plain_text", "content": "欢迎使用 Omnibot"},
+                "title": {"tag": "plain_text", "content": "👋 欢迎使用 Omnibot"},
+                "subtitle": {"tag": "plain_text", "content": "花 1 分钟完成设置，我能更好地帮你"},
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "先花 30 秒完成初始化。你可以随时点击“跳过”，后续也可通过 `/setup` 重新设置。",
+                    "content": "我是团队的智能助手，可以帮你：\n📋 查询和管理案件、合同、投标信息\n📝 快速录入案件和合同（说一段话我来整理）\n⏰ 设置开庭、到期等重要提醒\n📄 识别和分析 PDF / Word 文件",
                 },
                 {
-                    "tag": "input",
-                    "name": "display_name",
-                    "label": {"tag": "plain_text", "content": "姓名"},
-                    "placeholder": {"tag": "plain_text", "content": "例如：张律师（可选）"},
+                    "tag": "hr",
                 },
                 {
-                    "tag": "select_static",
-                    "name": "role",
-                    "placeholder": {"tag": "plain_text", "content": "请选择职位"},
-                    "options": role_options,
-                },
-                {
-                    "tag": "select_static",
-                    "name": "team",
-                    "placeholder": {"tag": "plain_text", "content": "请选择团队"},
-                    "options": team_options,
-                },
-                {
-                    "tag": "action",
-                    "actions": [
+                    "tag": "form",
+                    "name": "onboarding_form",
+                    "elements": [
                         {
-                            "tag": "button",
-                            "type": "primary",
-                            "text": {"tag": "plain_text", "content": "提交"},
-                            "value": {"action_key": "onboarding_identity_submit"},
+                            "tag": "markdown",
+                            "content": "**👤 基本信息**",
                         },
                         {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "跳过"},
-                            "value": {"action_key": "onboarding_identity_skip"},
+                            "tag": "input",
+                            "name": "user_name",
+                            "label": {"tag": "plain_text", "content": "姓名"},
+                            "placeholder": {"tag": "plain_text", "content": "不填则自动获取飞书昵称"},
+                            "default_value": user_name_default,
+                            "required": False,
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "bisect",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [role_select],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [team_select],
+                                },
+                            ],
+                        },
+                        {
+                            "tag": "hr",
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "**⚙️ 偏好设置**",
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "tone",
+                            "label": {"tag": "plain_text", "content": "回复风格"},
+                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                            "initial_option": tone_default,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": "简洁 — 只给关键信息"},
+                                    "value": "concise",
+                                },
+                                {
+                                    "text": {"tag": "plain_text", "content": "标准 — 适当解释（推荐）"},
+                                    "value": "standard",
+                                },
+                                {
+                                    "text": {"tag": "plain_text", "content": "详细 — 完整说明"},
+                                    "value": "detailed",
+                                },
+                            ],
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "bisect",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "select_static",
+                                            "name": "confirm_write",
+                                            "label": {"tag": "plain_text", "content": "录入案件/合同时"},
+                                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                                            "initial_option": confirm_write_default,
+                                            "options": [
+                                                {"text": {"tag": "plain_text", "content": "先确认再写入"}, "value": "yes"},
+                                                {"text": {"tag": "plain_text", "content": "直接写入"}, "value": "no"},
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "select_static",
+                                            "name": "query_scope",
+                                            "label": {"tag": "plain_text", "content": "查案件默认范围"},
+                                            "placeholder": {"tag": "plain_text", "content": "请选择"},
+                                            "initial_option": query_scope_default,
+                                            "options": [
+                                                {"text": {"tag": "plain_text", "content": "只查我参与的"}, "value": "self"},
+                                                {"text": {"tag": "plain_text", "content": "查全部"}, "value": "all"},
+                                            ],
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "tag": "input",
+                            "name": "display_name",
+                            "label": {"tag": "plain_text", "content": "怎么称呼你"},
+                            "placeholder": {"tag": "plain_text", "content": "选填，如「张律」「小王」"},
+                            "default_value": display_name_default,
+                            "required": False,
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": "*以上设置随时可改，直接对我说「以后简洁点回复」或「叫我XX」即可*",
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "bisect",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "✅ 完成设置"},
+                                            "type": "primary",
+                                            "action_type": "form_submit",
+                                            "name": "submit_onboarding",
+                                        }
+                                    ],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "text": {"tag": "plain_text", "content": "跳过，用默认值"},
+                                            "type": "default",
+                                            "action_type": "form_submit",
+                                            "name": "skip_onboarding",
+                                        }
+                                    ],
+                                },
+                            ],
                         },
                     ],
                 },
@@ -389,61 +595,20 @@ class AgentLoop:
         return json.dumps(card, ensure_ascii=False)
 
     @staticmethod
-    def _build_onboarding_preference_card() -> str:
-        card = {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "template": "green",
-                "title": {"tag": "plain_text", "content": "设置回复偏好"},
+    def _onboarding_defaults() -> dict[str, Any]:
+        return {
+            "identity": {
+                "name": "",
+                "role": "",
+                "team": "",
             },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": "最后一步：设置回复风格与写入确认偏好。",
-                },
-                {
-                    "tag": "select_static",
-                    "name": "response_style",
-                    "placeholder": {"tag": "plain_text", "content": "回复风格"},
-                    "options": [
-                        {"text": {"tag": "plain_text", "content": "简洁"}, "value": "concise"},
-                        {"text": {"tag": "plain_text", "content": "详细"}, "value": "detailed"},
-                    ],
-                },
-                {
-                    "tag": "select_static",
-                    "name": "write_confirm",
-                    "placeholder": {"tag": "plain_text", "content": "写入前是否确认"},
-                    "options": [
-                        {"text": {"tag": "plain_text", "content": "每次确认"}, "value": "manual"},
-                        {"text": {"tag": "plain_text", "content": "直接执行"}, "value": "auto"},
-                    ],
-                },
-                {
-                    "tag": "input",
-                    "name": "preferred_name",
-                    "label": {"tag": "plain_text", "content": "称呼偏好"},
-                    "placeholder": {"tag": "plain_text", "content": "例如：张律（可选）"},
-                },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "type": "primary",
-                            "text": {"tag": "plain_text", "content": "提交"},
-                            "value": {"action_key": "onboarding_pref_submit"},
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "跳过"},
-                            "value": {"action_key": "onboarding_pref_skip"},
-                        },
-                    ],
-                },
-            ],
+            "preferences": {
+                "response_style": "standard",
+                "preferred_name": "",
+                "query_scope": "self",
+            },
+            "skillspec_confirm_preference": "manual",
         }
-        return json.dumps(card, ensure_ascii=False)
 
     @staticmethod
     def _build_onboarding_guide_message() -> str:
@@ -518,10 +683,10 @@ class AgentLoop:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         onboarding = profile["onboarding"]
         status = str(onboarding.get("status") or "").lower()
-        step = str(onboarding.get("step") or "identity").lower()
 
         is_card_action = str((msg.metadata or {}).get("msg_type") or "") == "card_action"
         action_key, action_value, form_value = self._extract_onboarding_action(msg)
+        normalized_action_key = action_key.strip().lower()
         callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
 
         if is_reentry:
@@ -529,12 +694,29 @@ class AgentLoop:
             self._user_memory_store.write(msg.channel, msg.sender_id, profile)
             return self._build_onboarding_card_outbound(
                 msg,
-                card_payload=self._build_onboarding_identity_card(feishu_cfg),
-                stage="identity",
+                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                stage="single",
                 intro_text="欢迎回来，我们重新快速设置一次。",
             )
 
-        if is_card_action and action_key.startswith("onboarding_"):
+        onboarding_action_keys = {
+            "submit_onboarding",
+            "skip_onboarding",
+            "start_onboarding",
+            "skip_all_onboarding",
+            "onboarding_submit",
+            "onboarding_skip",
+            "onboarding_identity_submit",
+            "onboarding_identity_skip",
+            "onboarding_pref_submit",
+            "onboarding_pref_skip",
+        }
+        is_onboarding_action = (
+            normalized_action_key.startswith("onboarding_")
+            or normalized_action_key in onboarding_action_keys
+        )
+
+        if is_card_action and is_onboarding_action:
             if status == "completed":
                 return self._build_onboarding_card_outbound(
                     msg,
@@ -544,77 +726,85 @@ class AgentLoop:
                     update_message_id=callback_message_id or None,
                 )
 
-            if action_key.startswith("onboarding_identity") and step == "preference":
-                return self._build_onboarding_card_outbound(
-                    msg,
-                    card_payload=self._build_onboarding_preference_card(),
-                    stage="preference",
-                    intro_text="身份信息已提交，请继续完成偏好设置。",
-                    update_message_id=callback_message_id or None,
-                )
-
-            if action_key.startswith("onboarding_pref") and step == "identity":
-                return self._build_onboarding_card_outbound(
-                    msg,
-                    card_payload=self._build_onboarding_identity_card(feishu_cfg),
-                    stage="identity",
-                    intro_text="请先完成身份信息后再设置偏好。",
-                    update_message_id=callback_message_id or None,
-                )
-
-            if action_key == "onboarding_identity_submit":
-                merged_form = {**action_value, **form_value}
-                display_name = self._normalize_form_value(merged_form.get("display_name"))
-                role = self._normalize_form_value(merged_form.get("role"))
-                team = self._normalize_form_value(merged_form.get("team"))
-                identity = profile["identity"]
-                if display_name:
-                    identity["name"] = display_name
-                if role:
-                    identity["role"] = role
-                if team:
-                    identity["team"] = team
-
-                onboarding.update({"status": "pending", "step": "preference", "updated_at": self._now_iso()})
-                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return self._build_onboarding_card_outbound(
-                    msg,
-                    card_payload=self._build_onboarding_preference_card(),
-                    stage="preference",
-                    intro_text="身份信息已保存，请继续设置偏好。",
-                    update_message_id=callback_message_id or None,
-                )
-
-            if action_key == "onboarding_identity_skip":
+            if normalized_action_key == "start_onboarding":
                 onboarding.update(
                     {
-                        "status": "completed",
-                        "step": "completed",
-                        "completed_at": self._now_iso(),
+                        "status": "pending",
+                        "step": "identity",
+                        "started_at": onboarding.get("started_at") or self._now_iso(),
                         "updated_at": self._now_iso(),
-                        "skip_reason": "identity_skipped",
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(),
-                    stage="completed",
-                    intro_text="已跳过初始化表单，后续可随时 /setup 重设。",
+                    card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                    stage="single",
+                    intro_text="开始设置吧，完成后我会按你的偏好工作。",
                     update_message_id=callback_message_id or None,
                 )
 
-            if action_key == "onboarding_pref_submit":
-                merged_form = {**action_value, **form_value}
-                style = self._normalize_form_value(merged_form.get("response_style"))
-                write_confirm = self._normalize_form_value(merged_form.get("write_confirm"))
-                preferred_name = self._normalize_form_value(merged_form.get("preferred_name"))
+            submit_action_keys = {
+                "submit_onboarding",
+                "onboarding_submit",
+                "onboarding_identity_submit",
+                "onboarding_pref_submit",
+            }
+            skip_action_keys = {
+                "skip_onboarding",
+                "skip_all_onboarding",
+                "onboarding_skip",
+                "onboarding_identity_skip",
+                "onboarding_pref_skip",
+            }
 
+            if normalized_action_key in submit_action_keys:
+                merged_form = {**action_value, **form_value}
+                user_name = self._normalize_form_value(merged_form.get("user_name"))
+                if not user_name and normalized_action_key in {"onboarding_submit", "onboarding_identity_submit"}:
+                    user_name = self._normalize_form_value(merged_form.get("display_name"))
+
+                role = self._normalize_form_value(merged_form.get("role"))
+                team = self._normalize_form_value(merged_form.get("team"))
+                style = self._normalize_form_value(merged_form.get("tone") or merged_form.get("response_style"))
+                if style not in {"concise", "standard", "detailed"}:
+                    style = ""
+
+                write_confirm = self._normalize_form_value(
+                    merged_form.get("confirm_write") or merged_form.get("write_confirm")
+                )
+                query_scope = self._normalize_form_value(merged_form.get("query_scope"))
+                if query_scope not in {"self", "all"}:
+                    query_scope = ""
+
+                preferred_name = self._normalize_form_value(merged_form.get("preferred_name"))
+                if not preferred_name and normalized_action_key in {"submit_onboarding"}:
+                    preferred_name = self._normalize_form_value(merged_form.get("display_name"))
+
+                defaults = self._onboarding_defaults()
+                identity = profile["identity"]
                 preferences = profile["preferences"]
-                if style:
-                    preferences["response_style"] = style
-                if preferred_name:
-                    preferences["preferred_name"] = preferred_name
+
+                resolved_name = user_name or str(identity.get("name") or defaults["identity"]["name"])
+                resolved_role = role or str(identity.get("role") or defaults["identity"]["role"])
+                resolved_team = team or str(identity.get("team") or defaults["identity"]["team"])
+                identity["name"] = resolved_name
+                identity["role"] = resolved_role
+                identity["team"] = resolved_team
+
+                fallback_preferred_name = self._guess_preferred_name(resolved_name, resolved_role)
+
+                preferences["response_style"] = style or str(
+                    preferences.get("response_style") or defaults["preferences"]["response_style"]
+                )
+                preferences["preferred_name"] = preferred_name or str(
+                    preferences.get("preferred_name")
+                    or fallback_preferred_name
+                    or defaults["preferences"]["preferred_name"]
+                )
+                preferences["query_scope"] = query_scope or str(
+                    preferences.get("query_scope") or defaults["preferences"]["query_scope"]
+                )
 
                 skillspec_raw = profile.get("skillspec")
                 skillspec_pref: dict[str, Any]
@@ -622,10 +812,17 @@ class AgentLoop:
                     skillspec_pref = cast(dict[str, Any], skillspec_raw)
                 else:
                     skillspec_pref = {}
-                if write_confirm in {"auto", "skip"}:
+
+                if write_confirm in {"auto", "skip", "no", "false"}:
                     skillspec_pref["confirm_preference"] = "auto"
+                elif write_confirm in {"manual", "yes", "true", "confirm"}:
+                    skillspec_pref["confirm_preference"] = "manual"
                 elif write_confirm:
                     skillspec_pref["confirm_preference"] = "manual"
+                else:
+                    skillspec_pref["confirm_preference"] = str(
+                        skillspec_pref.get("confirm_preference") or defaults["skillspec_confirm_preference"]
+                    )
                 profile["skillspec"] = skillspec_pref
 
                 onboarding.update(
@@ -645,14 +842,44 @@ class AgentLoop:
                     update_message_id=callback_message_id or None,
                 )
 
-            if action_key == "onboarding_pref_skip":
+            if normalized_action_key in skip_action_keys:
+                defaults = self._onboarding_defaults()
+                identity = profile["identity"]
+                preferences = profile["preferences"]
+
+                resolved_name = str(identity.get("name") or defaults["identity"]["name"])
+                resolved_role = str(identity.get("role") or defaults["identity"]["role"])
+                resolved_team = str(identity.get("team") or defaults["identity"]["team"])
+                identity["name"] = resolved_name
+                identity["role"] = resolved_role
+                identity["team"] = resolved_team
+
+                preferences["response_style"] = str(
+                    preferences.get("response_style") or defaults["preferences"]["response_style"]
+                )
+                preferences["preferred_name"] = str(
+                    preferences.get("preferred_name")
+                    or self._guess_preferred_name(resolved_name, resolved_role)
+                    or defaults["preferences"]["preferred_name"]
+                )
+                preferences["query_scope"] = str(
+                    preferences.get("query_scope") or defaults["preferences"]["query_scope"]
+                )
+
+                skillspec_raw = profile.get("skillspec")
+                skillspec_pref = cast(dict[str, Any], skillspec_raw) if isinstance(skillspec_raw, dict) else {}
+                skillspec_pref["confirm_preference"] = str(
+                    skillspec_pref.get("confirm_preference") or defaults["skillspec_confirm_preference"]
+                )
+                profile["skillspec"] = skillspec_pref
+
                 onboarding.update(
                     {
                         "status": "completed",
                         "step": "completed",
                         "completed_at": self._now_iso(),
                         "updated_at": self._now_iso(),
-                        "skip_reason": "preference_skipped",
+                        "skip_reason": "single_skipped",
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
@@ -660,7 +887,7 @@ class AgentLoop:
                     msg,
                     card_payload=self._build_onboarding_completed_card(),
                     stage="completed",
-                    intro_text="已完成初始化（偏好使用默认值）。",
+                    intro_text="已跳过初始化，已使用默认设置开始。",
                     update_message_id=callback_message_id or None,
                 )
 
@@ -669,32 +896,21 @@ class AgentLoop:
         if status == "completed":
             return None
 
-        if command.startswith("/") and not is_reentry:
-            return None
-
         onboarding.update(
             {
                 "status": "pending",
-                "step": "preference" if step == "preference" else "identity",
+                "step": "identity",
                 "started_at": onboarding.get("started_at") or self._now_iso(),
                 "updated_at": self._now_iso(),
             }
         )
         self._user_memory_store.write(msg.channel, msg.sender_id, profile)
 
-        if onboarding["step"] == "preference":
-            return self._build_onboarding_card_outbound(
-                msg,
-                card_payload=self._build_onboarding_preference_card(),
-                stage="preference",
-                intro_text="请继续完成偏好设置，也可以点击跳过。",
-            )
-
         return self._build_onboarding_card_outbound(
             msg,
-            card_payload=self._build_onboarding_identity_card(feishu_cfg),
-            stage="identity",
-            intro_text="欢迎使用 Omnibot，请先完成初始化。",
+            card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+            stage="single",
+            intro_text="欢迎使用 Omnibot，请先完成初始化设置。",
         )
 
     def _register_default_tools(self) -> None:

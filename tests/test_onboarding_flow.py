@@ -41,7 +41,7 @@ def _build_loop(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_first_feishu_message_triggers_onboarding_identity_card(tmp_path) -> None:
+async def test_first_feishu_message_triggers_single_onboarding_card(tmp_path) -> None:
     loop, provider = _build_loop(tmp_path)
 
     response = await loop._process_message(
@@ -55,10 +55,13 @@ async def test_first_feishu_message_triggers_onboarding_identity_card(tmp_path) 
     )
 
     assert response is not None
-    assert response.metadata.get("onboarding_stage") == "identity"
+    assert response.metadata.get("onboarding_stage") == "single"
     assert "interactive_content" in response.metadata
     card = json.loads(response.metadata["interactive_content"])
-    assert card["header"]["title"]["content"] == "欢迎使用 Omnibot"
+    assert card["header"]["title"]["content"] == "👋 欢迎使用 Omnibot"
+    assert card["config"]["update_multi"] is True
+    assert card["elements"][2]["tag"] == "form"
+    assert card["elements"][2]["name"] == "onboarding_form"
     assert provider.calls == 0
 
     store = UserMemoryStore(tmp_path)
@@ -68,81 +71,170 @@ async def test_first_feishu_message_triggers_onboarding_identity_card(tmp_path) 
 
 
 @pytest.mark.asyncio
-async def test_onboarding_card_actions_progress_and_complete(tmp_path) -> None:
+async def test_first_feishu_slash_command_also_triggers_single_onboarding_card(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_new_slash",
+            chat_id="oc_group",
+            content="/help",
+            metadata={"chat_type": "group", "message_id": "m-1"},
+        )
+    )
+
+    assert response is not None
+    assert response.metadata.get("onboarding_stage") == "single"
+    assert "interactive_content" in response.metadata
+    assert "可用指令" not in response.content
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_single_submit_completes_onboarding_and_writes_all_fields(tmp_path) -> None:
     loop, provider = _build_loop(tmp_path)
     store = UserMemoryStore(tmp_path)
 
     await loop._process_message(
         InboundMessage(
             channel="feishu",
-            sender_id="ou_new",
+            sender_id="ou_submit",
             chat_id="oc_group",
             content="你好",
             metadata={"chat_type": "group", "message_id": "m-1"},
         )
     )
 
-    identity_submit = await loop._process_message(
+    submit = await loop._process_message(
         InboundMessage(
             channel="feishu",
-            sender_id="ou_new",
+            sender_id="ou_submit",
             chat_id="oc_group",
-            content='[feishu card action trigger]\naction_key: onboarding_identity_submit\nform_value: {"display_name":"张三","role":"律师","team":"诉讼组"}',
+            content='[feishu card action trigger]\naction_name: submit_onboarding\naction_key: submit_onboarding\nform_value: {"user_name":"张三","role":"lawyer","team":"litigation_1","tone":"concise","confirm_write":"no","query_scope":"all","display_name":"张律"}',
             metadata={
                 "msg_type": "card_action",
-                "action_key": "onboarding_identity_submit",
+                "action_name": "submit_onboarding",
+                "action_key": "submit_onboarding",
                 "chat_type": "group",
                 "message_id": "om-1",
             },
         )
     )
 
-    assert identity_submit is not None
-    assert identity_submit.metadata.get("onboarding_stage") == "preference"
-    assert identity_submit.metadata.get("_update_message_id") == "om-1"
-    assert identity_submit.metadata.get("_disable_reply_to_message") is True
-    profile_after_identity = store.read("feishu", "ou_new")
-    assert profile_after_identity["identity"]["name"] == "张三"
-    assert profile_after_identity["identity"]["role"] == "律师"
-    assert profile_after_identity["onboarding"]["step"] == "preference"
+    assert submit is not None
+    assert submit.metadata.get("onboarding_stage") == "completed"
+    assert submit.metadata.get("_update_message_id") == "om-1"
+    assert submit.metadata.get("_disable_reply_to_message") is True
+    profile = store.read("feishu", "ou_submit")
+    assert profile["identity"]["name"] == "张三"
+    assert profile["identity"]["role"] == "lawyer"
+    assert profile["identity"]["team"] == "litigation_1"
+    assert profile["preferences"]["response_style"] == "concise"
+    assert profile["preferences"]["preferred_name"] == "张律"
+    assert profile["preferences"]["query_scope"] == "all"
+    assert profile["skillspec"]["confirm_preference"] == "auto"
+    assert profile["onboarding"]["status"] == "completed"
+    assert profile["onboarding"]["step"] == "completed"
+    assert provider.calls == 0
 
-    pref_submit = await loop._process_message(
+
+@pytest.mark.asyncio
+async def test_skip_directly_completes_onboarding_with_defaults(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+    store = UserMemoryStore(tmp_path)
+
+    await loop._process_message(
         InboundMessage(
             channel="feishu",
-            sender_id="ou_new",
+            sender_id="ou_skip",
             chat_id="oc_group",
-            content='[feishu card action trigger]\naction_key: onboarding_pref_submit\nform_value: {"response_style":"concise","write_confirm":"auto","preferred_name":"张律"}',
+            content="你好",
+            metadata={"chat_type": "group", "message_id": "m-1"},
+        )
+    )
+
+    skip = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_skip",
+            chat_id="oc_group",
+            content="[feishu card action trigger]\naction_name: skip_onboarding\naction_key: skip_onboarding",
             metadata={
                 "msg_type": "card_action",
-                "action_key": "onboarding_pref_submit",
+                "action_name": "skip_onboarding",
+                "action_key": "skip_onboarding",
                 "chat_type": "group",
                 "message_id": "om-2",
             },
         )
     )
 
-    assert pref_submit is not None
-    assert "初始化完成" in pref_submit.content
-    assert pref_submit.metadata.get("onboarding_stage") == "completed"
-    assert pref_submit.metadata.get("_update_message_id") == "om-2"
-    assert pref_submit.metadata.get("_disable_reply_to_message") is True
-    profile_after_pref = store.read("feishu", "ou_new")
-    assert profile_after_pref["onboarding"]["status"] == "completed"
-    assert profile_after_pref["skillspec"]["confirm_preference"] == "auto"
-    assert profile_after_pref["preferences"]["preferred_name"] == "张律"
+    assert skip is not None
+    assert skip.metadata.get("onboarding_stage") == "completed"
+    assert skip.metadata.get("_update_message_id") == "om-2"
+    profile = store.read("feishu", "ou_skip")
+    assert profile["onboarding"]["status"] == "completed"
+    assert profile["preferences"]["response_style"] == "standard"
+    assert profile["preferences"]["query_scope"] == "self"
+    assert profile["skillspec"]["confirm_preference"] == "manual"
+    assert provider.calls == 0
 
-    normal_reply = await loop._process_message(
+
+@pytest.mark.asyncio
+async def test_completed_onboarding_card_click_is_idempotent(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+    store = UserMemoryStore(tmp_path)
+
+    await loop._process_message(
         InboundMessage(
             channel="feishu",
-            sender_id="ou_new",
+            sender_id="ou_done",
             chat_id="oc_group",
-            content="现在查一下任务",
-            metadata={"chat_type": "group", "message_id": "m-2"},
+            content="你好",
+            metadata={"chat_type": "group", "message_id": "m-1"},
         )
     )
-    assert normal_reply is not None
-    assert normal_reply.content == "llm-fallback"
-    assert provider.calls == 1
+
+    await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_done",
+            chat_id="oc_group",
+            content='[feishu card action trigger]\naction_name: submit_onboarding\naction_key: submit_onboarding\nform_value: {"user_name":"首次","tone":"detailed","confirm_write":"no"}',
+            metadata={
+                "msg_type": "card_action",
+                "action_name": "submit_onboarding",
+                "action_key": "submit_onboarding",
+                "chat_type": "group",
+                "message_id": "om-done-1",
+            },
+        )
+    )
+
+    profile_before_repeat = store.read("feishu", "ou_done")
+
+    repeat_click = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_done",
+            chat_id="oc_group",
+            content='[feishu card action trigger]\naction_key: onboarding_pref_submit\nform_value: {"display_name":"二次","response_style":"concise"}',
+            metadata={
+                "msg_type": "card_action",
+                "action_key": "onboarding_pref_submit",
+                "chat_type": "group",
+                "message_id": "om-done-2",
+            },
+        )
+    )
+
+    assert repeat_click is not None
+    assert repeat_click.metadata.get("onboarding_stage") == "completed"
+    assert repeat_click.metadata.get("_update_message_id") == "om-done-2"
+    profile_after_repeat = store.read("feishu", "ou_done")
+    assert profile_after_repeat == profile_before_repeat
+    assert provider.calls == 0
 
 
 @pytest.mark.asyncio
@@ -172,45 +264,7 @@ async def test_setup_command_restarts_onboarding_after_completion(tmp_path) -> N
     )
 
     assert response is not None
-    assert response.metadata.get("onboarding_stage") == "identity"
+    assert response.metadata.get("onboarding_stage") == "single"
     profile = store.read("feishu", "ou_existing")
     assert profile["onboarding"]["status"] == "pending"
     assert profile["onboarding"]["step"] == "identity"
-
-
-@pytest.mark.asyncio
-async def test_completed_onboarding_card_action_returns_completed_card_and_no_llm(tmp_path) -> None:
-    loop, provider = _build_loop(tmp_path)
-    store = UserMemoryStore(tmp_path)
-    store.write(
-        "feishu",
-        "ou_done",
-        {
-            "identity": {"name": "已完成用户"},
-            "preferences": {},
-            "dynamic": {},
-            "skillspec": {},
-            "onboarding": {"status": "completed", "step": "completed"},
-        },
-    )
-
-    response = await loop._process_message(
-        InboundMessage(
-            channel="feishu",
-            sender_id="ou_done",
-            chat_id="oc_group",
-            content='[feishu card action trigger]\naction_key: onboarding_pref_submit\nform_value: {"response_style":"concise"}',
-            metadata={
-                "msg_type": "card_action",
-                "action_key": "onboarding_pref_submit",
-                "chat_type": "group",
-                "message_id": "om-done-1",
-            },
-        )
-    )
-
-    assert response is not None
-    assert response.metadata.get("onboarding_stage") == "completed"
-    assert response.metadata.get("_update_message_id") == "om-done-1"
-    assert "初始化已完成" in response.content
-    assert provider.calls == 0

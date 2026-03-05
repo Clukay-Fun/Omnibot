@@ -201,11 +201,18 @@ def _extract_action_key(action_value: Any) -> str | None:
 def _build_card_action_content(action: Any) -> tuple[str, str | None, str | None]:
     """抽取卡片回调中的动作信息并组装为入站文本。"""
     action_tag = _safe_get(action, "tag", None)
+    action_name_raw = _safe_get(action, "name", None)
+    action_name = str(action_name_raw).strip() if isinstance(action_name_raw, (str, int, float)) else None
+    if action_name == "":
+        action_name = None
+
     action_value = _safe_json_loads(_safe_get(action, "value", None))
     form_value = _safe_json_loads(_safe_get(action, "form_value", None))
     option = _safe_json_loads(_safe_get(action, "option", None))
 
     action_key = _extract_action_key(action_value)
+    if not action_key and action_name:
+        action_key = action_name
     if not action_key and isinstance(form_value, dict) and len(form_value) == 1:
         first_key = next(iter(form_value.keys()), None)
         if isinstance(first_key, str) and first_key.strip():
@@ -214,6 +221,8 @@ def _build_card_action_content(action: Any) -> tuple[str, str | None, str | None
     parts = ["[feishu card action trigger]"]
     if action_tag:
         parts.append(f"action_tag: {action_tag}")
+    if action_name:
+        parts.append(f"action_name: {action_name}")
     if action_key:
         parts.append(f"action_key: {action_key}")
     if action_value not in (None, "", {}, []):
@@ -1831,6 +1840,9 @@ class FeishuChannel(BaseChannel):
             }
             if action_tag:
                 metadata["action_tag"] = action_tag
+            action_name = _safe_get(action, "name", None)
+            if isinstance(action_name, (str, int, float)) and str(action_name).strip():
+                metadata["action_name"] = str(action_name).strip()
             if action_key:
                 metadata["action_key"] = action_key
             if open_message_id:

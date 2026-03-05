@@ -61,6 +61,21 @@ def test_build_card_action_content_extracts_structured_fields() -> None:
     assert action_tag == "button"
 
 
+def test_build_card_action_content_uses_action_name_when_value_missing() -> None:
+    action = SimpleNamespace(
+        tag="button",
+        name="submit_onboarding",
+        form_value={"tone": "standard"},
+    )
+
+    content, action_key, action_tag = _build_card_action_content(action)
+
+    assert action_tag == "button"
+    assert action_key == "submit_onboarding"
+    assert "action_name: submit_onboarding" in content
+    assert "action_key: submit_onboarding" in content
+
+
 @pytest.mark.asyncio
 async def test_on_card_action_routes_callback_via_handle_message() -> None:
     channel = _build_channel()
