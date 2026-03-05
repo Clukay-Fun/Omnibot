@@ -62,6 +62,10 @@ class FeishuConfig(Base):
     activation_topic_policy: Literal["always", "mention", "off"] = "always"
     activation_admin_open_ids: list[str] = Field(default_factory=list)
     activation_admin_prefix_bypass: str = ""
+    onboarding_enabled: bool = True
+    onboarding_reentry_commands: list[str] = Field(default_factory=lambda: ["/setup", "重新设置"])
+    onboarding_role_options: list[str] = Field(default_factory=lambda: ["律师", "助理", "实习生"])
+    onboarding_team_options: list[str] = Field(default_factory=lambda: ["诉讼组", "合同组", "招投标组", "综合组"])
 
 
 class DingTalkConfig(Base):

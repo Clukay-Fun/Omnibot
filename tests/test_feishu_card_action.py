@@ -136,6 +136,22 @@ async def test_group_message_requires_mention_by_default() -> None:
 
 
 @pytest.mark.asyncio
+async def test_group_continuation_command_bypasses_mention_gate() -> None:
+    channel = _build_channel()
+    called = False
+
+    async def _fake_handle_message(**kwargs: Any) -> None:
+        nonlocal called
+        called = True
+
+    channel._handle_message = _fake_handle_message  # type: ignore[assignment]
+
+    await channel._on_message(_build_text_event(message_id="m-g-cont", text="继续"))
+
+    assert called is True
+
+
+@pytest.mark.asyncio
 async def test_group_message_allows_payload_mention_signal() -> None:
     channel = _build_channel()
     called = False

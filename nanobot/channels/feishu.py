@@ -1719,9 +1719,16 @@ class FeishuChannel(BaseChannel):
                     handled = await self._send_streaming_content(msg, receive_id_type, loop)
 
                 if not handled:
-                    fallback_payload = self._build_interactive_card_content(msg.content)
-                    replied = False
                     metadata = msg.metadata or {}
+                    custom_interactive_content = metadata.get("interactive_content")
+                    if isinstance(custom_interactive_content, dict):
+                        fallback_payload = json.dumps(custom_interactive_content, ensure_ascii=False)
+                    elif isinstance(custom_interactive_content, str) and custom_interactive_content.strip():
+                        fallback_payload = custom_interactive_content
+                    else:
+                        fallback_payload = self._build_interactive_card_content(msg.content)
+
+                    replied = False
                     source_message_id = metadata.get("message_id")
                     reply_in_thread = self._resolve_reply_in_thread(metadata)
                     if self.config.reply_to_message and source_message_id:

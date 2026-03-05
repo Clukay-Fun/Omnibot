@@ -64,6 +64,7 @@ class AgentLoop:
     _TOOL_RESULT_MAX_CHARS = 500
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
     _ANSWER_PLACEHOLDER_TEXT = "🐈努力回答中..."
+    _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
 
     # region [初始化与配置]
 
@@ -119,6 +120,7 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self._user_memory_store = UserMemoryStore(self.workspace)
         self.subagents = SubagentManager(
             provider=provider,
             workspace=workspace,
@@ -179,7 +181,7 @@ class AgentLoop:
             registry=self._skillspec_registry,
             tools=self.tools,
             output_guard=OutputGuard(),
-            user_memory=UserMemoryStore(self.workspace),
+            user_memory=self._user_memory_store,
             embedding_router=embedding_router,
             embedding_min_score=self.skillspec_config.embedding_min_score,
             route_log_enabled=self.skillspec_config.route_log_enabled,
@@ -200,6 +202,442 @@ class AgentLoop:
                 logger.info("Skillspec source collisions: {}", "; ".join(report.source_collisions))
             if self.skillspec_config.startup_report_include_invalid and report.invalid:
                 logger.warning("Skillspec invalid entries: {}", "; ".join(report.invalid))
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().isoformat()
+
+    def _feishu_onboarding_config(self) -> Any | None:
+        if not self.channels_config:
+            return None
+        feishu_cfg = getattr(self.channels_config, "feishu", None)
+        if feishu_cfg is None:
+            return None
+        if not bool(getattr(feishu_cfg, "onboarding_enabled", False)):
+            return None
+        return feishu_cfg
+
+    def _onboarding_enabled_for_message(self, msg: InboundMessage) -> bool:
+        return msg.channel == "feishu" and self._feishu_onboarding_config() is not None
+
+    def _onboarding_reentry_commands(self, feishu_cfg: Any) -> set[str]:
+        configured = getattr(feishu_cfg, "onboarding_reentry_commands", None)
+        commands: set[str] = set(self._ONBOARDING_SETUP_FALLBACK_COMMANDS)
+        if isinstance(configured, list):
+            commands.update({str(item).strip() for item in configured if str(item).strip()})
+        return {cmd.lower() for cmd in commands}
+
+    @staticmethod
+    def _normalize_profile(profile: dict[str, Any]) -> dict[str, Any]:
+        data = dict(profile)
+        if not isinstance(data.get("identity"), dict):
+            data["identity"] = {}
+        if not isinstance(data.get("preferences"), dict):
+            data["preferences"] = {}
+        if not isinstance(data.get("dynamic"), dict):
+            data["dynamic"] = {}
+        if not isinstance(data.get("skillspec"), dict):
+            data["skillspec"] = {}
+        if not isinstance(data.get("onboarding"), dict):
+            data["onboarding"] = {}
+        return data
+
+    @staticmethod
+    def _extract_card_json_block(content: str, key: str) -> dict[str, Any]:
+        target = f"{key}:"
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith(target):
+                continue
+            payload = stripped[len(target) :].strip()
+            if not payload:
+                return {}
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    @staticmethod
+    def _normalize_form_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            for item in value:
+                parsed = AgentLoop._normalize_form_value(item)
+                if parsed:
+                    return parsed
+            return ""
+        if isinstance(value, dict):
+            for key in ("value", "id", "key", "name"):
+                parsed = AgentLoop._normalize_form_value(value.get(key))
+                if parsed:
+                    return parsed
+            text_part = value.get("text")
+            if isinstance(text_part, dict):
+                for key in ("content", "text", "name"):
+                    parsed = AgentLoop._normalize_form_value(text_part.get(key))
+                    if parsed:
+                        return parsed
+            return ""
+        return ""
+
+    def _extract_onboarding_action(self, msg: InboundMessage) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        metadata = msg.metadata or {}
+        action_key = str(metadata.get("action_key") or "").strip()
+        if not action_key:
+            for line in msg.content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("action_key:"):
+                    action_key = stripped.split(":", 1)[1].strip()
+                    break
+
+        action_value = self._extract_card_json_block(msg.content, "action_value")
+        if not action_key and isinstance(action_value, dict):
+            action_key = self._normalize_form_value(action_value.get("action_key") or action_value.get("action"))
+
+        form_value = self._extract_card_json_block(msg.content, "form_value")
+        return action_key, action_value, form_value
+
+    def _build_onboarding_identity_card(self, feishu_cfg: Any) -> str:
+        role_options = [
+            {
+                "text": {"tag": "plain_text", "content": str(role)},
+                "value": str(role),
+            }
+            for role in getattr(feishu_cfg, "onboarding_role_options", [])
+            if str(role).strip()
+        ]
+        if not role_options:
+            role_options = [
+                {"text": {"tag": "plain_text", "content": "律师"}, "value": "律师"},
+                {"text": {"tag": "plain_text", "content": "助理"}, "value": "助理"},
+                {"text": {"tag": "plain_text", "content": "实习生"}, "value": "实习生"},
+            ]
+
+        team_options = [
+            {
+                "text": {"tag": "plain_text", "content": str(team)},
+                "value": str(team),
+            }
+            for team in getattr(feishu_cfg, "onboarding_team_options", [])
+            if str(team).strip()
+        ]
+        if not team_options:
+            team_options = [
+                {"text": {"tag": "plain_text", "content": "诉讼组"}, "value": "诉讼组"},
+                {"text": {"tag": "plain_text", "content": "合同组"}, "value": "合同组"},
+                {"text": {"tag": "plain_text", "content": "招投标组"}, "value": "招投标组"},
+                {"text": {"tag": "plain_text", "content": "综合组"}, "value": "综合组"},
+            ]
+
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "blue",
+                "title": {"tag": "plain_text", "content": "欢迎使用 Omnibot"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "先花 30 秒完成初始化。你可以随时点击“跳过”，后续也可通过 `/setup` 重新设置。",
+                },
+                {
+                    "tag": "input",
+                    "name": "display_name",
+                    "label": {"tag": "plain_text", "content": "姓名"},
+                    "placeholder": {"tag": "plain_text", "content": "例如：张律师（可选）"},
+                },
+                {
+                    "tag": "select_static",
+                    "name": "role",
+                    "placeholder": {"tag": "plain_text", "content": "请选择职位"},
+                    "options": role_options,
+                },
+                {
+                    "tag": "select_static",
+                    "name": "team",
+                    "placeholder": {"tag": "plain_text", "content": "请选择团队"},
+                    "options": team_options,
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "type": "primary",
+                            "text": {"tag": "plain_text", "content": "提交"},
+                            "value": {"action_key": "onboarding_identity_submit"},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "跳过"},
+                            "value": {"action_key": "onboarding_identity_skip"},
+                        },
+                    ],
+                },
+            ],
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    @staticmethod
+    def _build_onboarding_preference_card() -> str:
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "green",
+                "title": {"tag": "plain_text", "content": "设置回复偏好"},
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "最后一步：设置回复风格与写入确认偏好。",
+                },
+                {
+                    "tag": "select_static",
+                    "name": "response_style",
+                    "placeholder": {"tag": "plain_text", "content": "回复风格"},
+                    "options": [
+                        {"text": {"tag": "plain_text", "content": "简洁"}, "value": "concise"},
+                        {"text": {"tag": "plain_text", "content": "详细"}, "value": "detailed"},
+                    ],
+                },
+                {
+                    "tag": "select_static",
+                    "name": "write_confirm",
+                    "placeholder": {"tag": "plain_text", "content": "写入前是否确认"},
+                    "options": [
+                        {"text": {"tag": "plain_text", "content": "每次确认"}, "value": "manual"},
+                        {"text": {"tag": "plain_text", "content": "直接执行"}, "value": "auto"},
+                    ],
+                },
+                {
+                    "tag": "input",
+                    "name": "preferred_name",
+                    "label": {"tag": "plain_text", "content": "称呼偏好"},
+                    "placeholder": {"tag": "plain_text", "content": "例如：张律（可选）"},
+                },
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "type": "primary",
+                            "text": {"tag": "plain_text", "content": "提交"},
+                            "value": {"action_key": "onboarding_pref_submit"},
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "跳过"},
+                            "value": {"action_key": "onboarding_pref_skip"},
+                        },
+                    ],
+                },
+            ],
+        }
+        return json.dumps(card, ensure_ascii=False)
+
+    @staticmethod
+    def _build_onboarding_guide_message() -> str:
+        return "\n".join([
+            "初始化已完成，欢迎使用 Omnibot。",
+            "你可以试试：",
+            "- 查一下最近的案件",
+            "- 帮我录入一个新案件",
+            "- 本周有什么截止日",
+            "提示：随时可发送 `/setup` 或“重新设置”调整偏好。",
+        ])
+
+    def _build_onboarding_card_outbound(
+        self,
+        msg: InboundMessage,
+        *,
+        card_payload: str,
+        stage: str,
+        intro_text: str,
+    ) -> OutboundMessage:
+        metadata = dict(msg.metadata or {})
+        metadata["interactive_content"] = card_payload
+        metadata["onboarding"] = True
+        metadata["onboarding_stage"] = stage
+        metadata["_reply_in_thread"] = False
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=intro_text,
+            metadata=metadata,
+        )
+
+    async def _try_handle_onboarding(
+        self,
+        msg: InboundMessage,
+        *,
+        session: Session,
+        raw_cmd: str,
+    ) -> OutboundMessage | None:
+        if not self._onboarding_enabled_for_message(msg):
+            return None
+
+        feishu_cfg = self._feishu_onboarding_config()
+        if feishu_cfg is None:
+            return None
+
+        command = raw_cmd.strip()
+        lower_command = command.lower()
+        reentry_commands = self._onboarding_reentry_commands(feishu_cfg)
+        is_reentry = lower_command in reentry_commands
+
+        profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
+        onboarding = profile["onboarding"]
+        status = str(onboarding.get("status") or "").lower()
+        step = str(onboarding.get("step") or "identity").lower()
+
+        is_card_action = str((msg.metadata or {}).get("msg_type") or "") == "card_action"
+        action_key, action_value, form_value = self._extract_onboarding_action(msg)
+
+        if is_reentry:
+            onboarding.update({"status": "pending", "step": "identity", "updated_at": self._now_iso()})
+            self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+            return self._build_onboarding_card_outbound(
+                msg,
+                card_payload=self._build_onboarding_identity_card(feishu_cfg),
+                stage="identity",
+                intro_text="欢迎回来，我们重新快速设置一次。",
+            )
+
+        if is_card_action and action_key.startswith("onboarding_"):
+            if action_key == "onboarding_identity_submit":
+                merged_form = {**action_value, **form_value}
+                display_name = self._normalize_form_value(merged_form.get("display_name"))
+                role = self._normalize_form_value(merged_form.get("role"))
+                team = self._normalize_form_value(merged_form.get("team"))
+                identity = profile["identity"]
+                if display_name:
+                    identity["name"] = display_name
+                if role:
+                    identity["role"] = role
+                if team:
+                    identity["team"] = team
+
+                onboarding.update({"status": "pending", "step": "preference", "updated_at": self._now_iso()})
+                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_preference_card(),
+                    stage="preference",
+                    intro_text="身份信息已保存，请继续设置偏好。",
+                )
+
+            if action_key == "onboarding_identity_skip":
+                onboarding.update(
+                    {
+                        "status": "completed",
+                        "step": "completed",
+                        "completed_at": self._now_iso(),
+                        "updated_at": self._now_iso(),
+                        "skip_reason": "identity_skipped",
+                    }
+                )
+                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._build_onboarding_guide_message(),
+                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                )
+
+            if action_key == "onboarding_pref_submit":
+                merged_form = {**action_value, **form_value}
+                style = self._normalize_form_value(merged_form.get("response_style"))
+                write_confirm = self._normalize_form_value(merged_form.get("write_confirm"))
+                preferred_name = self._normalize_form_value(merged_form.get("preferred_name"))
+
+                preferences = profile["preferences"]
+                if style:
+                    preferences["response_style"] = style
+                if preferred_name:
+                    preferences["preferred_name"] = preferred_name
+
+                skillspec_pref = profile.get("skillspec") if isinstance(profile.get("skillspec"), dict) else {}
+                if write_confirm in {"auto", "skip"}:
+                    skillspec_pref["confirm_preference"] = "auto"
+                elif write_confirm:
+                    skillspec_pref["confirm_preference"] = "manual"
+                profile["skillspec"] = skillspec_pref
+
+                onboarding.update(
+                    {
+                        "status": "completed",
+                        "step": "completed",
+                        "completed_at": self._now_iso(),
+                        "updated_at": self._now_iso(),
+                    }
+                )
+                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._build_onboarding_guide_message(),
+                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                )
+
+            if action_key == "onboarding_pref_skip":
+                onboarding.update(
+                    {
+                        "status": "completed",
+                        "step": "completed",
+                        "completed_at": self._now_iso(),
+                        "updated_at": self._now_iso(),
+                        "skip_reason": "preference_skipped",
+                    }
+                )
+                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=self._build_onboarding_guide_message(),
+                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                )
+
+            return None
+
+        if status == "completed":
+            return None
+
+        if command.startswith("/") and not is_reentry:
+            return None
+
+        onboarding.update(
+            {
+                "status": "pending",
+                "step": "preference" if step == "preference" else "identity",
+                "started_at": onboarding.get("started_at") or self._now_iso(),
+                "updated_at": self._now_iso(),
+            }
+        )
+        self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+
+        if onboarding["step"] == "preference":
+            return self._build_onboarding_card_outbound(
+                msg,
+                card_payload=self._build_onboarding_preference_card(),
+                stage="preference",
+                intro_text="请继续完成偏好设置，也可以点击跳过。",
+            )
+
+        return self._build_onboarding_card_outbound(
+            msg,
+            card_payload=self._build_onboarding_identity_card(feishu_cfg),
+            stage="identity",
+            intro_text="欢迎使用 Omnibot，请先完成初始化。",
+        )
 
     def _register_default_tools(self) -> None:
         """注册默认工具集。"""
@@ -794,6 +1232,12 @@ class AgentLoop:
         # 斜杠命令 (Slash commands)
         raw_cmd = msg.content.strip()
         cmd = raw_cmd.lower()
+
+        onboarding_outbound = await self._try_handle_onboarding(msg, session=session, raw_cmd=raw_cmd)
+        if onboarding_outbound is not None:
+            self.sessions.save(session)
+            return onboarding_outbound
+
         if cmd in {"/help", "/commands"}:
             return OutboundMessage(
                 channel=msg.channel,

@@ -778,6 +778,30 @@ async def test_on_message_skips_missing_optional_thread_fields() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_uses_custom_interactive_content_when_provided() -> None:
+    channel, client = _build_channel()
+    custom_card = {
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": "# custom"},
+        ],
+    }
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="fallback text",
+            metadata={"interactive_content": json.dumps(custom_card, ensure_ascii=False)},
+        )
+    )
+
+    assert _sent_message_count(client) == 1
+    sent = _first_sent_card(client)
+    assert sent == custom_card
+
+
+@pytest.mark.asyncio
 async def test_on_message_routes_group_thread_to_independent_session_key() -> None:
     channel, _ = _build_channel()
     captured: dict[str, Any] = {}
