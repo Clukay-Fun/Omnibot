@@ -135,7 +135,11 @@ Notes:
   - `reminder_cancel`
   - `daily_summary`
 - Reminder data is persisted in `workspace/reminders.json` for deterministic local runtime behavior.
-- Calendar sync is optional and best-effort (`calendar_sync=true` / action `calendar_enabled=true`):
-  - reminder record is always persisted first
-  - if no calendar hook is configured, response reports `calendar.status=unavailable`
-  - calendar failures never drop reminder records
+- Reminder bridges are best-effort and never roll back the persisted reminder record:
+  - `record_bridge` writes reminder snapshots to a record table (prefer `bitable_create`)
+  - `calendar_bridge` optionally creates calendar events when configured and callable
+  - `summary_cron_bridge` can maintain a daily summary cron job (MVP includes add path + simple dedupe)
+- Failure/status signaling:
+  - primary reminder write always lands first in local store
+  - bridge failures/unavailable states are returned under `bridges.*.status`
+  - legacy `calendar` status from reminder runtime remains backward compatible

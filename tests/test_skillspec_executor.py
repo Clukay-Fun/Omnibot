@@ -53,6 +53,37 @@ class _FakeTool(Tool):
         return json.dumps(result, ensure_ascii=False)
 
 
+class _CronFakeTool(Tool):
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+        self._jobs: list[str] = []
+
+    @property
+    def name(self) -> str:
+        return "cron"
+
+    @property
+    def description(self) -> str:
+        return "fake cron tool"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]}
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        action = kwargs.get("action")
+        if action == "list":
+            if not self._jobs:
+                return "No scheduled jobs."
+            return "Scheduled jobs:\n" + "\n".join(self._jobs)
+        if action == "add":
+            message = str(kwargs.get("message") or "")
+            self._jobs.append(message)
+            return f"Created job '{message}' (id: j1)"
+        return "Error: unsupported action"
+
+
 def _write_yaml(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content.strip() + "\n", encoding="utf-8")
@@ -1078,3 +1109,218 @@ error: {}
     assert created.handled is True
     assert '"status": "unavailable"' in created.content
     assert "SyncTest" in created.content
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_record_bridge_success_and_failure(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace_specs"
+    workspace.mkdir(parents=True, exist_ok=True)
+    _write_yaml(
+        workspace / "reminder_set.yaml",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}}}
+action:
+  kind: reminder_set
+  record_bridge:
+    enabled: true
+    tool: bitable_create
+    args:
+      fields:
+        reminder_id: "{{ runtime.reminder.id }}"
+        text: "{{ runtime.reminder.text }}"
+response: {}
+error: {}
+""",
+    )
+    registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=tmp_path / "builtin_specs")
+    registry.load()
+
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "b1"})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    created = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=BridgeOk due_at=2026-03-06T10:00:00",
+        ),
+        session,
+    )
+    assert created.handled is True
+    created_payload = json.loads(created.content)
+    assert created_payload["bridges"]["record_bridge"]["status"] == "created"
+    assert len(create_tool.calls) == 2
+    assert create_tool.calls[1]["confirm_token"] == "b1"
+
+    tools_fail = ToolRegistry()
+    failing_tool = _FakeTool("bitable_create", {"error": "table unavailable"})
+    tools_fail.register(failing_tool)
+    executor_fail = SkillSpecExecutor(
+        registry=registry,
+        tools=tools_fail,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-fail.json"),
+    )
+    failed = await executor_fail.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=BridgeFail due_at=2026-03-07T10:00:00",
+        ),
+        Session("feishu:chat"),
+    )
+    assert failed.handled is True
+    failed_payload = json.loads(failed.content)
+    assert failed_payload["reminder"]["text"] == "BridgeFail"
+    assert failed_payload["bridges"]["record_bridge"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_calendar_bridge_unconfigured_and_failure(tmp_path: Path) -> None:
+    registry_unconfigured = _build_registry(
+        tmp_path,
+        "reminder_set",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}, calendar_sync: {type: boolean}}}
+action: {kind: reminder_set, calendar_enabled: true}
+response: {}
+error: {}
+""",
+    )
+    executor_unconfigured = SkillSpecExecutor(
+        registry=registry_unconfigured,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-a.json"),
+    )
+    result_unconfigured = await executor_unconfigured.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set text=NoCfg due_at=2026-03-06T10:00:00 calendar_sync=true",
+        ),
+        Session("feishu:chat"),
+    )
+    assert result_unconfigured.handled is True
+    unconfigured_payload = json.loads(result_unconfigured.content)
+    assert unconfigured_payload["bridges"]["calendar_bridge"]["status"] == "skipped"
+    assert unconfigured_payload["bridges"]["calendar_bridge"]["reason"] == "not_configured"
+
+    registry_fail = _build_registry(
+        tmp_path,
+        "reminder_set_fail",
+        """
+meta: {id: reminder_set_fail, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}, calendar_sync: {type: boolean}}}
+action:
+  kind: reminder_set
+  calendar_bridge:
+    enabled: true
+    tool: calendar_create
+    args:
+      title: "{{ runtime.reminder.text }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    tools.register(_FakeTool("calendar_create", {"error": "calendar api down"}))
+    executor_fail = SkillSpecExecutor(
+        registry=registry_fail,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-b.json"),
+    )
+    result_fail = await executor_fail.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill reminder_set_fail text=CalFail due_at=2026-03-06T10:00:00 calendar_sync=true",
+        ),
+        Session("feishu:chat"),
+    )
+    assert result_fail.handled is True
+    fail_payload = json.loads(result_fail.content)
+    assert fail_payload["bridges"]["calendar_bridge"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_summary_cron_bridge_add_path(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_set",
+        """
+meta: {id: reminder_set, version: "0.1", description: 设置提醒}
+params: {type: object, properties: {text: {type: string}, due_at: {type: string}}}
+action:
+  kind: reminder_set
+  summary_cron_bridge:
+    enabled: true
+    tool: cron
+    dedupe_key_template: "daily_summary:{{ runtime.user_context.sender_id }}"
+    args:
+      action: add
+      cron_expr: "0 9 * * *"
+      message: "daily_summary:{{ runtime.user_context.sender_id }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    cron_tool = _CronFakeTool()
+    tools.register(cron_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-cron.json"),
+    )
+
+    first = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u-cron",
+            chat_id="chat",
+            content="/skill reminder_set text=CronA due_at=2026-03-06T10:00:00",
+        ),
+        Session("feishu:chat"),
+    )
+    assert first.handled is True
+    first_payload = json.loads(first.content)
+    assert first_payload["bridges"]["summary_cron_bridge"]["status"] == "created"
+
+    second = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u-cron",
+            chat_id="chat",
+            content="/skill reminder_set text=CronB due_at=2026-03-07T10:00:00",
+        ),
+        Session("feishu:chat"),
+    )
+    assert second.handled is True
+    second_payload = json.loads(second.content)
+    assert second_payload["bridges"]["summary_cron_bridge"]["status"] == "skipped"
+    assert second_payload["bridges"]["summary_cron_bridge"]["reason"] == "duplicate"
+
+    add_calls = [call for call in cron_tool.calls if call.get("action") == "add"]
+    assert len(add_calls) == 1

@@ -493,7 +493,7 @@ class SkillSpecExecutor:
             if not text or not due_at:
                 return {"error": "text and due_at are required"}
             calendar_requested = bool(params.get("calendar_sync") or action.get("calendar_enabled"))
-            return await self._reminder_runtime.create_reminder(
+            payload = await self._reminder_runtime.create_reminder(
                 user_id=user_id,
                 chat_id=chat_id,
                 text=text,
@@ -501,6 +501,41 @@ class SkillSpecExecutor:
                 channel=channel,
                 calendar_requested=calendar_requested,
             )
+            if not isinstance(payload, dict) or payload.get("error"):
+                return payload if isinstance(payload, dict) else {"error": "reminder_set failed"}
+
+            reminder_raw = payload.get("reminder")
+            reminder = reminder_raw if isinstance(reminder_raw, dict) else {}
+            bridge_runtime = dict(runtime_map)
+            bridge_runtime["reminder_result"] = payload
+            bridge_runtime["reminder"] = reminder
+
+            record_bridge = await self._run_record_bridge(
+                bridge=action.get("record_bridge"),
+                params=params,
+                runtime=bridge_runtime,
+                reminder=reminder,
+            )
+            calendar_bridge = await self._run_calendar_bridge(
+                bridge=action.get("calendar_bridge"),
+                params=params,
+                runtime=bridge_runtime,
+                reminder=reminder,
+                calendar_requested=calendar_requested,
+            )
+            summary_cron_bridge = await self._run_summary_cron_bridge(
+                bridge=action.get("summary_cron_bridge"),
+                params=params,
+                runtime=bridge_runtime,
+            )
+
+            enriched = dict(payload)
+            enriched["bridges"] = {
+                "record_bridge": record_bridge,
+                "calendar_bridge": calendar_bridge,
+                "summary_cron_bridge": summary_cron_bridge,
+            }
+            return enriched
 
         if kind == "reminder_list":
             include_cancelled = bool(params.get("include_cancelled", False))
@@ -514,6 +549,160 @@ class SkillSpecExecutor:
 
         date = str(params.get("date") or datetime.now(timezone.utc).date().isoformat())
         return self._reminder_runtime.build_daily_summary(user_id=user_id, date=date)
+
+    async def _run_record_bridge(
+        self,
+        *,
+        bridge: Any,
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+        reminder: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(bridge, dict):
+            return {"status": "skipped", "reason": "not_configured"}
+        if bridge.get("enabled") is False:
+            return {"status": "skipped", "reason": "disabled"}
+
+        tool_name = str(bridge.get("tool") or "bitable_create").strip()
+        if not tool_name:
+            return {"status": "failed", "message": "missing tool"}
+        if not self.tools.has(tool_name):
+            return {"status": "unavailable", "message": f"tool '{tool_name}' not found"}
+
+        default_args = {
+            "fields": {
+                "reminder_id": reminder.get("id"),
+                "user_id": reminder.get("user_id"),
+                "chat_id": reminder.get("chat_id"),
+                "channel": reminder.get("channel"),
+                "text": reminder.get("text"),
+                "due_at": reminder.get("due_at"),
+                "status": reminder.get("status"),
+                "created_at": reminder.get("created_at"),
+            }
+        }
+        args_template = bridge.get("args") if isinstance(bridge.get("args"), dict) else default_args
+        args = self._resolve_templates(args_template, params=params, steps={}, runtime=runtime)
+        if not isinstance(args, dict):
+            return {"status": "failed", "message": "invalid args"}
+
+        payload = await self._execute_bridge_tool(tool_name=tool_name, args=args)
+        error = self._extract_tool_error(payload)
+        if error:
+            return {"status": "failed", "message": error, "result": payload}
+        return {"status": "created", "result": payload}
+
+    async def _run_calendar_bridge(
+        self,
+        *,
+        bridge: Any,
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+        reminder: dict[str, Any],
+        calendar_requested: bool,
+    ) -> dict[str, Any]:
+        bridge_requested = calendar_requested or bool(params.get("calendar_sync"))
+        if isinstance(bridge, dict):
+            bridge_requested = bridge_requested or bool(bridge.get("enabled"))
+        if not bridge_requested:
+            return {"status": "skipped", "reason": "not_requested"}
+        if not isinstance(bridge, dict):
+            return {"status": "skipped", "reason": "not_configured"}
+        if bridge.get("enabled") is False:
+            return {"status": "skipped", "reason": "disabled"}
+
+        tool_name = str(bridge.get("tool") or "").strip()
+        if not tool_name:
+            return {"status": "failed", "message": "missing tool"}
+        if not self.tools.has(tool_name):
+            return {"status": "unavailable", "message": f"tool '{tool_name}' not found"}
+
+        default_args = {
+            "title": reminder.get("text", ""),
+            "start_at": reminder.get("due_at", ""),
+            "description": reminder.get("text", ""),
+        }
+        args_template = bridge.get("args") if isinstance(bridge.get("args"), dict) else default_args
+        args = self._resolve_templates(args_template, params=params, steps={}, runtime=runtime)
+        if not isinstance(args, dict):
+            return {"status": "failed", "message": "invalid args"}
+
+        payload = await self._execute_tool_json(tool_name, args)
+        error = self._extract_tool_error(payload)
+        if error:
+            return {"status": "failed", "message": error, "result": payload}
+        return {"status": "created", "result": payload}
+
+    async def _run_summary_cron_bridge(
+        self,
+        *,
+        bridge: Any,
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not isinstance(bridge, dict):
+            return {"status": "skipped", "reason": "not_configured"}
+        if bridge.get("enabled") is False:
+            return {"status": "skipped", "reason": "disabled"}
+        if "summary_cron_sync" in params and not bool(params.get("summary_cron_sync")):
+            return {"status": "skipped", "reason": "not_requested"}
+
+        tool_name = str(bridge.get("tool") or "cron").strip()
+        if not self.tools.has(tool_name):
+            return {"status": "unavailable", "message": f"tool '{tool_name}' not found"}
+
+        default_args = {
+            "action": "add",
+            "message": "daily_summary_reminder",
+            "cron_expr": "0 9 * * *",
+        }
+        args_template = bridge.get("args") if isinstance(bridge.get("args"), dict) else default_args
+        args = self._resolve_templates(args_template, params=params, steps={}, runtime=runtime)
+        if not isinstance(args, dict):
+            return {"status": "failed", "message": "invalid args"}
+        if str(args.get("action") or "add").lower() != "add":
+            return {"status": "skipped", "reason": "unsupported_action"}
+
+        dedupe_template = bridge.get("dedupe_key_template")
+        dedupe_key = ""
+        if isinstance(dedupe_template, str):
+            resolved_dedupe = self._resolve_templates(dedupe_template, params=params, steps={}, runtime=runtime)
+            dedupe_key = str(resolved_dedupe or "").strip()
+        if not dedupe_key:
+            dedupe_key = str(args.get("message") or "").strip()
+
+        if dedupe_key:
+            list_payload = await self._execute_tool_json(tool_name, {"action": "list"})
+            list_text = self._stringify_payload(list_payload)
+            if dedupe_key in list_text:
+                return {"status": "skipped", "reason": "duplicate", "dedupe_key": dedupe_key}
+
+        payload = await self._execute_tool_json(tool_name, args)
+        error = self._extract_tool_error(payload)
+        if error:
+            return {"status": "failed", "message": error, "result": payload}
+        return {"status": "created", "result": payload}
+
+    async def _execute_bridge_tool(self, *, tool_name: str, args: dict[str, Any]) -> Any:
+        payload = await self._execute_tool_json(tool_name, args)
+        if isinstance(payload, dict) and payload.get("dry_run") is True and payload.get("confirm_token"):
+            confirm_args = dict(args)
+            confirm_args["confirm_token"] = str(payload["confirm_token"])
+            return await self._execute_tool_json(tool_name, confirm_args)
+        return payload
+
+    @staticmethod
+    def _extract_tool_error(payload: Any) -> str | None:
+        if isinstance(payload, str):
+            stripped = payload.strip()
+            if stripped.startswith("Error"):
+                return stripped
+            return None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if error not in (None, ""):
+                return str(error)
+        return None
 
     async def _handle_write_confirmation(self, msg: InboundMessage, session: Any) -> SkillExecutionResult | None:
         pending = self._pending_writes(session)
