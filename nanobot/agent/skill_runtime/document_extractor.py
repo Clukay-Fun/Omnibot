@@ -18,6 +18,10 @@ class ExtractionError(RuntimeError):
 class ExtractionQualityError(ExtractionError):
     """Raised when extraction quality is below acceptable threshold."""
 
+    def __init__(self, message: str, *, missing_required_fields: list[str] | None = None):
+        super().__init__(message)
+        self.missing_required_fields = list(missing_required_fields or [])
+
 
 @dataclass(slots=True)
 class ExtractFieldRule:
@@ -92,7 +96,8 @@ def extract_fields(text: str, template: ExtractTemplate) -> ExtractionResult:
         missing_text = ", ".join(missing_required)
         raise ExtractionQualityError(
             "Low-quality extraction: missing required fields "
-            f"[{missing_text}] for template '{template.template_id}'"
+            f"[{missing_text}] for template '{template.template_id}'",
+            missing_required_fields=missing_required,
         )
 
     return ExtractionResult(
