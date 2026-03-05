@@ -185,11 +185,14 @@ class AgentLoop:
         if self.skillspec_config.startup_report_enabled:
             report = self._skillspec_registry.report
             logger.info(
-                "Skillspec registry loaded={} overridden={} disabled={}",
+                "Skillspec registry loaded={} overridden={} collisions={} disabled={}",
                 len(report.loaded),
                 len(report.overridden),
+                len(report.source_collisions),
                 len(report.disabled),
             )
+            if report.source_collisions:
+                logger.info("Skillspec source collisions: {}", "; ".join(report.source_collisions))
             if self.skillspec_config.startup_report_include_invalid and report.invalid:
                 logger.warning("Skillspec invalid entries: {}", "; ".join(report.invalid))
 

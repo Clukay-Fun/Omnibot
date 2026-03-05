@@ -64,7 +64,11 @@ Notes:
 
 - Built-in query skillspec files are stored in `nanobot/skills/skillspec/`.
 - The current built-in set includes case/task/contract query specs plus deadline overview.
-- Runtime should prefer workspace overrides under `workspace/skillspec/` when the same skillspec `id` exists, and fall back to built-in assets otherwise.
+- Runtime loads skillspec files with this precedence (high to low):
+  - `workspace/skillspec/*.yaml`
+  - `workspace/skillspec/managed/*.yaml`
+  - `nanobot/skills/skillspec/*.yaml`
+- `workspace/skillspec/managed/` is intended for centrally managed specs that should override bundled defaults but still be overridable by local workspace specs.
 
 ## Skillspec embedding router (Phase D)
 

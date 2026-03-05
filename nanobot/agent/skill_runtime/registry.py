@@ -15,6 +15,7 @@ from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 class SkillSpecRegistryReport:
     loaded: list[str] = field(default_factory=list)
     overridden: list[str] = field(default_factory=list)
+    source_collisions: list[str] = field(default_factory=list)
     disabled: list[str] = field(default_factory=list)
     invalid: list[str] = field(default_factory=list)
 
@@ -28,10 +29,11 @@ class _SkillSpecRecord:
 
 
 class SkillSpecRegistry:
-    """Load and validate skillspec files from builtin + workspace roots."""
+    """Load and validate skillspec files from bundled + managed + workspace roots."""
 
     def __init__(self, workspace_root: Path, builtin_root: Path | None = None):
         self.workspace_root = workspace_root
+        self.managed_root = workspace_root / "managed"
         self.builtin_root = builtin_root or Path(__file__).resolve().parents[2] / "skills" / "skillspec"
         self.report = SkillSpecRegistryReport()
         self._specs: dict[str, _SkillSpecRecord] = {}
@@ -42,14 +44,22 @@ class SkillSpecRegistry:
 
     def load(self) -> dict[str, SkillSpec]:
         self.report = SkillSpecRegistryReport()
-        builtin = self._load_root(self.builtin_root, source="builtin")
-        workspace = self._load_root(self.workspace_root, source="workspace")
+        layers = [
+            ("builtin", self._load_root(self.builtin_root, source="builtin")),
+            ("managed", self._load_root(self.managed_root, source="managed")),
+            ("workspace", self._load_root(self.workspace_root, source="workspace")),
+        ]
 
-        merged: dict[str, _SkillSpecRecord] = dict(builtin)
-        for name, record in workspace.items():
-            if name in merged:
-                self.report.overridden.append(name)
-            merged[name] = record
+        merged: dict[str, _SkillSpecRecord] = {}
+        for source, records in layers:
+            for name, record in records.items():
+                previous = merged.get(name)
+                if previous is not None:
+                    self.report.overridden.append(name)
+                    self.report.source_collisions.append(
+                        f"{name}: {previous.source}:{previous.path.name} -> {source}:{record.path.name}"
+                    )
+                merged[name] = record
 
         active: dict[str, _SkillSpecRecord] = {}
         for name, record in merged.items():
@@ -60,7 +70,8 @@ class SkillSpecRegistry:
 
         self._specs = active
         self.report.loaded = sorted(active)
-        self.report.overridden.sort()
+        self.report.overridden = sorted(set(self.report.overridden))
+        self.report.source_collisions.sort()
         self.report.disabled.sort()
         self.report.invalid.sort()
         return self.specs
