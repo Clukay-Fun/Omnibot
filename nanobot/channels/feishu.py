@@ -21,32 +21,31 @@ from nanobot.config.schema import FeishuConfig
 
 try:
     import lark_oapi as lark
-    from lark_oapi.api.im.v1 import (
-        CreateFileRequest,
-        CreateFileRequestBody,
-        CreateImageRequest,
-        CreateImageRequestBody,
-        CreateMessageRequest,
-        CreateMessageRequestBody,
-        CreateMessageReactionRequest,
-        CreateMessageReactionRequestBody,
-        DeleteMessageRequest,
-        Emoji,
-        GetFileRequest,
-        GetMessageResourceRequest,
-        PatchMessageRequest,
-        PatchMessageRequestBody,
-        P2ImMessageReceiveV1,
-        ReplyMessageRequest,
-        ReplyMessageRequestBody,
-        UpdateMessageRequest,
-        UpdateMessageRequestBody,
-    )
     from lark_oapi.api.cardkit.v1 import (
         ContentCardElementRequest,
         ContentCardElementRequestBody,
         IdConvertCardRequest,
         IdConvertCardRequestBody,
+    )
+    from lark_oapi.api.im.v1 import (
+        CreateFileRequest,
+        CreateFileRequestBody,
+        CreateImageRequest,
+        CreateImageRequestBody,
+        CreateMessageReactionRequest,
+        CreateMessageReactionRequestBody,
+        CreateMessageRequest,
+        CreateMessageRequestBody,
+        DeleteMessageRequest,
+        Emoji,
+        GetMessageResourceRequest,
+        P2ImMessageReceiveV1,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
+        ReplyMessageRequest,
+        ReplyMessageRequestBody,
+        UpdateMessageRequest,
+        UpdateMessageRequestBody,
     )
     FEISHU_AVAILABLE = True
     CARDKIT_AVAILABLE = True
@@ -250,7 +249,7 @@ def _extract_share_card_content(content_json: dict, msg_type: str) -> str:
 def _extract_interactive_content(content: dict) -> list[str]:
     """递归提取交互式卡片中的文本及链接内容。"""
     parts = []
-    
+
     if isinstance(content, str):
         try:
             content = json.loads(content)
@@ -284,19 +283,19 @@ def _extract_interactive_content(content: dict) -> list[str]:
             header_text = header_title.get("content", "") or header_title.get("text", "")
             if header_text:
                 parts.append(f"title: {header_text}")
-    
+
     return parts
 
 
 def _extract_element_content(element: dict) -> list[str]:
     """从单一卡片元素中提取内容。"""
     parts = []
-    
+
     if not isinstance(element, dict):
         return parts
-    
+
     tag = element.get("tag", "")
-    
+
     if tag in ("markdown", "lark_md"):
         content = element.get("content", "")
         if content:
@@ -357,17 +356,17 @@ def _extract_element_content(element: dict) -> list[str]:
     else:
         for ne in element.get("elements", []):
             parts.extend(_extract_element_content(ne))
-    
+
     return parts
 
 
 def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
     """从飞书帖子（富文本）消息内容中提取文本和图片 Keys。
-    
+
     支持两种格式:
-    1. 直接格式: {"title": "...", "content": [...]}
+    1. 直接格式: {"title": "...", "content": [...]}。
     2. 本地化格式: {"zh_cn": {"title": "...", "content": [...]}}
-    
+
     返回:
         (text, image_keys) - 提取出的纯文本和图片 Key 列表
     """
@@ -400,26 +399,26 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
                             image_keys.append(img_key)
         text = " ".join(text_parts).strip() if text_parts else None
         return text, image_keys
-    
+
     # Try direct format first
     if "content" in content_json:
         text, images = extract_from_lang(content_json)
         if text or images:
             return text or "", images
-    
+
     # Try localized format
     for lang_key in ("zh_cn", "en_us", "ja_jp"):
         lang_content = content_json.get(lang_key)
         text, images = extract_from_lang(lang_content)
         if text or images:
             return text or "", images
-    
+
     return "", []
 
 
 def _extract_post_text(content_json: dict) -> str:
     """从飞书帖子（富文本）消息中仅提取纯文本。
-    
+
     遗留的针对 _extract_post_content 函数的包装器，仅返回文本。
     """
     text, _ = _extract_post_content(content_json)
@@ -431,17 +430,17 @@ def _extract_post_text(content_json: dict) -> str:
 class FeishuChannel(BaseChannel):
     """
     基于 WebSocket 长连接的 Feishu/Lark 频道。
-    
+
     使用 WebSocket 接收事件 - 无需公网 IP 或 webhook 暴露。
-    
+
     依赖项:
     - 来自 Feishu 开放平台的 App ID 与 App Secret
     - 机器人已启用相关功能（Bot capability）
     - 事件订阅已开启 (im.message.receive_v1)
     """
-    
+
     name = "feishu"
-    
+
     def __init__(self, config: FeishuConfig, bus: MessageBus):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
@@ -493,27 +492,27 @@ class FeishuChannel(BaseChannel):
     @staticmethod
     def _is_continuation_command(text: str) -> bool:
         return text.strip() in {"继续", "展开"}
-    
+
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
         if not FEISHU_AVAILABLE:
             logger.error("Feishu SDK not installed. Run: pip install lark-oapi")
             return
-        
+
         if not self.config.app_id or not self.config.app_secret:
             logger.error("Feishu app_id and app_secret not configured")
             return
-        
+
         self._running = True
         self._loop = asyncio.get_running_loop()
-        
+
         # Create Lark client for sending messages
         self._client = lark.Client.builder() \
             .app_id(self.config.app_id) \
             .app_secret(self.config.app_secret) \
             .log_level(lark.LogLevel.INFO) \
             .build()
-        
+
         # Create event handler (message receive + optional access-event no-op)
         event_handler_builder = lark.EventDispatcherHandler.builder(
             self.config.encrypt_key or "",
@@ -539,7 +538,7 @@ class FeishuChannel(BaseChannel):
             event_handler_builder = register_card_action(self._on_card_action_sync)
 
         event_handler = event_handler_builder.build()
-        
+
         # Create WebSocket client for long connection
         self._ws_client = lark.ws.Client(
             self.config.app_id,
@@ -547,7 +546,7 @@ class FeishuChannel(BaseChannel):
             event_handler=event_handler,
             log_level=lark.LogLevel.INFO
         )
-        
+
         # Start WebSocket client in a separate thread with reconnect loop
         def run_ws():
             while self._running:
@@ -556,18 +555,18 @@ class FeishuChannel(BaseChannel):
                 except Exception as e:
                     logger.warning("Feishu WebSocket error: {}", e)
                 if self._running:
-                    import time; time.sleep(5)
-        
+                    time.sleep(5)
+
         self._ws_thread = threading.Thread(target=run_ws, daemon=True)
         self._ws_thread.start()
-        
+
         logger.info("Feishu bot started with WebSocket long connection")
         logger.info("No public IP required - using WebSocket to receive events")
-        
+
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
-    
+
     async def stop(self) -> None:
         """
         停止 Feishu 机器人。
@@ -578,7 +577,7 @@ class FeishuChannel(BaseChannel):
         """
         self._running = False
         logger.info("Feishu bot stopped")
-    
+
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """用于添加表情回应（运行在线程池中）的同步辅助方法。"""
         try:
@@ -589,9 +588,9 @@ class FeishuChannel(BaseChannel):
                     .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
                     .build()
                 ).build()
-            
+
             response = self._client.im.v1.message_reaction.create(request)
-            
+
             if not response.success():
                 logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
             else:
@@ -602,15 +601,15 @@ class FeishuChannel(BaseChannel):
     async def _add_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
         """
         向特定消息添加表情回应（非阻塞操作）。
-        
+
         常见的表情类型: THUMBSUP, OK, EYES, DONE, OnIt, HEART
         """
         if not self._client or not Emoji:
             return
-        
+
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
-    
+
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
         r"((?:^[ \t]*\|.+\|[ \t]*\n)(?:^[ \t]*\|[-:\s|]+\|[ \t]*\n)(?:^[ \t]*\|.+\|[ \t]*\n?)+)",
@@ -624,12 +623,15 @@ class FeishuChannel(BaseChannel):
     @staticmethod
     def _parse_md_table(table_text: str) -> dict | None:
         """将一段 Markdown 文本形式的表格解析并转换为 Feishu 的表格元素格式。"""
-        lines = [l.strip() for l in table_text.strip().split("\n") if l.strip()]
+        lines = [line.strip() for line in table_text.strip().split("\n") if line.strip()]
         if len(lines) < 3:
             return None
-        split = lambda l: [c.strip() for c in l.strip("|").split("|")]
-        headers = split(lines[0])
-        rows = [split(l) for l in lines[2:]]
+
+        def split_row(text: str) -> list[str]:
+            return [cell.strip() for cell in text.strip("|").split("|")]
+
+        headers = split_row(lines[0])
+        rows = [split_row(line) for line in lines[2:]]
         columns = [{"tag": "column", "name": f"c{i}", "display_name": h, "width": "auto"}
                    for i, h in enumerate(headers)]
         return {
@@ -705,12 +707,12 @@ class FeishuChannel(BaseChannel):
         elements = []
         link_re = re.compile(r"\[(.*?)\]\((.*?)\)")
         bold_re = re.compile(r"\*\*(.*?)\*\*")
-        
+
         tokens = []
         for m in link_re.finditer(line):
             start, end = m.span()
             tokens.append((start, end, "a", m.group(1), m.group(2)))
-            
+
         for m in bold_re.finditer(line):
             start, end = m.span()
             overlap = False
@@ -720,7 +722,7 @@ class FeishuChannel(BaseChannel):
                     break
             if not overlap:
                 tokens.append((start, end, "bold", m.group(1), None))
-                
+
         tokens.sort()
         curr = 0
         for start, end, ttype, text, extra in tokens:
@@ -1831,7 +1833,7 @@ class FeishuChannel(BaseChannel):
         """
         if self._loop and self._loop.is_running():
             asyncio.run_coroutine_threadsafe(self._on_message(data), self._loop)
-    
+
     async def _on_message(self, data: "P2ImMessageReceiveV1") -> None:
         """真实解析 Feishu 传入消息内容的处理器。"""
         try:
