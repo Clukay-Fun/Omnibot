@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -128,3 +129,30 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+
+
+def test_config_supports_skillspec_render_timeout_defaults_and_overrides() -> None:
+    config = Config()
+    assert config.agents.defaults.skillspec_render_primary_timeout_seconds == 12.0
+    assert config.agents.defaults.skillspec_render_retry_timeout_seconds == 6.0
+
+    overridden = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "skillspecRenderPrimaryTimeoutSeconds": 8,
+                "skillspecRenderRetryTimeoutSeconds": 3,
+            }
+        }
+    })
+    assert overridden.agents.defaults.skillspec_render_primary_timeout_seconds == 8
+    assert overridden.agents.defaults.skillspec_render_retry_timeout_seconds == 3
+
+
+def test_runtime_text_catalog_ignores_workspace_prompt_overrides(tmp_path: Path) -> None:
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    (prompt_dir / "help.yaml").write_text('commands_help_text: "workspace override"\n', encoding="utf-8")
+
+    catalog = RuntimeTextCatalog.load(tmp_path)
+
+    assert catalog.prompt_text("help", "commands_help_text", "") != "workspace override"

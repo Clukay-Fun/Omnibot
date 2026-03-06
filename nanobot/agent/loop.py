@@ -66,6 +66,7 @@ class AgentLoop:
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
+    _SKILLSPEC_RENDER_MAX_TOKENS = 800
 
     # region [初始化与配置]
 
@@ -93,6 +94,8 @@ class AgentLoop:
         skillspec_embedding_provider_config: "ProviderConfig | None" = None,
         llm_timeout_seconds: float = 90.0,
         stage_heartbeat_seconds: float = 15.0,
+        skillspec_render_primary_timeout_seconds: float = 12.0,
+        skillspec_render_retry_timeout_seconds: float = 6.0,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -121,13 +124,21 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self._stage_heartbeat_seconds = max(0.0, float(stage_heartbeat_seconds))
+        self._skillspec_render_primary_timeout_seconds = max(
+            0.1,
+            float(skillspec_render_primary_timeout_seconds),
+        )
+        self._skillspec_render_retry_timeout_seconds = max(
+            0.1,
+            float(skillspec_render_retry_timeout_seconds),
+        )
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self._runtime_text = RuntimeTextCatalog.load(workspace)
         self._answer_placeholder_text = self._runtime_text.prompt_text(
-            "progress", "answer_placeholder", "Working..."
+            "progress", "answer_placeholder", "🐈努力回答中..."
         )
         self._user_memory_store = UserMemoryStore(self.workspace)
         self.subagents = SubagentManager(
@@ -382,7 +393,6 @@ class AgentLoop:
             else []
         )
 
-        defaults = self._onboarding_defaults()
         user_name_default = self._normalize_form_value(identity.get("name"))
         role_for_guess = self._normalize_form_value(identity.get("role"))
         display_name_default = self._normalize_form_value(preferences.get("preferred_name"))
@@ -391,14 +401,19 @@ class AgentLoop:
 
         tone_default = self._normalize_form_value(preferences.get("response_style"))
         if tone_default not in {"concise", "standard", "detailed"}:
-            tone_default = str(defaults["preferences"]["response_style"])
+            tone_default = ""
 
         query_scope_default = self._normalize_form_value(preferences.get("query_scope"))
         if query_scope_default not in {"self", "all"}:
-            query_scope_default = str(defaults["preferences"]["query_scope"])
+            query_scope_default = ""
 
         confirm_pref = self._normalize_form_value(skillspec.get("confirm_preference"))
-        confirm_write_default = "no" if confirm_pref == "auto" else "yes"
+        if confirm_pref == "auto":
+            confirm_write_default = "no"
+        elif confirm_pref == "manual":
+            confirm_write_default = "yes"
+        else:
+            confirm_write_default = ""
 
         card = {
             "config": {"wide_screen_mode": True, "update_multi": True},
@@ -803,30 +818,22 @@ class AgentLoop:
                 if not preferred_name and normalized_action_key in {"submit_onboarding"}:
                     preferred_name = self._normalize_form_value(merged_form.get("display_name"))
 
-                defaults = self._onboarding_defaults()
                 identity = profile["identity"]
                 preferences = profile["preferences"]
 
-                resolved_name = user_name or str(identity.get("name") or defaults["identity"]["name"])
-                resolved_role = role or str(identity.get("role") or defaults["identity"]["role"])
-                resolved_team = team or str(identity.get("team") or defaults["identity"]["team"])
+                resolved_name = user_name or self._normalize_form_value(identity.get("name"))
+                resolved_role = role or self._normalize_form_value(identity.get("role"))
+                resolved_team = team or self._normalize_form_value(identity.get("team"))
                 identity["name"] = resolved_name
                 identity["role"] = resolved_role
                 identity["team"] = resolved_team
 
-                fallback_preferred_name = self._guess_preferred_name(resolved_name, resolved_role)
-
-                preferences["response_style"] = style or str(
-                    preferences.get("response_style") or defaults["preferences"]["response_style"]
-                )
-                preferences["preferred_name"] = preferred_name or str(
-                    preferences.get("preferred_name")
-                    or fallback_preferred_name
-                    or defaults["preferences"]["preferred_name"]
-                )
-                preferences["query_scope"] = query_scope or str(
-                    preferences.get("query_scope") or defaults["preferences"]["query_scope"]
-                )
+                if style:
+                    preferences["response_style"] = style
+                if preferred_name:
+                    preferences["preferred_name"] = preferred_name
+                if query_scope:
+                    preferences["query_scope"] = query_scope
 
                 skillspec_raw = profile.get("skillspec")
                 skillspec_pref: dict[str, Any]
@@ -841,10 +848,6 @@ class AgentLoop:
                     skillspec_pref["confirm_preference"] = "manual"
                 elif write_confirm:
                     skillspec_pref["confirm_preference"] = "manual"
-                else:
-                    skillspec_pref["confirm_preference"] = str(
-                        skillspec_pref.get("confirm_preference") or defaults["skillspec_confirm_preference"]
-                    )
                 profile["skillspec"] = skillspec_pref
 
                 onboarding.update(
@@ -867,36 +870,6 @@ class AgentLoop:
                 )
 
             if normalized_action_key in skip_action_keys:
-                defaults = self._onboarding_defaults()
-                identity = profile["identity"]
-                preferences = profile["preferences"]
-
-                resolved_name = str(identity.get("name") or defaults["identity"]["name"])
-                resolved_role = str(identity.get("role") or defaults["identity"]["role"])
-                resolved_team = str(identity.get("team") or defaults["identity"]["team"])
-                identity["name"] = resolved_name
-                identity["role"] = resolved_role
-                identity["team"] = resolved_team
-
-                preferences["response_style"] = str(
-                    preferences.get("response_style") or defaults["preferences"]["response_style"]
-                )
-                preferences["preferred_name"] = str(
-                    preferences.get("preferred_name")
-                    or self._guess_preferred_name(resolved_name, resolved_role)
-                    or defaults["preferences"]["preferred_name"]
-                )
-                preferences["query_scope"] = str(
-                    preferences.get("query_scope") or defaults["preferences"]["query_scope"]
-                )
-
-                skillspec_raw = profile.get("skillspec")
-                skillspec_pref = cast(dict[str, Any], skillspec_raw) if isinstance(skillspec_raw, dict) else {}
-                skillspec_pref["confirm_preference"] = str(
-                    skillspec_pref.get("confirm_preference") or defaults["skillspec_confirm_preference"]
-                )
-                profile["skillspec"] = skillspec_pref
-
                 onboarding.update(
                     {
                         "status": "completed",
@@ -912,7 +885,7 @@ class AgentLoop:
                     card_payload=self._build_onboarding_completed_card(profile),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
-                        "onboarding", "intro_skip_done", "Skipped setup and applied defaults."
+                        "onboarding", "intro_skip_done", "Skipped setup. Preferences will be learned in dialogue."
                     ),
                     update_message_id=callback_message_id or None,
                 )
@@ -1091,6 +1064,104 @@ class AgentLoop:
     ) -> str | None:
         return fallback_text
 
+    async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
+        content = raw_content.strip()
+        if not content:
+            return raw_content
+
+        primary_prompt = (
+            "你已经得到一次结构化技能执行结果，请直接用自然语言回复用户。\n"
+            "要求：\n"
+            "1) 只基于给定结果回答，不要再次调用工具。\n"
+            "2) 不要提及内部实现（如 skillspec、tool、路由）。\n"
+            "3) 结果为空时，简短说明并给出下一步建议。\n\n"
+            f"用户请求：\n{msg.content}\n\n"
+            f"结构化结果：\n{content}\n"
+        )
+
+        retry_prompt = (
+            "把下面结果改写成给用户的简短自然语言回复。"
+            "不要调用工具，不要解释内部机制。\n\n"
+            f"用户请求：{msg.content}\n"
+            f"结果：{content}\n"
+        )
+
+        base_messages = [
+            {"role": "system", "content": self.context.build_system_prompt()},
+            {"role": "user", "content": ContextBuilder._build_runtime_context(msg.channel, msg.chat_id)},
+        ]
+
+        max_tokens = max(128, min(self.max_tokens, self._SKILLSPEC_RENDER_MAX_TOKENS))
+        attempts = (
+            (
+                "primary",
+                primary_prompt,
+                min(self._llm_timeout_seconds, self._skillspec_render_primary_timeout_seconds),
+                self.reasoning_effort,
+            ),
+            (
+                "retry",
+                retry_prompt,
+                min(self._llm_timeout_seconds, self._skillspec_render_retry_timeout_seconds),
+                "low",
+            ),
+        )
+
+        for index, (label, prompt, timeout_seconds, reasoning_effort) in enumerate(attempts, start=1):
+            messages = [*base_messages, {"role": "user", "content": prompt}]
+            llm_started = time.perf_counter()
+            try:
+                response = await asyncio.wait_for(
+                    self.provider.chat(
+                        messages=messages,
+                        tools=None,
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+                logger.warning(
+                    "Skillspec LLM render {} timed out for {} after {} ms (limit={}s)",
+                    label,
+                    msg.session_key,
+                    elapsed_ms,
+                    timeout_seconds,
+                )
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "Skillspec LLM render {} failed for {}: {}",
+                    label,
+                    msg.session_key,
+                    exc,
+                )
+                continue
+
+            if response.finish_reason == "error":
+                logger.warning("Skillspec LLM render {} returned finish_reason=error", label)
+                continue
+            if response.has_tool_calls:
+                logger.warning("Skillspec LLM render {} returned tool_calls, retrying", label)
+                continue
+
+            rewritten = self._strip_think(response.content)
+            if rewritten:
+                return rewritten
+
+            logger.warning(
+                "Skillspec LLM render {} produced empty content for {} (attempt {})",
+                label,
+                msg.session_key,
+                index,
+            )
+
+        logger.warning("Skillspec LLM render exhausted retries for {}, fallback to raw result", msg.session_key)
+        return raw_content
+
     # endregion
 
     # region [核心调度与执行循环]
@@ -1170,7 +1241,7 @@ class AgentLoop:
                 if not on_progress or not name or name in announced_tool_names:
                     return
                 announced_tool_names.add(name)
-                template = self._runtime_text.prompt_text("progress", "prepare_tool", "Preparing {tool}")
+                template = self._runtime_text.prompt_text("progress", "prepare_tool", "准备调用 {tool}")
                 await _emit_progress(template.format(tool=name), phase="thinking")
                 thinking_detail_emitted = True
 
@@ -1269,7 +1340,7 @@ class AgentLoop:
                     args_preview = self._short_text(tool_call.arguments, limit=160)
                     if args_preview:
                         template = self._runtime_text.prompt_text(
-                            "progress", "call_tool_with_args", "Calling {tool}: {args}"
+                            "progress", "call_tool_with_args", "调用 {tool}，参数：{args}"
                         )
                         await _emit_progress(
                             template.format(tool=tool_call.name, args=args_preview),
@@ -1278,7 +1349,7 @@ class AgentLoop:
                         thinking_detail_emitted = True
                     else:
                         template = self._runtime_text.prompt_text(
-                            "progress", "call_tool_no_args", "Calling {tool}..."
+                            "progress", "call_tool_no_args", "正在调用 {tool} ..."
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     tool_started = time.perf_counter()
@@ -1295,7 +1366,7 @@ class AgentLoop:
                     result_preview = self._short_text(result, limit=200)
                     if result_preview:
                         template = self._runtime_text.prompt_text(
-                            "progress", "tool_result", "{tool} result: {result}"
+                            "progress", "tool_result", "{tool} 结果：{result}"
                         )
                         await _emit_progress(
                             template.format(tool=tool_call.name, result=result_preview),
@@ -1304,7 +1375,7 @@ class AgentLoop:
                         thinking_detail_emitted = True
                     else:
                         template = self._runtime_text.prompt_text(
-                            "progress", "tool_done", "{tool} done, continuing..."
+                            "progress", "tool_done", "{tool} 完成，继续思考中..."
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     messages = self.context.add_tool_result(
@@ -1312,7 +1383,7 @@ class AgentLoop:
                     )
 
                 await _emit_progress(
-                    self._runtime_text.prompt_text("progress", "data_ready", "Data ready, composing answer..."),
+                    self._runtime_text.prompt_text("progress", "data_ready", "已获取数据，正在整理答案..."),
                     phase="thinking",
                 )
                 thinking_detail_emitted = True
@@ -1327,7 +1398,7 @@ class AgentLoop:
 
                 if on_progress and not thinking_done_sent and thinking_detail_emitted:
                     await _emit_progress(
-                        self._runtime_text.prompt_text("progress", "thinking_done", "Thinking complete"),
+                        self._runtime_text.prompt_text("progress", "thinking_done", "思考完成"),
                         phase="thinking_done",
                     )
                     thinking_done_sent = True
@@ -1436,7 +1507,35 @@ class AgentLoop:
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
-        return self._runtime_text.prompt_text("help", "commands_help_text", "")
+        return self._runtime_text.prompt_text(
+            "help",
+            "commands_help_text",
+            (
+                "📖 帮助\n\n"
+                "📋 案件管理\n"
+                "  查案件 · 案件详情 · 录入案件 · 修改案件\n\n"
+                "📑 合同管理\n"
+                "  查合同 · 合同状态 · 录入合同\n\n"
+                "📊 招投标\n"
+                "  查投标 · 录入投标\n\n"
+                "✅ 任务管理\n"
+                "  查任务 · 我的待办 · 录入任务\n\n"
+                "⏰ 提醒\n"
+                "  设置提醒 · 查看提醒 · 取消提醒\n\n"
+                "📄 文档\n"
+                "  直接发文件自动识别 · 合同审阅\n\n"
+                "───────────────────\n\n"
+                "对话指令：\n"
+                "  \"继续\"         查看更多结果\n"
+                "  \"叫我XX\"       修改称呼\n"
+                "  \"以后简洁/详细点\" 调整回复风格\n"
+                "  \"不用确认直接录入\" 关闭录入确认\n\n"
+                "系统指令：\n"
+                "  /setup   重新设置\n"
+                "  /help    查看帮助\n"
+                "  /status  查看当前设置\n"
+            ),
+        )
 
     def _build_status_text(self, msg: InboundMessage) -> str:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
@@ -1537,7 +1636,16 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = self._runtime_text.prompt_text("help", "session_help_text", "")
+            content = self._runtime_text.prompt_text(
+                "help",
+                "session_help_text",
+                (
+                    "会话子命令：\n\n"
+                    "- /session new [标题]：创建飞书话题会话（缺省为 会话-YYYYMMDD-HHMM）\n"
+                    "- /session list：列出当前聊天下的会话\n"
+                    "- /session del [id|main]：删除当前/指定会话"
+                ),
+            )
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -1729,23 +1837,25 @@ class AgentLoop:
         if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
+                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
                 self.sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=continuation.content,
+                    content=rendered,
                     metadata={**(msg.metadata or {}), "_tool_turn": continuation.tool_turn},
                 )
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=self._runtime_text.prompt_text("pagination", "no_more_content", "No more content."),
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
 
         if self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
+                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
                 self.sessions.save(session)
                 outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
                 outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
@@ -1757,7 +1867,7 @@ class AgentLoop:
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=outbound_chat_id,
-                    content=skillspec_result.content,
+                    content=rendered,
                     metadata=outbound_metadata,
                 )
 

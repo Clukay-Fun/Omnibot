@@ -140,7 +140,7 @@ async def test_single_submit_completes_onboarding_and_writes_all_fields(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_skip_directly_completes_onboarding_with_defaults(tmp_path) -> None:
+async def test_skip_directly_completes_onboarding_without_forced_preferences(tmp_path) -> None:
     loop, provider = _build_loop(tmp_path)
     store = UserMemoryStore(tmp_path)
 
@@ -175,9 +175,9 @@ async def test_skip_directly_completes_onboarding_with_defaults(tmp_path) -> Non
     assert skip.metadata.get("_update_message_id") == "om-2"
     profile = store.read("feishu", "ou_skip")
     assert profile["onboarding"]["status"] == "completed"
-    assert profile["preferences"]["response_style"] == "standard"
-    assert profile["preferences"]["query_scope"] == "self"
-    assert profile["skillspec"]["confirm_preference"] == "manual"
+    assert profile["preferences"].get("response_style") in (None, "")
+    assert profile["preferences"].get("query_scope") in (None, "")
+    assert profile["skillspec"].get("confirm_preference") in (None, "")
     assert provider.calls == 0
 
 

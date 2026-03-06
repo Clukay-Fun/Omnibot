@@ -103,7 +103,22 @@ class SkillSpecMatcher:
         has_object = any(keyword and keyword.lower() in lowered for keyword in self._case_query_keywords)
         if not has_object:
             return False
-        return any(token and token.lower() in lowered for token in self._case_query_intent_tokens)
+        has_intent = any(token and token.lower() in lowered for token in self._case_query_intent_tokens)
+        if not has_intent:
+            return False
+        return self._has_meaningful_case_query(text)
+
+    def _has_meaningful_case_query(self, text: str) -> bool:
+        extracted = self._extract_case_query(text)
+        if not extracted:
+            return False
+        normalized = extracted.lower()
+        for token in sorted(self._case_query_keywords, key=len, reverse=True):
+            lowered = token.strip().lower()
+            if lowered:
+                normalized = normalized.replace(lowered, "")
+        normalized = re.sub(r"[\s:：\-_/，,。！？!?的]", "", normalized)
+        return bool(normalized)
 
     def _allow_case_search_match(self, *, spec_id: str, text: str) -> bool:
         if spec_id != self._CASE_SEARCH_SPEC_ID:
@@ -121,7 +136,7 @@ class SkillSpecMatcher:
             if suffix_pattern:
                 segment = re.sub(rf"(?:的)?(?:{suffix_pattern})\s*$", "", segment)
         segment = re.sub(r"\s+", " ", segment).strip()
-        return segment or text.strip()
+        return segment
 
     def _select_explicit(self, text: str) -> MatchSelection | None:
         match = re.match(r"^/skill\s+([a-zA-Z0-9_\-]+)\s*(.*)$", text, re.IGNORECASE)

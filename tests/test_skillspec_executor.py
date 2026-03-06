@@ -243,6 +243,49 @@ error: {}
     assert search.calls[0]["table_id"] == "tbl_case"
 
 
+@pytest.mark.asyncio
+async def test_executor_case_search_rejects_generic_query_without_subject(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_search",
+        """
+meta:
+  id: case_search
+  version: "0.1"
+  description: 案件查询
+  match:
+    regex: "(案号|案件|案子|项目ID|开庭)"
+    keywords: [案件, 案子, 案号, 项目ID, 开庭]
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {app_token: app_case, table_id: tbl_case}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="查询案件"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is False
+    assert search.calls == []
+
+
 def test_param_parser_extracts_key_value_and_query() -> None:
     parser = SkillSpecParamParser()
     schema = {

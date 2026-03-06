@@ -158,7 +158,7 @@ class SkillSpecExecutor:
         if payload is None:
             return SkillExecutionResult(
                 handled=True,
-                content=self._runtime_text.prompt_text("pagination", "no_more_content", "No more content."),
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
             )
         return SkillExecutionResult(
             handled=True,
@@ -958,7 +958,7 @@ class SkillSpecExecutor:
             value = error_cfg.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-        return self._runtime_text.prompt_text("pagination", "not_found_data", "No data found.")
+        return self._runtime_text.prompt_text("pagination", "not_found_data", "未查询到数据。")
 
     def _render_guarded(self, payload: Any, *, policy: dict[str, Any], session: Any) -> str:
         if isinstance(payload, list):
@@ -990,7 +990,7 @@ class SkillSpecExecutor:
             )
             continuation_cmd = continuation_commands[0] if continuation_commands else "continue"
             hint_template = self._runtime_text.prompt_text(
-                "pagination", "continuation_hint", "Reply '{continue_command}' to continue."
+                "pagination", "continuation_hint", "回复“{continue_command}”查看剩余内容"
             )
             return f"{content}\n\n{hint_template.format(continue_command=continuation_cmd)}"
         return content

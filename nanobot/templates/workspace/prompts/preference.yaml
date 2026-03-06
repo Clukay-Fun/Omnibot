@@ -1,3 +1,0 @@
-preferred_name_set: 我现在称呼你为「{preferred_name}」。如需修改，直接说“叫我XX”。
-preferred_name_fallback: 你当前还没有单独设置称呼，我先称呼你为「{fallback_name}」。如需修改，直接说“叫我XX”。
-preferred_name_missing: 你当前还没有设置称呼。直接说“叫我XX”，我会记住。

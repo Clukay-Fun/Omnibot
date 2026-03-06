@@ -72,14 +72,7 @@ class RuntimeTextCatalog:
 
     @classmethod
     def load(cls, workspace: Path | None) -> "RuntimeTextCatalog":
-        prompt_files = (
-            "smalltalk",
-            "onboarding",
-            "preference",
-            "help",
-            "pagination",
-            "progress",
-        )
+        prompt_files: tuple[str, ...] = ()
         routing_files = (
             "smalltalk_triggers",
             "preference_triggers",
@@ -98,8 +91,7 @@ class RuntimeTextCatalog:
         prompts: dict[str, dict[str, Any]] = {}
         for name in prompt_files:
             bundled = _safe_load_yaml_text(_load_bundled_text(f"prompts/{name}.yaml"))
-            override = _load_workspace_yaml(workspace / "prompts" / f"{name}.yaml") if workspace else {}
-            prompts[name] = _deep_merge(bundled, override)
+            prompts[name] = bundled
 
         routing: dict[str, dict[str, Any]] = {}
         for name in routing_files:
