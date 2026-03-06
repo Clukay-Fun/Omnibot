@@ -362,7 +362,11 @@ error: {}
     assert "someone-else" not in result.content
     assert search.calls[0]["app_token"] == "app_x"
     assert search.calls[0]["table_id"] == "tbl_x"
-    assert search.calls[0]["keyword"] == "alpha"
+    first_filters = search.calls[0]["filters"]
+    assert first_filters["conjunction"] == "and"
+    assert first_filters["conditions"][0]["field_name"] == "title"
+    assert first_filters["conditions"][0]["operator"] == "contains"
+    assert first_filters["conditions"][0]["value"] == "alpha"
 
 
 @pytest.mark.asyncio
@@ -422,8 +426,15 @@ error: {}
 
     assert result.handled is True
     assert len(search.calls) == 2
-    assert search.calls[0]["keyword"] == "CASE-1"
-    assert search.calls[1]["filters"]["case_id"] == "C-001"
+    first_filters = search.calls[0]["filters"]
+    assert first_filters["conditions"][0]["field_name"] == "case_no"
+    assert first_filters["conditions"][0]["operator"] == "contains"
+    assert first_filters["conditions"][0]["value"] == "CASE-1"
+
+    second_filters = search.calls[1]["filters"]
+    assert second_filters["conditions"][0]["field_name"] == "case_id"
+    assert second_filters["conditions"][0]["operator"] == "eq"
+    assert second_filters["conditions"][0]["value"] == "C-001"
 
 
 @pytest.mark.asyncio
@@ -1533,3 +1544,130 @@ error: {}
 
     add_calls = [call for call in cron_tool.calls if call.get("action") == "add"]
     assert len(add_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_work_report_extracts_fields_from_natural_language(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "work_report_create",
+        """
+meta:
+  id: work_report_create
+  version: "0.1"
+  description: 工作汇报入表
+  match:
+    regex: "(工作汇报|日报|周报)"
+    keywords: [工作汇报, 日报, 周报]
+params:
+  type: object
+  properties:
+    query: {type: string}
+    report_date: {type: string}
+    project: {type: string}
+    task_summary: {type: string}
+    hours: {type: string}
+    output: {type: string}
+    risk: {type: string}
+action:
+  kind: create
+  nlp_extract:
+    enabled: true
+    source_param: query
+    date_fields: [report_date]
+    field_patterns:
+      report_date:
+        - "(今天|昨日|昨天)"
+      project:
+        - "(?:项目|案件)[:：\\s]*([^，,。；;\\n]+)"
+      hours:
+        - "(?:耗时|工时|时长)[:：\\s]*([0-9]+(?:\\.[0-9]+)?)"
+      output:
+        - "(?:产出|结果|完成)[:：\\s]*([^\\n]+)"
+      risk:
+        - "(?:风险|阻塞|问题)[:：\\s]*([^\\n]+)"
+  args:
+    fields:
+      汇报日期: "{{ params.report_date }}"
+      项目: "{{ params.project }}"
+      工作内容: "{{ params.task_summary }}"
+      耗时小时: "{{ params.hours }}"
+      工作产出: "{{ params.output }}"
+      风险阻塞: "{{ params.risk }}"
+      原始汇报: "{{ params.query }}"
+response:
+  confirm_required: true
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "wr1"})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="今天工作汇报：项目 案件A，事项 起草答辩状，耗时 2.5小时，产出 已提交，风险 等待证据。",
+        ),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(create_tool.calls) == 1
+    fields = create_tool.calls[0]["fields"]
+    assert fields["项目"] == "案件A"
+    assert fields["耗时小时"] == "2.5"
+    assert fields["工作产出"].startswith("已提交")
+    assert fields["风险阻塞"].startswith("等待证据")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(fields["汇报日期"]))
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_set_infers_due_at_and_text_from_query(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_set",
+        """
+meta:
+  id: reminder_set
+  version: "0.1"
+  description: 设置提醒
+  match:
+    regex: "(提醒|提醒我)"
+    keywords: [提醒, 提醒我]
+params:
+  type: object
+  properties:
+    query: {type: string}
+    text: {type: string}
+    due_at: {type: string}
+action: {kind: reminder_set}
+response:
+  template: "{{ reminder.text }} @ {{ reminder.due_at }}"
+error: {}
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-natural.json"),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="提醒我明天9点提交工作汇报"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert "提交工作汇报" in result.content
+    assert re.search(r"\d{4}-\d{2}-\d{2}T09:00:00", result.content)

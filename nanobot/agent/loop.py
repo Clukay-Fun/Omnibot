@@ -1507,35 +1507,7 @@ class AgentLoop:
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
-        return self._runtime_text.prompt_text(
-            "help",
-            "commands_help_text",
-            (
-                "📖 帮助\n\n"
-                "📋 案件管理\n"
-                "  查案件 · 案件详情 · 录入案件 · 修改案件\n\n"
-                "📑 合同管理\n"
-                "  查合同 · 合同状态 · 录入合同\n\n"
-                "📊 招投标\n"
-                "  查投标 · 录入投标\n\n"
-                "✅ 任务管理\n"
-                "  查任务 · 我的待办 · 录入任务\n\n"
-                "⏰ 提醒\n"
-                "  设置提醒 · 查看提醒 · 取消提醒\n\n"
-                "📄 文档\n"
-                "  直接发文件自动识别 · 合同审阅\n\n"
-                "───────────────────\n\n"
-                "对话指令：\n"
-                "  \"继续\"         查看更多结果\n"
-                "  \"叫我XX\"       修改称呼\n"
-                "  \"以后简洁/详细点\" 调整回复风格\n"
-                "  \"不用确认直接录入\" 关闭录入确认\n\n"
-                "系统指令：\n"
-                "  /setup   重新设置\n"
-                "  /help    查看帮助\n"
-                "  /status  查看当前设置\n"
-            ),
-        )
+        return self._runtime_text.prompt_text("help", "commands_help_text", "").strip()
 
     def _build_status_text(self, msg: InboundMessage) -> str:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
@@ -1636,16 +1608,7 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = self._runtime_text.prompt_text(
-                "help",
-                "session_help_text",
-                (
-                    "会话子命令：\n\n"
-                    "- /session new [标题]：创建飞书话题会话（缺省为 会话-YYYYMMDD-HHMM）\n"
-                    "- /session list：列出当前聊天下的会话\n"
-                    "- /session del [id|main]：删除当前/指定会话"
-                ),
-            )
+            content = self._runtime_text.prompt_text("help", "session_help_text", "").strip()
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -1792,10 +1755,13 @@ class AgentLoop:
             return onboarding_outbound
 
         if cmd in {"/help", "/commands"}:
+            help_text = self._build_commands_help_text()
+            if not help_text:
+                help_text = self._build_status_text(msg)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=self._build_commands_help_text(),
+                content=help_text,
             )
         if cmd == "/status":
             return OutboundMessage(

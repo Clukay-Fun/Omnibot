@@ -113,10 +113,9 @@ class TestAgentSlashCommands:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "帮助" in response.content
-        assert "/help" in response.content
+        assert "当前设置" in response.content
         assert "/setup" in response.content
-        assert "/status" in response.content
+        assert "回复风格" in response.content
 
     @pytest.mark.asyncio
     async def test_session_new_marks_reply_in_thread_for_feishu(self, tmp_path: Path) -> None:

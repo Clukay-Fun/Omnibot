@@ -71,6 +71,91 @@ class BitableSearchTool(Tool):
             return True
         return any(self._is_value_match(v, keyword) for v in fields.values())
 
+    @staticmethod
+    def _normalize_filter_operator(op: str) -> str:
+        normalized = op.strip().lower()
+        if normalized in {"eq", "is", "="}:
+            return "is"
+        if normalized in {"contains", "like"}:
+            return "contains"
+        if normalized in {"ne", "neq", "!="}:
+            return "isNot"
+        if normalized in {"gt", ">"}:
+            return "isGreater"
+        if normalized in {"gte", ">="}:
+            return "isGreaterEqual"
+        if normalized in {"lt", "<"}:
+            return "isLess"
+        if normalized in {"lte", "<="}:
+            return "isLessEqual"
+        return normalized or "is"
+
+    @classmethod
+    def _build_filter_condition(cls, *, field_name: str, operator: str, value: Any) -> dict[str, Any] | None:
+        if not field_name:
+            return None
+        if value in (None, ""):
+            return None
+        values = value if isinstance(value, list) else [value]
+        normalized_values = [item for item in values if item not in (None, "")]
+        if not normalized_values:
+            return None
+        return {
+            "field_name": field_name,
+            "operator": cls._normalize_filter_operator(operator),
+            "value": normalized_values,
+        }
+
+    def _build_extra_filter(self, extra_filters: Any) -> dict[str, Any] | None:
+        if not isinstance(extra_filters, dict) or not extra_filters:
+            return None
+
+        conjunction = str(extra_filters.get("conjunction") or "and").strip().lower()
+        normalized_conjunction = "or" if conjunction == "or" else "and"
+        conditions: list[dict[str, Any]] = []
+
+        raw_conditions = extra_filters.get("conditions")
+        if isinstance(raw_conditions, list):
+            for item in raw_conditions:
+                if not isinstance(item, dict):
+                    continue
+                field_name = str(item.get("field_name") or item.get("field") or "").strip()
+                operator = str(item.get("operator") or item.get("op") or "is")
+                condition = self._build_filter_condition(
+                    field_name=field_name,
+                    operator=operator,
+                    value=item.get("value"),
+                )
+                if condition:
+                    conditions.append(condition)
+            if conditions:
+                return {"conjunction": normalized_conjunction, "conditions": conditions}
+
+        for field_name, raw_value in extra_filters.items():
+            if field_name in {"conjunction", "conditions"}:
+                continue
+            if raw_value in (None, ""):
+                continue
+
+            if isinstance(raw_value, dict):
+                operator = str(raw_value.get("operator") or raw_value.get("op") or "is")
+                value = raw_value.get("value")
+            else:
+                operator = "contains" if isinstance(raw_value, str) else "is"
+                value = raw_value
+
+            condition = self._build_filter_condition(
+                field_name=str(field_name).strip(),
+                operator=operator,
+                value=value,
+            )
+            if condition:
+                conditions.append(condition)
+
+        if not conditions:
+            return None
+        return {"conjunction": normalized_conjunction, "conditions": conditions}
+
     def _build_payload(
         self,
         *,
@@ -79,6 +164,7 @@ class BitableSearchTool(Tool):
         searchable_fields: list[str],
         date_from: str | None,
         date_to: str | None,
+        extra_filters: Any,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {}
         if view_id:
@@ -104,6 +190,16 @@ class BitableSearchTool(Tool):
                 }
             else:
                 payload["filter"] = keyword_filter
+
+        extra_filter = self._build_extra_filter(extra_filters)
+        if extra_filter:
+            if "filter" in payload:
+                payload["filter"] = {
+                    "conjunction": "and",
+                    "conditions": [payload["filter"], extra_filter],
+                }
+            else:
+                payload["filter"] = extra_filter
 
         return payload
 
@@ -296,12 +392,14 @@ class BitableSearchTool(Tool):
         date_to = kwargs.get("date_to")
         searchable_fields = self.config.bitable.search.searchable_fields
         keyword = kwargs.get("keyword")
+        extra_filters = kwargs.get("filters")
         payload = self._build_payload(
             view_id=view_id,
             keyword=keyword,
             searchable_fields=searchable_fields,
             date_from=date_from,
             date_to=date_to,
+            extra_filters=extra_filters,
         )
 
         tasks = [

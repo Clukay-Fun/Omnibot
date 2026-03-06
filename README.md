@@ -153,3 +153,9 @@ Notes:
   - primary reminder write always lands first in local store
   - bridge failures/unavailable states are returned under `bridges.*.status`
   - legacy `calendar` status from reminder runtime remains backward compatible
+
+## CI and release gates
+
+- GitHub Actions CI is defined in `.github/workflows/ci.yml` and runs lint, tests, and packaging checks.
+- Tag-based release automation is defined in `.github/workflows/release.yml` (build + `twine check` + GitHub Release; optional PyPI publish when `PYPI_API_TOKEN` is configured).
+- Use `RELEASE_CHECKLIST.md` before tagging/publishing to keep release flow consistent.

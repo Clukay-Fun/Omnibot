@@ -5,6 +5,12 @@ meta:
   description: Build daily summary payload from active reminders (for cron delivery).
   owner: built_in
   domain: productivity
+  match:
+    regex: "(提醒汇总|每日提醒|今日提醒)"
+    keywords:
+      - 提醒汇总
+      - 每日提醒
+      - 今日提醒
 params:
   type: object
   properties:

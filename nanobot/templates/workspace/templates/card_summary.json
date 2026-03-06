@@ -1,6 +1,0 @@
-{
-  "header": "【摘要 | generic.SUMMARY】",
-  "source_line": "- 数据来源: {sources}",
-  "total_line": "- 命中总数: {total}",
-  "next_step": "- 下一步建议: 请补充更具体的关键词，或回复“查看详情 <record_id>”。"
-}

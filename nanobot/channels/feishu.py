@@ -448,16 +448,16 @@ class FeishuChannel(BaseChannel):
             if cmd.strip()
         }
         self._thinking_collapsed_summary = self._runtime_text.prompt_text(
-            "progress", "thinking_collapsed_summary", "Thinking complete"
+            "progress", "thinking_collapsed_summary", "思考完成"
         )
-        self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "Thinking")
+        self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "思考中")
         self._thinking_placeholder_markdown = self._runtime_text.prompt_text(
-            "progress", "thinking_placeholder_markdown", "> Thinking"
+            "progress", "thinking_placeholder_markdown", "> 思考中"
         )
         generic_lines = self._runtime_text.prompt_lines(
             "progress",
             "thinking_generic_lines",
-            ["Thinking", "Thinking complete"],
+            ["思考中", "思考完成", "正在思考中..."],
         )
         self._thinking_generic_lines = {line.strip() for line in generic_lines if line.strip()}
         self._thinking_generic_base = {

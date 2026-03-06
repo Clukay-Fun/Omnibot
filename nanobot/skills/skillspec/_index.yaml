@@ -21,3 +21,5 @@ skills:
     description: Cancel reminder by id while keeping record-first semantics.
   - id: daily_summary
     description: Build a daily summary from active reminders for manual or cron delivery.
+  - id: work_report_create
+    description: Extract natural-language work reports and write them into Bitable with confirmation.

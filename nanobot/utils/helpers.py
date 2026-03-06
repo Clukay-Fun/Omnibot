@@ -1,6 +1,7 @@
 """Utility functions for nanobot."""
 
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -85,6 +86,7 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
     ensure_dir(workspace / "extract")
-    ensure_dir(workspace / "prompts")
-    ensure_dir(workspace / "routing")
-    ensure_dir(workspace / "templates")
+    for legacy_dir in ("prompts", "routing", "templates"):
+        target = workspace / legacy_dir
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)

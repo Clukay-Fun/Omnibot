@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -195,6 +195,7 @@ class SkillSpecExecutor:
             }
         }
         action = spec.action if isinstance(spec.action, dict) else {}
+        params = self._apply_nlp_extract(action=action, params=params)
         kind = str(action.get("kind", "")).lower()
 
         if selection.reason != "explicit" and self._looks_like_smalltalk(msg.content):
@@ -404,7 +405,7 @@ class SkillSpecExecutor:
             resolved = self._resolve_templates(filter_template, params=params, steps=steps, runtime=runtime)
             keyword, filters = self._parse_filter_template(resolved)
 
-        if keyword is None:
+        if keyword is None and not filters:
             query = params.get("query")
             if isinstance(query, str) and query.strip():
                 keyword = query.strip()
@@ -603,8 +604,15 @@ class SkillSpecExecutor:
         channel = str(user_ctx.get("channel") or "")
 
         if kind == "reminder_set":
-            text = str(params.get("text") or params.get("query") or "").strip()
+            query_text = str(params.get("query") or "").strip()
+            text = str(params.get("text") or "").strip()
             due_at = str(params.get("due_at") or "").strip()
+            if query_text and (not text or not due_at):
+                inferred_text, inferred_due_at = self._infer_reminder_fields(query_text)
+                if not text and inferred_text:
+                    text = inferred_text
+                if not due_at and inferred_due_at:
+                    due_at = inferred_due_at
             if not text or not due_at:
                 return {"error": "text and due_at are required"}
             calendar_requested = bool(params.get("calendar_sync") or action.get("calendar_enabled"))
@@ -664,6 +672,89 @@ class SkillSpecExecutor:
 
         date = str(params.get("date") or datetime.now(timezone.utc).date().isoformat())
         return self._reminder_runtime.build_daily_summary(user_id=user_id, date=date)
+
+    def _infer_reminder_fields(self, query: str) -> tuple[str | None, str | None]:
+        due_at = self._extract_due_at_from_query(query)
+        text = self._strip_reminder_query_noise(query)
+        if not text:
+            text = query.strip()
+        return (text or None, due_at)
+
+    def _extract_due_at_from_query(self, query: str) -> str | None:
+        text = query.strip()
+        if not text:
+            return None
+
+        absolute = re.search(
+            r"(?P<date>\d{4}[./-]\d{1,2}[./-]\d{1,2})(?:\s*(?P<period>上午|下午|中午|晚上|早上))?\s*(?P<hour>\d{1,2})?(?:[:：点时](?P<minute>\d{1,2}))?",
+            text,
+        )
+        if absolute:
+            parsed = self._format_due_at(
+                date_token=str(absolute.group("date") or ""),
+                period=absolute.group("period"),
+                hour_token=absolute.group("hour"),
+                minute_token=absolute.group("minute"),
+            )
+            if parsed:
+                return parsed
+
+        relative = re.search(
+            r"(?P<date>今天|明天|后天|昨天|昨日)(?:\s*(?P<period>上午|下午|中午|晚上|早上))?\s*(?P<hour>\d{1,2})?(?:[:：点时](?P<minute>\d{1,2}))?",
+            text,
+        )
+        if relative:
+            return self._format_due_at(
+                date_token=str(relative.group("date") or ""),
+                period=relative.group("period"),
+                hour_token=relative.group("hour"),
+                minute_token=relative.group("minute"),
+            )
+        return None
+
+    def _format_due_at(
+        self,
+        *,
+        date_token: str,
+        period: str | None,
+        hour_token: str | None,
+        minute_token: str | None,
+    ) -> str | None:
+        date_value = self._normalize_relative_date(date_token)
+        if not date_value:
+            return None
+
+        hour = 9
+        minute = 0
+        if hour_token and hour_token.isdigit():
+            hour = int(hour_token)
+        if minute_token and minute_token.isdigit():
+            minute = int(minute_token)
+
+        if period in {"下午", "晚上"} and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+        elif period == "早上" and hour == 12:
+            hour = 0
+
+        if hour > 23 or minute > 59:
+            return None
+        return f"{date_value}T{hour:02d}:{minute:02d}:00"
+
+    @staticmethod
+    def _strip_reminder_query_noise(query: str) -> str:
+        text = query.strip()
+        text = re.sub(r"^(请)?(帮我)?提醒我", "", text)
+        text = re.sub(r"^(请)?(帮我)?提醒", "", text)
+        text = re.sub(
+            r"(今天|明天|后天|昨天|昨日)(\s*(上午|下午|中午|晚上|早上))?\s*\d{0,2}(?:[:：点时]\d{0,2})?",
+            " ",
+            text,
+        )
+        text = re.sub(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}(\s*\d{0,2}(?:[:：点时]\d{0,2})?)?", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" ，,。；;:：在于")
 
     async def _run_record_bridge(
         self,
@@ -924,7 +1015,127 @@ class SkillSpecExecutor:
         if isinstance(base_args, dict):
             args.update(self._resolve_templates(base_args, params=params, steps={}, runtime=runtime))
         args.update(params)
+        fields = args.get("fields")
+        if isinstance(fields, dict):
+            args["fields"] = {
+                key: value
+                for key, value in fields.items()
+                if value not in (None, "", [], {})
+            }
         return args
+
+    def _apply_nlp_extract(self, *, action: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+        extract_cfg = action.get("nlp_extract")
+        if not isinstance(extract_cfg, dict):
+            return params
+        if extract_cfg.get("enabled") is False:
+            return params
+
+        source_param = str(extract_cfg.get("source_param") or "query").strip() or "query"
+        source_value = params.get(source_param)
+        if not isinstance(source_value, str):
+            return params
+        source_text = source_value.strip()
+        if not source_text:
+            return params
+
+        field_patterns = extract_cfg.get("field_patterns")
+        if not isinstance(field_patterns, dict):
+            return params
+
+        date_fields = {
+            str(item).strip()
+            for item in (extract_cfg.get("date_fields") or ["report_date"])
+            if str(item).strip()
+        }
+
+        merged = dict(params)
+        for field_name, pattern_list in field_patterns.items():
+            key = str(field_name).strip()
+            if not key or merged.get(key) not in (None, ""):
+                continue
+            extracted = self._extract_first_pattern(source_text, pattern_list)
+            if not extracted:
+                continue
+            if key in date_fields:
+                normalized_date = self._normalize_relative_date(extracted)
+                extracted = normalized_date or extracted
+            merged[key] = extracted
+
+        if merged.get("task_summary") in (None, ""):
+            stripped = self._strip_report_noise(source_text, extract_cfg.get("strip_patterns"))
+            if stripped:
+                merged["task_summary"] = stripped
+
+        return merged
+
+    @staticmethod
+    def _extract_first_pattern(text: str, patterns: Any) -> str | None:
+        if isinstance(patterns, str):
+            pattern_list = [patterns]
+        elif isinstance(patterns, list):
+            pattern_list = [str(item) for item in patterns if str(item).strip()]
+        else:
+            return None
+
+        for pattern in pattern_list:
+            try:
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+            except re.error:
+                continue
+            if not match:
+                continue
+            if match.lastindex:
+                for index in range(1, match.lastindex + 1):
+                    group = match.group(index)
+                    if group and group.strip():
+                        return group.strip()
+            value = match.group(0)
+            if value and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _strip_report_noise(text: str, strip_patterns: Any) -> str:
+        result = text
+        if isinstance(strip_patterns, list):
+            for pattern in strip_patterns:
+                pattern_text = str(pattern).strip()
+                if not pattern_text:
+                    continue
+                try:
+                    result = re.sub(pattern_text, " ", result, flags=re.IGNORECASE)
+                except re.error:
+                    continue
+        result = re.sub(r"\s+", " ", result)
+        return result.strip(" ，,。；;:：")
+
+    @staticmethod
+    def _normalize_relative_date(value: str) -> str | None:
+        text = value.strip()
+        if not text:
+            return None
+
+        today = datetime.now().date()
+        relative_map = {
+            "今天": 0,
+            "昨日": -1,
+            "昨天": -1,
+            "明天": 1,
+            "后天": 2,
+        }
+        if text in relative_map:
+            target = today + timedelta(days=relative_map[text])
+            return target.isoformat()
+
+        match = re.fullmatch(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", text)
+        if not match:
+            return None
+        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        try:
+            return datetime(year=year, month=month, day=day).date().isoformat()
+        except ValueError:
+            return None
 
     async def _execute_tool_json(self, tool_name: str, args: dict[str, Any]) -> Any:
         raw = await self.tools.execute(tool_name, args)
@@ -1404,6 +1615,7 @@ class SkillSpecExecutor:
 
         conditions = filter_template.get("conditions")
         if isinstance(conditions, list):
+            parsed_conditions: list[dict[str, Any]] = []
             for cond in conditions:
                 if not isinstance(cond, dict):
                     continue
@@ -1412,20 +1624,39 @@ class SkillSpecExecutor:
                 value = cond.get("value")
                 if value in (None, ""):
                     continue
-                if op == "contains" and keyword is None:
+                if not field and op == "contains" and keyword is None:
                     keyword = str(value)
                     continue
                 if field:
-                    filters[field] = value
+                    parsed_conditions.append({
+                        "field_name": field,
+                        "operator": op,
+                        "value": value,
+                    })
+            if parsed_conditions:
+                conjunction = str(filter_template.get("op") or "and").strip().lower()
+                filters = {
+                    "conjunction": "or" if conjunction == "or" else "and",
+                    "conditions": parsed_conditions,
+                }
             return keyword, filters
 
         field = str(filter_template.get("field", "")).strip()
         value = filter_template.get("value")
         op = str(filter_template.get("op", "eq")).lower()
-        if op == "contains":
+        if not field and op == "contains":
             keyword = None if value is None else str(value)
         elif field and value not in (None, ""):
-            filters[field] = value
+            filters = {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": field,
+                        "operator": op,
+                        "value": value,
+                    }
+                ],
+            }
         return keyword, filters
 
     @staticmethod
