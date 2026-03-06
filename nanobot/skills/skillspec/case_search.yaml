@@ -4,6 +4,14 @@ meta:
   description: Search case records by keyword and filters.
   owner: built_in
   domain: legal_ops
+  match:
+    regex: "(案号|案件|案子|项目ID|开庭)"
+    keywords:
+      - 案件
+      - 案子
+      - 案号
+      - 项目ID
+      - 开庭
 params:
   type: object
   required:
@@ -40,8 +48,7 @@ action:
   kind: query
   data_source: bitable
   table:
-    app_token: app_case_mgmt_001
-    table_id: tbl_case_registry_001
+    alias: case_registry
   select_fields:
     - case_id
     - case_no
@@ -54,8 +61,7 @@ action:
   filter_template:
     op: and
     conditions:
-      - field: title
-        op: contains
+      - op: contains
         value: "{{ params.query }}"
       - field: status
         op: eq

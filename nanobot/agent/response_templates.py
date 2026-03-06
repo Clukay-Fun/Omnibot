@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
+
 _FEISHU_DATA_TOOLS = {
     "bitable_search",
     "bitable_get",
@@ -56,9 +58,17 @@ def uses_structured_feishu_data(payloads: list[ToolPayload]) -> bool:
 class TemplateRouter:
     """Rule-based intent router for deterministic template rendering."""
 
-    _CASE_KEYWORDS = ("案件", "案号", "诉讼", "仲裁", "case")
-    _CONTRACT_KEYWORDS = ("合同", "协议", "签约", "盖章", "付款条款", "contract", "ht")
-    _CROSS_KEYWORDS = ("跨表", "总览", "汇总", "overview", "全局")
+    def __init__(self, runtime_text: RuntimeTextCatalog | None = None):
+        self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
+        self._case_keywords = tuple(
+            self._runtime_text.routing_list("domain_hints", "template_case_keywords", ["case"])
+        )
+        self._contract_keywords = tuple(
+            self._runtime_text.routing_list("domain_hints", "template_contract_keywords", ["contract"])
+        )
+        self._cross_keywords = tuple(
+            self._runtime_text.routing_list("domain_hints", "template_cross_keywords", ["overview"])
+        )
 
     def route(self, user_text: str, payloads: list[ToolPayload]) -> TemplateDecision:
         text = (user_text or "").lower()
@@ -73,15 +83,15 @@ class TemplateRouter:
         if unique_tools:
             reasons.append(f"使用工具: {', '.join(unique_tools)}")
 
-        if any(k in text for k in self._CROSS_KEYWORDS):
+        if any(k in text for k in self._cross_keywords):
             reasons.insert(0, "命中跨表关键词/多源数据")
             return TemplateDecision(intent="cross_overview", template_id="cross.OVERVIEW", reasons=reasons)
 
-        if any(k in text for k in self._CONTRACT_KEYWORDS) or self._contains_field(payloads, "合同"):
+        if any(k in text for k in self._contract_keywords) or self._contains_field(payloads, "合同"):
             reasons.insert(0, "命中合同关键词")
             return TemplateDecision(intent="contract_lookup", template_id="contract.HT-T1", reasons=reasons)
 
-        if any(k in text for k in self._CASE_KEYWORDS) or self._contains_field(payloads, "案件"):
+        if any(k in text for k in self._case_keywords) or self._contains_field(payloads, "案件"):
             reasons.insert(0, "命中案件关键词")
             return TemplateDecision(intent="case_lookup", template_id="case.T1", reasons=reasons)
 
@@ -130,8 +140,9 @@ class TemplateRouter:
 class TemplateRenderer:
     """Render fixed-format response cards by template id."""
 
-    def __init__(self, max_items: int = 5):
+    def __init__(self, max_items: int = 5, runtime_text: RuntimeTextCatalog | None = None):
         self.max_items = max(1, max_items)
+        self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
 
     def render(
         self,
@@ -159,16 +170,20 @@ class TemplateRenderer:
         status = _pick_field(fields, "状态", "进度", "Status")
         url = record.get("record_url") or "—"
         total = _total_hits(payloads)
-        return "\n".join([
-            "【案件卡片 | case.T1】",
-            f"- 案件编号: {case_no}",
-            f"- 案件名称: {title}",
-            f"- 客户: {client}",
-            f"- 负责人: {owner}",
-            f"- 状态: {status}",
-            f"- 命中记录: {total}",
-            f"- 详情链接: {url}",
-        ])
+        template = self._runtime_text.template("card_case")
+        header = str(template.get("header") or "")
+        lines_cfg = template.get("lines") if isinstance(template.get("lines"), list) else []
+        values = {
+            "case_no": case_no,
+            "title": title,
+            "client": client,
+            "owner": owner,
+            "status": status,
+            "total": total,
+            "url": url,
+        }
+        lines = [str(line).format(**values) for line in lines_cfg if str(line).strip()]
+        return "\n".join([header, *lines]) if header else "\n".join(lines)
 
     def _render_contract_card(self, payloads: list[ToolPayload]) -> str:
         record = _first_record(payloads)
@@ -182,18 +197,22 @@ class TemplateRenderer:
         sign_date = _pick_field(fields, "签订日期", "签约日期", "生效日期", "Sign Date")
         url = record.get("record_url") or "—"
         total = _total_hits(payloads)
-        return "\n".join([
-            "【合同卡片 | contract.HT-T1】",
-            f"- 合同编号: {contract_no}",
-            f"- 合同名称: {name}",
-            f"- 对方主体: {counterparty}",
-            f"- 负责人: {owner}",
-            f"- 合同金额: {amount}",
-            f"- 状态: {status}",
-            f"- 签订日期: {sign_date}",
-            f"- 命中记录: {total}",
-            f"- 详情链接: {url}",
-        ])
+        template = self._runtime_text.template("card_contract")
+        header = str(template.get("header") or "")
+        lines_cfg = template.get("lines") if isinstance(template.get("lines"), list) else []
+        values = {
+            "contract_no": contract_no,
+            "name": name,
+            "counterparty": counterparty,
+            "owner": owner,
+            "amount": amount,
+            "status": status,
+            "sign_date": sign_date,
+            "total": total,
+            "url": url,
+        }
+        lines = [str(line).format(**values) for line in lines_cfg if str(line).strip()]
+        return "\n".join([header, *lines]) if header else "\n".join(lines)
 
     def _render_cross_overview(self, payloads: list[ToolPayload]) -> str:
         source_lines = []
@@ -206,29 +225,38 @@ class TemplateRenderer:
             if preview:
                 preview_lines.extend(preview)
 
+        template = self._runtime_text.template("card_overview")
+        empty_source = str(template.get("empty_source") or "- —")
+        overflow_hint = str(template.get("overflow_hint") or "")
+        continuation = self._runtime_text.routing_list("pagination_triggers", "continuation_commands", ["next"])
+        continue_command = continuation[0] if continuation else "next"
+
         if not source_lines:
-            source_lines = ["- 数据源: —"]
+            source_lines = [empty_source]
 
         if len(preview_lines) > self.max_items:
             omitted = len(preview_lines) - self.max_items
-            preview_lines = preview_lines[: self.max_items] + [f"- ... 其余 {omitted} 条请回复“下一页”"]
+            hint = overflow_hint.format(omitted=omitted, continue_command=continue_command) if overflow_hint else ""
+            preview_lines = preview_lines[: self.max_items] + ([hint] if hint else [])
 
         return "\n".join([
-            "【跨表总览 | cross.OVERVIEW】",
-            "- 数据来源统计:",
+            str(template.get("header") or ""),
+            str(template.get("source_title") or ""),
             *source_lines,
-            "- 结果预览:",
-            *(preview_lines or ["- —"]),
+            str(template.get("preview_title") or ""),
+            *(preview_lines or [str(template.get("empty_preview") or "- —")]),
         ])
 
     def _render_generic_summary(self, payloads: list[ToolPayload]) -> str:
         total = _total_hits(payloads)
         sources = sorted({p.tool_name for p in payloads})
+        template = self._runtime_text.template("card_summary")
+        source_text = ", ".join(sources) if sources else "—"
         return "\n".join([
-            "【摘要 | generic.SUMMARY】",
-            f"- 数据来源: {', '.join(sources) if sources else '—'}",
-            f"- 命中总数: {total}",
-            "- 下一步建议: 请补充更具体的关键词，或回复“查看详情 <record_id>”。",
+            str(template.get("header") or ""),
+            str(template.get("source_line") or "").format(sources=source_text),
+            str(template.get("total_line") or "").format(total=total),
+            str(template.get("next_step") or ""),
         ])
 
 

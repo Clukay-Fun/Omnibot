@@ -1,4 +1,7 @@
-"""采用 botpy SDK 的 QQ 频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 botpy 的 QQ 频道收发实现。
+"""
 
 import asyncio
 from collections import deque
@@ -25,10 +28,14 @@ if TYPE_CHECKING:
     from botpy.message import C2CMessage
 
 
-# region [工具与辅助方法]
+#region 辅助方法
 
 def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
-    """基于当前实例生成一个绑定至已配置通道目标的 botpy.Client 继承类基类工厂。"""
+    """用处，参数
+
+    功能:
+        - 构造绑定当前频道实例的 botpy 客户端子类。
+    """
     intents = botpy.Intents(public_messages=True, direct_message=True)
 
     class _Bot(botpy.Client):
@@ -47,23 +54,36 @@ def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
 
     return _Bot
 
-# endregion
+#endregion
 
-# region [QQ 频道核心类]
+#region QQ频道核心类
 
 class QQChannel(BaseChannel):
-    """依托于 WebSocket 连接底座并受 botpy SDK 驱动支持的 QQ 频道实现。"""
+    """用处，参数
+
+    功能:
+        - 管理 QQ 频道连接并处理消息收发。
+    """
 
     name = "qq"
 
     def __init__(self, config: QQConfig, bus: MessageBus):
+        """用处，参数
+
+        功能:
+            - 初始化配置、客户端句柄和去重缓存。
+        """
         super().__init__(config, bus)
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
 
     async def start(self) -> None:
-        """启动底层的 QQ 机器人。"""
+        """用处，参数
+
+        功能:
+            - 启动 QQ 客户端并进入运行循环。
+        """
         if not QQ_AVAILABLE:
             logger.error("QQ SDK not installed. Run: pip install qq-botpy")
             return
@@ -80,7 +100,11 @@ class QQChannel(BaseChannel):
         await self._run_bot()
 
     async def _run_bot(self) -> None:
-        """采用附带自动重连机制的形式运行机器人底座连接通信处理队列。"""
+        """用处，参数
+
+        功能:
+            - 运行客户端并在异常后自动重连。
+        """
         while self._running:
             try:
                 await self._client.start(appid=self.config.app_id, secret=self.config.secret)
@@ -91,7 +115,11 @@ class QQChannel(BaseChannel):
                 await asyncio.sleep(5)
 
     async def stop(self) -> None:
-        """关闭当前的 QQ 机器人。"""
+        """用处，参数
+
+        功能:
+            - 停止运行并关闭客户端连接。
+        """
         self._running = False
         if self._client:
             try:
@@ -101,7 +129,11 @@ class QQChannel(BaseChannel):
         logger.info("QQ bot stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
-        """借由当前的 QQ 频道通路将对外组装后的消息数据发给终端目标。"""
+        """用处，参数
+
+        功能:
+            - 通过 QQ API 发送外发消息。
+        """
         if not self._client:
             logger.warning("QQ client not initialized")
             return
@@ -117,7 +149,11 @@ class QQChannel(BaseChannel):
             logger.error("Error sending QQ message: {}", e)
 
     async def _on_message(self, data: "C2CMessage") -> None:
-        """解析应对所有从 QQ 网络通路传入至我们的底层数据负荷包消息模型信息。"""
+        """用处，参数
+
+        功能:
+            - 解析入站消息并转发到统一总线。
+        """
         try:
             # 根据其附带的 message ID 执行基本重复项合并策略处理
             if data.id in self._processed_ids:
@@ -139,4 +175,4 @@ class QQChannel(BaseChannel):
         except Exception:
             logger.exception("Error handling QQ message")
 
-# endregion
+#endregion

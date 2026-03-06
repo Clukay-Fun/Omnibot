@@ -30,8 +30,7 @@ action:
   kind: update
   data_source: bitable
   table:
-    app_token: app_case_ops_001
-    table_id: tbl_case_tasks_001
+    alias: case_tasks
   args:
     record_id: "{{ params.record_id }}"
     fields:

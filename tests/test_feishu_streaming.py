@@ -802,6 +802,45 @@ async def test_send_uses_custom_interactive_content_when_provided() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_updates_existing_message_when_update_message_id_is_set() -> None:
+    channel, client = _build_channel()
+    channel.config.stream_card_enabled = False
+    custom_card = {
+        "config": {"wide_screen_mode": True},
+        "elements": [{"tag": "markdown", "content": "# updated"}],
+    }
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="ignored fallback",
+            metadata={
+                "message_id": "src-should-not-reply",
+                "interactive_content": json.dumps(custom_card, ensure_ascii=False),
+                "_update_message_id": "om_to_update_1",
+                "_disable_reply_to_message": True,
+            },
+        )
+    )
+
+    assert len(client.im.v1.message.update_calls) + len(client.im.v1.message.patch_calls) == 1
+    assert len(client.im.v1.message.reply_calls) == 0
+    assert len(client.im.v1.message.create_calls) == 0
+
+
+def test_streaming_body_keeps_thinking_element_even_when_empty() -> None:
+    channel, _ = _build_channel(show_thinking=True)
+
+    elements = channel._build_streaming_body_elements("", "最终回复")
+
+    assert len(elements) == 3
+    assert elements[0]["element_id"] == "thinking_text"
+    assert "思考中" in elements[0]["content"]
+    assert elements[2]["element_id"] == "answer_text"
+
+
+@pytest.mark.asyncio
 async def test_on_message_routes_group_thread_to_independent_session_key() -> None:
     channel, _ = _build_channel()
     captured: dict[str, Any] = {}

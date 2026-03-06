@@ -9,18 +9,56 @@ from nanobot.agent.tools.base import Tool
 
 # region [路径限制与解析]
 
-def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
-    """根据工作区（如果是相对路径）解析路径，并实施目录限制检查。"""
+
+def _resolve_candidate(path: str, workspace: Path | None = None) -> Path:
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
-    resolved = p.resolve()
-    if allowed_dir:
-        try:
-            resolved.relative_to(allowed_dir.resolve())
-        except ValueError:
-            raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+    return p.resolve()
+
+
+def _ensure_in_allowed_dir(path: Path, *, raw_path: str, allowed_dir: Path | None = None) -> None:
+    if not allowed_dir:
+        return
+    try:
+        path.relative_to(allowed_dir.resolve())
+    except ValueError:
+        raise PermissionError(f"Path {raw_path} is outside allowed directory {allowed_dir}")
+
+def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
+    """根据工作区（如果是相对路径）解析路径，并实施目录限制检查。"""
+    resolved = _resolve_candidate(path, workspace)
+    _ensure_in_allowed_dir(resolved, raw_path=path, allowed_dir=allowed_dir)
     return resolved
+
+
+def _is_skill_markdown(path: Path) -> bool:
+    return path.name.lower() == "skill.md"
+
+
+def _resolve_skill_write_path(
+    path: str,
+    *,
+    workspace: Path | None,
+    allowed_dir: Path | None,
+) -> tuple[Path, Path]:
+    requested = _resolve_candidate(path, workspace)
+    if workspace is None or not _is_skill_markdown(requested):
+        _ensure_in_allowed_dir(requested, raw_path=path, allowed_dir=allowed_dir)
+        return requested, requested
+
+    workspace_skills = (workspace / "skills").resolve()
+    try:
+        requested.relative_to(workspace_skills)
+        _ensure_in_allowed_dir(requested, raw_path=path, allowed_dir=allowed_dir)
+        return requested, requested
+    except ValueError:
+        pass
+
+    skill_name = requested.parent.name.strip() or "skill"
+    redirected = (workspace_skills / skill_name / "SKILL.md").resolve()
+    _ensure_in_allowed_dir(redirected, raw_path=str(redirected), allowed_dir=allowed_dir)
+    return redirected, requested
 
 
 # endregion
@@ -109,7 +147,11 @@ class WriteFileTool(Tool):
     
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path, _ = _resolve_skill_write_path(
+                path,
+                workspace=self._workspace,
+                allowed_dir=self._allowed_dir,
+            )
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {file_path}"
@@ -161,7 +203,14 @@ class EditFileTool(Tool):
     
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path, source_path = _resolve_skill_write_path(
+                path,
+                workspace=self._workspace,
+                allowed_dir=self._allowed_dir,
+            )
+            if file_path != source_path and source_path.exists() and source_path.is_file() and not file_path.exists():
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
             if not file_path.exists():
                 return f"Error: File not found: {path}"
 

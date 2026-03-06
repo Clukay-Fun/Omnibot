@@ -1,4 +1,7 @@
-"""基于 lark-oapi SDK 且使用 WebSocket 长连接的 Feishu/Lark 频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 lark-oapi 的 Feishu/Lark 频道收发实现。
+"""
 
 import asyncio
 import json
@@ -16,6 +19,7 @@ from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig
 
@@ -84,21 +88,6 @@ class _FeishuStreamState:
 
 _STREAM_THINKING_ELEMENT_ID = "thinking_text"
 _STREAM_ANSWER_ELEMENT_ID = "answer_text"
-_THINKING_COLLAPSED_SUMMARY = "思考完成"
-_THINKING_GENERIC_LINES = {
-    "思考中",
-    "思考完成",
-    "正在思考中...",
-    "正在分析问题与检索数据...",
-    "已获取数据，正在整理答案...",
-}
-_THINKING_GENERIC_BASE = {
-    "思考中",
-    "思考完成",
-    "正在思考中",
-    "正在分析问题与检索数据",
-    "已获取数据，正在整理答案",
-}
 
 _MENTION_MARKER_RE = re.compile(r"@_user_\d+")
 _AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
@@ -201,11 +190,18 @@ def _extract_action_key(action_value: Any) -> str | None:
 def _build_card_action_content(action: Any) -> tuple[str, str | None, str | None]:
     """抽取卡片回调中的动作信息并组装为入站文本。"""
     action_tag = _safe_get(action, "tag", None)
+    action_name_raw = _safe_get(action, "name", None)
+    action_name = str(action_name_raw).strip() if isinstance(action_name_raw, (str, int, float)) else None
+    if action_name == "":
+        action_name = None
+
     action_value = _safe_json_loads(_safe_get(action, "value", None))
     form_value = _safe_json_loads(_safe_get(action, "form_value", None))
     option = _safe_json_loads(_safe_get(action, "option", None))
 
     action_key = _extract_action_key(action_value)
+    if not action_key and action_name:
+        action_key = action_name
     if not action_key and isinstance(form_value, dict) and len(form_value) == 1:
         first_key = next(iter(form_value.keys()), None)
         if isinstance(first_key, str) and first_key.strip():
@@ -214,6 +210,8 @@ def _build_card_action_content(action: Any) -> tuple[str, str | None, str | None
     parts = ["[feishu card action trigger]"]
     if action_tag:
         parts.append(f"action_tag: {action_tag}")
+    if action_name:
+        parts.append(f"action_name: {action_name}")
     if action_key:
         parts.append(f"action_key: {action_key}")
     if action_value not in (None, "", {}, []):
@@ -425,7 +423,7 @@ def _extract_post_text(content_json: dict) -> str:
     return text
 
 
-# region [Feishu 频道核心类]
+#region Feishu频道核心类
 
 class FeishuChannel(BaseChannel):
     """
@@ -441,9 +439,35 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
 
-    def __init__(self, config: FeishuConfig, bus: MessageBus):
+    def __init__(self, config: FeishuConfig, bus: MessageBus, workspace: Path | None = None):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
+        self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._continuation_commands = {
+            cmd.strip()
+            for cmd in self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue", "more"]
+            )
+            if cmd.strip()
+        }
+        self._thinking_collapsed_summary = self._runtime_text.prompt_text(
+            "progress", "thinking_collapsed_summary", "思考完成"
+        )
+        self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "思考中")
+        self._thinking_placeholder_markdown = self._runtime_text.prompt_text(
+            "progress", "thinking_placeholder_markdown", "> 思考中"
+        )
+        generic_lines = self._runtime_text.prompt_lines(
+            "progress",
+            "thinking_generic_lines",
+            ["思考中", "思考完成", "正在思考中..."],
+        )
+        self._thinking_generic_lines = {line.strip() for line in generic_lines if line.strip()}
+        self._thinking_generic_base = {
+            re.sub(r"[。\.!！?？…]+$", "", line.strip())
+            for line in self._thinking_generic_lines
+            if line.strip()
+        }
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
@@ -489,9 +513,8 @@ class FeishuChannel(BaseChannel):
             return True
         return bool(_AT_TAG_RE.search(raw_content))
 
-    @staticmethod
-    def _is_continuation_command(text: str) -> bool:
-        return text.strip() in {"继续", "展开"}
+    def _is_continuation_command(self, text: str) -> bool:
+        return text.strip() in self._continuation_commands
 
     async def start(self) -> None:
         """启动具有 WebSocket 长连接的 Feishu 机器人。"""
@@ -1145,7 +1168,7 @@ class FeishuChannel(BaseChannel):
 
     def _format_thinking_block(self, thinking_text: str, collapsed: bool) -> str:
         """格式化思考区文本（浅色/小块风格）。"""
-        summary = _THINKING_COLLAPSED_SUMMARY if collapsed else "思考中"
+        summary = self._thinking_collapsed_summary if collapsed else self._thinking_active
         if not self.config.stream_card_show_thinking:
             return ""
 
@@ -1168,30 +1191,27 @@ class FeishuChannel(BaseChannel):
         normalized = re.sub(r"[。\.！!？?…]+$", "", normalized)
         return normalized.strip()
 
-    @classmethod
-    def _is_generic_thinking_line(cls, line: str) -> bool:
+    def _is_generic_thinking_line(self, line: str) -> bool:
         """判断是否为通用占位思考文本。"""
-        normalized = cls._normalize_thinking_line(line)
+        normalized = self._normalize_thinking_line(line)
         if not normalized:
             return True
-        return normalized in _THINKING_GENERIC_BASE or normalized in _THINKING_GENERIC_LINES
+        return normalized in self._thinking_generic_base or normalized in self._thinking_generic_lines
 
-    @classmethod
-    def _extract_specific_thinking_lines(cls, thinking_text: str | None) -> list[str]:
+    def _extract_specific_thinking_lines(self, thinking_text: str | None) -> list[str]:
         """提取可展示的具体思考行，自动过滤占位词。"""
         if not thinking_text:
             return []
         lines = [line.strip() for line in str(thinking_text).splitlines() if line.strip()]
-        return [line for line in lines if not cls._is_generic_thinking_line(line)]
+        return [line for line in lines if not self._is_generic_thinking_line(line)]
 
-    @classmethod
-    def _has_specific_thinking_content(cls, thinking_text: str | None) -> bool:
+    def _has_specific_thinking_content(self, thinking_text: str | None) -> bool:
         """判断是否包含可展示的具体思考内容。"""
-        return bool(cls._extract_specific_thinking_lines(thinking_text))
+        return bool(self._extract_specific_thinking_lines(thinking_text))
 
     def _build_streaming_body_elements(self, thinking_content: str, answer_content: str) -> list[dict[str, Any]]:
         """构造流式卡片 body elements。"""
-        if not self.config.stream_card_show_thinking or not thinking_content.strip():
+        if not self.config.stream_card_show_thinking:
             return [
                 {
                     "tag": "markdown",
@@ -1199,6 +1219,10 @@ class FeishuChannel(BaseChannel):
                     "content": answer_content,
                 }
             ]
+
+        # 始终保留 thinking 元素，避免后续 CardKit 增量更新找不到 element_id。
+        if not thinking_content.strip():
+            thinking_content = self._thinking_placeholder_markdown
 
         return [
             {
@@ -1728,10 +1752,23 @@ class FeishuChannel(BaseChannel):
                     else:
                         fallback_payload = self._build_interactive_card_content(msg.content)
 
+                    update_message_id = str(metadata.get("_update_message_id") or "").strip()
+                    if update_message_id:
+                        updated = await loop.run_in_executor(
+                            None,
+                            self._update_message_sync,
+                            update_message_id,
+                            "interactive",
+                            fallback_payload,
+                        )
+                        if updated:
+                            return
+
                     replied = False
                     source_message_id = metadata.get("message_id")
                     reply_in_thread = self._resolve_reply_in_thread(metadata)
-                    if self.config.reply_to_message and source_message_id:
+                    disable_reply_to_message = bool(metadata.get("_disable_reply_to_message"))
+                    if self.config.reply_to_message and source_message_id and not disable_reply_to_message:
                         ok, _ = await loop.run_in_executor(
                             None,
                             self._reply_message_detail_sync,
@@ -1814,6 +1851,9 @@ class FeishuChannel(BaseChannel):
             }
             if action_tag:
                 metadata["action_tag"] = action_tag
+            action_name = _safe_get(action, "name", None)
+            if isinstance(action_name, (str, int, float)) and str(action_name).strip():
+                metadata["action_name"] = str(action_name).strip()
             if action_key:
                 metadata["action_key"] = action_key
             if open_message_id:
@@ -1997,4 +2037,4 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error("Error processing Feishu message: {}", e)
 
-# endregion
+#endregion

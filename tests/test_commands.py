@@ -5,11 +5,13 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
+from nanobot.utils.helpers import sync_workspace_templates
 
 runner = CliRunner()
 
@@ -53,6 +55,9 @@ def test_onboard_fresh_install(mock_paths):
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
+    assert not (workspace_dir / "prompts").exists()
+    assert not (workspace_dir / "routing").exists()
+    assert not (workspace_dir / "templates").exists()
 
 
 def test_onboard_existing_config_refresh(mock_paths):
@@ -128,3 +133,50 @@ def test_litellm_provider_canonicalizes_github_copilot_hyphen_prefix():
 def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai-codex/gpt-5.1-codex") == "gpt-5.1-codex"
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
+
+
+def test_config_supports_skillspec_render_timeout_defaults_and_overrides() -> None:
+    config = Config()
+    assert config.agents.defaults.skillspec_render_primary_timeout_seconds == 12.0
+    assert config.agents.defaults.skillspec_render_retry_timeout_seconds == 6.0
+
+    overridden = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "skillspecRenderPrimaryTimeoutSeconds": 8,
+                "skillspecRenderRetryTimeoutSeconds": 3,
+            }
+        }
+    })
+    assert overridden.agents.defaults.skillspec_render_primary_timeout_seconds == 8
+    assert overridden.agents.defaults.skillspec_render_retry_timeout_seconds == 3
+
+
+def test_runtime_text_catalog_ignores_workspace_prompt_overrides(tmp_path: Path) -> None:
+    prompt_dir = tmp_path / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    (prompt_dir / "help.yaml").write_text('commands_help_text: "workspace override"\n', encoding="utf-8")
+    routing_dir = tmp_path / "routing"
+    routing_dir.mkdir(parents=True, exist_ok=True)
+    (routing_dir / "pagination_triggers.yaml").write_text('continuation_commands: ["next"]\n', encoding="utf-8")
+    template_dir = tmp_path / "templates"
+    template_dir.mkdir(parents=True, exist_ok=True)
+    (template_dir / "card_case.json").write_text('{"header":"workspace override"}\n', encoding="utf-8")
+
+    catalog = RuntimeTextCatalog.load(tmp_path)
+
+    assert catalog.prompt_text("help", "commands_help_text", "") != "workspace override"
+    assert catalog.routing_list("pagination_triggers", "continuation_commands", []) == ["继续", "展开"]
+    assert catalog.template("card_case").get("header") != "workspace override"
+
+
+def test_sync_workspace_templates_removes_legacy_runtime_dirs(tmp_path: Path) -> None:
+    for legacy in ("prompts", "routing", "templates"):
+        path = tmp_path / legacy
+        path.mkdir(parents=True, exist_ok=True)
+        (path / "dummy.txt").write_text("x", encoding="utf-8")
+
+    sync_workspace_templates(tmp_path, silent=True)
+
+    for legacy in ("prompts", "routing", "templates"):
+        assert not (tmp_path / legacy).exists()

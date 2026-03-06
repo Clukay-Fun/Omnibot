@@ -1,44 +1,76 @@
-"""用于动态工具管理的工具注册表。"""
+"""描述:
+主要功能:
+    - 维护工具注册、查询与执行入口。
+"""
 
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
 
-# region [工具注册表类]
+#region 工具注册表
 
 class ToolRegistry:
-    """
-    智能体工具的注册表。
-    
-    允许动态注册和执行工具。
+    """用处，参数
+
+    功能:
+        - 管理工具生命周期并统一执行校验。
     """
     
     def __init__(self):
+        """用处，参数
+
+        功能:
+            - 初始化空的工具映射表。
+        """
         self._tools: dict[str, Tool] = {}
     
     def register(self, tool: Tool) -> None:
-        """注册一个工具。"""
+        """用处，参数
+
+        功能:
+            - 按工具名称注册工具实例。
+        """
         self._tools[tool.name] = tool
     
     def unregister(self, name: str) -> None:
-        """通过名称注销一个工具。"""
+        """用处，参数
+
+        功能:
+            - 按名称移除已注册工具。
+        """
         self._tools.pop(name, None)
     
     def get(self, name: str) -> Tool | None:
-        """通过名称获取一个工具。"""
+        """用处，参数
+
+        功能:
+            - 返回指定名称的工具实例。
+        """
         return self._tools.get(name)
     
     def has(self, name: str) -> bool:
-        """检查工具是否已注册。"""
+        """用处，参数
+
+        功能:
+            - 判断工具名称是否存在。
+        """
         return name in self._tools
     
     def get_definitions(self) -> list[dict[str, Any]]:
-        """获取 OpenAI 格式的所有工具定义。"""
+        """用处，参数
+
+        功能:
+            - 生成所有工具的 schema 定义列表。
+        """
         return [tool.to_schema() for tool in self._tools.values()]
     
     async def execute(self, name: str, params: dict[str, Any]) -> str:
-        """使用给定参数执行指定名称的工具。"""
+        """用处，参数
+
+        功能:
+            - 校验参数并执行目标工具，返回文本结果。
+        """
         _HINT = "\n\n[Analyze the error above and try a different approach.]"
 
         tool = self._tools.get(name)
@@ -58,13 +90,27 @@ class ToolRegistry:
     
     @property
     def tool_names(self) -> list[str]:
-        """获取已注册的工具名称列表。"""
+        """用处，参数
+
+        功能:
+            - 返回当前所有已注册工具名。
+        """
         return list(self._tools.keys())
     
     def __len__(self) -> int:
+        """用处，参数
+
+        功能:
+            - 返回注册表中工具数量。
+        """
         return len(self._tools)
     
     def __contains__(self, name: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 支持使用 in 判断工具是否存在。
+        """
         return name in self._tools
 
-# endregion
+#endregion

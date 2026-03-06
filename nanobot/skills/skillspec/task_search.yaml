@@ -39,8 +39,7 @@ action:
   kind: query
   data_source: bitable
   table:
-    app_token: app_case_ops_001
-    table_id: tbl_case_tasks_001
+    alias: case_tasks
   select_fields:
     - task_id
     - task_title

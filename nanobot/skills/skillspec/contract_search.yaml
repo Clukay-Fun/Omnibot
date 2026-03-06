@@ -34,8 +34,7 @@ action:
   kind: query
   data_source: bitable
   table:
-    app_token: app_contract_ops_001
-    table_id: tbl_contract_registry_001
+    alias: contract_registry
   select_fields:
     - contract_id
     - contract_no

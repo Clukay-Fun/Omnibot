@@ -1,13 +1,16 @@
 """飞书工具注册工厂：组装配置和 Client 以初始化所有 Feishu 数据工具。"""
 
+from pathlib import Path
 from typing import Iterable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.bitable import (
     BitableGetTool,
+    BitableListFieldsTool,
     BitableListTablesTool,
     BitableSearchPersonTool,
     BitableSearchTool,
+    BitableSyncSchemaTool,
 )
 from nanobot.agent.tools.feishu_data.bitable_write import (
     BitableCreateTool,
@@ -22,7 +25,7 @@ from nanobot.config.schema import FeishuDataConfig
 # region [注册工厂]
 
 
-def build_feishu_data_tools(config: FeishuDataConfig) -> Iterable[Tool]:
+def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None = None) -> Iterable[Tool]:
     """
     组装并返回所有已启用的飞书数据操作工具。
     在循环引擎或子代理工具初始化时被调用。
@@ -37,6 +40,8 @@ def build_feishu_data_tools(config: FeishuDataConfig) -> Iterable[Tool]:
         # 只读工具
         BitableSearchTool(config, client),
         BitableListTablesTool(config, client),
+        BitableListFieldsTool(config, client),
+        BitableSyncSchemaTool(config, client, workspace=workspace),
         BitableGetTool(config, client),
         BitableSearchPersonTool(config, client),
         DocSearchTool(config, client),

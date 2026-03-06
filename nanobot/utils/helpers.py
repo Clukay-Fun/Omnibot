@@ -1,6 +1,7 @@
 """Utility functions for nanobot."""
 
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -70,6 +71,13 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     except Exception:
         pass
 
+    try:
+        table_registry_tpl = pkg_files("nanobot") / "skills" / "table_registry.yaml"
+        if table_registry_tpl.is_file():
+            _write(table_registry_tpl, workspace / "skills" / "table_registry.yaml")
+    except Exception:
+        pass
+
     (workspace / "skills").mkdir(exist_ok=True)
     bootstrap_workspace_dirs(workspace)
 
@@ -85,3 +93,7 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
     ensure_dir(workspace / "extract")
+    for legacy_dir in ("prompts", "routing", "templates"):
+        target = workspace / legacy_dir
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)

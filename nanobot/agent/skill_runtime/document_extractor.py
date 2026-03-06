@@ -1,4 +1,7 @@
-"""Template-based field extractor for parsed document text."""
+"""描述:
+主要功能:
+    - 基于模板规则执行文档字段提取与质量评估。
+"""
 
 from __future__ import annotations
 
@@ -11,20 +14,47 @@ from typing import Any
 import yaml
 
 
+#region 抽取异常体系
+
 class ExtractionError(RuntimeError):
-    """Base extraction error."""
+    """
+    用处: 文档抽取失败的兜底异常类型。
+
+    功能:
+        - 为该模块抛出的常规验证或操作失败提供捕获支点。
+    """
 
 
 class ExtractionQualityError(ExtractionError):
-    """Raised when extraction quality is below acceptable threshold."""
+    """
+    用处: 指示解析内容质量低于容忍阈值的特定错误。
+
+    功能:
+        - 记录明确缺少的必填字段，拦截未达标的数据流并辅助前端展示问题详情。
+    """
 
     def __init__(self, message: str, *, missing_required_fields: list[str] | None = None):
+        """
+        用处: 构造低质量抽取报错。参数 message: 错误信息摘要，missing_required_fields: 缺失字段组。
+
+        功能:
+            - 绑定具体异常上下文文案及字段名。
+        """
         super().__init__(message)
         self.missing_required_fields = list(missing_required_fields or [])
 
+#endregion
+
+#region 结构与实体定义
 
 @dataclass(slots=True)
 class ExtractFieldRule:
+    """
+    用处: 单个字段的匹配规则描述体。
+
+    功能:
+        - 定义目标键、关联的正则表达式表及是否强制截取的标定。
+    """
     name: str
     patterns: list[str]
     required: bool = False
@@ -32,6 +62,12 @@ class ExtractFieldRule:
 
 @dataclass(slots=True)
 class ExtractTemplate:
+    """
+    用处: 面向整个类别文档的合并抽取模板结构。
+
+    功能:
+        - 根据文件分类包裹一批对应的抽取法则列。
+    """
     template_id: str
     document_type: str
     fields: list[ExtractFieldRule] = field(default_factory=list)
@@ -39,15 +75,29 @@ class ExtractTemplate:
 
 @dataclass(slots=True)
 class ExtractionResult:
+    """
+    用处: 文档参数提取最终成效容器。
+
+    功能:
+        - 承载命中返回的映射结果以及对应的宏观确信度表现。
+    """
     template_id: str
     document_type: str
     fields: dict[str, str]
     missing_required_fields: list[str]
     confidence: float
 
+#endregion
+
+#region 引擎与规则评估函数
 
 def load_extract_templates(workspace_root: Path | None = None) -> dict[str, ExtractTemplate]:
-    """Load builtin templates and merge workspace overrides."""
+    """
+    用处: 收集加载所有可用的文档字段抽取样式文件。参数 workspace_root: 本地用户的特化空间路径指针。
+
+    功能:
+        - 初始化默认随包模块及扫描检索用户私有工作区的 YAML 定义，发生重叠时完成数据遮蔽/覆盖接驳。
+    """
     templates: dict[str, ExtractTemplate] = {}
 
     builtin_dir = files("nanobot") / "skills" / "extract_templates"
@@ -73,7 +123,12 @@ def load_extract_templates(workspace_root: Path | None = None) -> dict[str, Extr
 
 
 def extract_fields(text: str, template: ExtractTemplate) -> ExtractionResult:
-    """Extract fields by regex pattern definitions from template."""
+    """
+    用处: 基于制定母版实施真实的信息提取行为。参数 text: 被解析成字符串的目标文档内容，template: 绑定的抽取策略。
+
+    功能:
+        - 按照规则依次尝试提取内容中的关键字词组，如强约束属性空缺则抛出低质警告，反则统计反馈置信概率量级。
+    """
     values: dict[str, str] = {}
     missing_required: list[str] = []
 
@@ -110,6 +165,12 @@ def extract_fields(text: str, template: ExtractTemplate) -> ExtractionResult:
 
 
 def _parse_template(data: dict[str, Any], source: str) -> ExtractTemplate:
+    """
+    用处: 将粗糙字典转换映射向数据定义类对象。参数 data: 解析好的 YAML 树，source: 这个设置的起源指向。
+
+    功能:
+        - 防范缺失段并约束生成有效的属性检索模板链。
+    """
     if not isinstance(data, dict):
         raise ExtractionError(f"Invalid extract template in {source}: YAML object required")
 
@@ -144,11 +205,23 @@ def _parse_template(data: dict[str, Any], source: str) -> ExtractTemplate:
 
 
 def _normalize_match(match: re.Match[str]) -> str:
+    """
+    用处: 过滤清洗抓取到的碎片段。参数 match: 正则截获的分组。
+
+    功能:
+        - 修建空泛符号使提取字符串平整规整。
+    """
     value = match.group(1) if match.lastindex else match.group(0)
     return " ".join(value.strip().split())
 
 
 def _compute_confidence(values: dict[str, str], missing_required: list[str], required_total: int) -> float:
+    """
+    用处: 通过抽成覆盖率计算解析水准打分。参数 values: 已提取键值对等。
+
+    功能:
+        - 根据必填与缺失字段数量提供百分比可信度（上限1下限0）。
+    """
     if required_total == 0:
         return 1.0 if values else 0.0
     hit = required_total - len(missing_required)
@@ -156,7 +229,15 @@ def _compute_confidence(values: dict[str, str], missing_required: list[str], req
 
 
 def _workspace_template_dirs(workspace_root: Path) -> list[Path]:
+    """
+    用处: 定位专属的覆盖包路径序列。参数 workspace_root: 沙箱主目录系。
+
+    功能:
+        - 返回可能蕴含有定义集所在的预留路径坐标集。
+    """
     return [
         workspace_root / "skillspec" / "extract",
         workspace_root / "extract",
     ]
+
+#endregion

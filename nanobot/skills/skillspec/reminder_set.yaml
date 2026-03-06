@@ -5,12 +5,22 @@ meta:
   description: Create a personal reminder and best-effort bridge sync.
   owner: built_in
   domain: productivity
+  match:
+    regex: "(提醒|提醒我|到期提醒|设置提醒)"
+    keywords:
+      - 提醒
+      - 提醒我
+      - 设置提醒
+      - 到期提醒
 params:
   type: object
   required:
     - text
     - due_at
   properties:
+    query:
+      type: string
+      description: Natural-language reminder command, e.g. 提醒我明天9点开会.
     text:
       type: string
       description: Reminder text.

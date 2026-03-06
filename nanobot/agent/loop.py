@@ -10,12 +10,13 @@ import weakref
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
     EmbeddingSkillRouter,
     OutputGuard,
@@ -63,8 +64,10 @@ class AgentLoop:
 
     _TOOL_RESULT_MAX_CHARS = 500
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
-    _ANSWER_PLACEHOLDER_TEXT = "🐈努力回答中..."
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
+    _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
+    _SKILLSPEC_RENDER_MAX_TOKENS = 800
+    _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
 
     # region [初始化与配置]
 
@@ -90,6 +93,10 @@ class AgentLoop:
         response_template_config: "ResponseTemplateConfig | None" = None,
         skillspec_config: "SkillSpecConfig | None" = None,
         skillspec_embedding_provider_config: "ProviderConfig | None" = None,
+        llm_timeout_seconds: float = 90.0,
+        stage_heartbeat_seconds: float = 15.0,
+        skillspec_render_primary_timeout_seconds: float = 12.0,
+        skillspec_render_retry_timeout_seconds: float = 6.0,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -116,10 +123,24 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self._llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
+        self._stage_heartbeat_seconds = max(0.0, float(stage_heartbeat_seconds))
+        self._skillspec_render_primary_timeout_seconds = max(
+            0.1,
+            float(skillspec_render_primary_timeout_seconds),
+        )
+        self._skillspec_render_retry_timeout_seconds = max(
+            0.1,
+            float(skillspec_render_retry_timeout_seconds),
+        )
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
+        self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._answer_placeholder_text = self._runtime_text.prompt_text(
+            "progress", "answer_placeholder", "🐈努力回答中..."
+        )
         self._user_memory_store = UserMemoryStore(self.workspace)
         self.subagents = SubagentManager(
             provider=provider,
@@ -144,9 +165,12 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
-        self._processing_lock = asyncio.Lock()
-        self._template_router = TemplateRouter()
-        self._template_renderer = TemplateRenderer(self.response_template_config.max_list_items)
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._template_router = TemplateRouter(runtime_text=self._runtime_text)
+        self._template_renderer = TemplateRenderer(
+            self.response_template_config.max_list_items,
+            runtime_text=self._runtime_text,
+        )
         self._stream_warmup_chars = 24
         self._stream_warmup_ms = 300
         if self.channels_config:
@@ -162,6 +186,8 @@ class AgentLoop:
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
             return
+
+        from nanobot.agent.skill_runtime.table_registry import TableRegistry
 
         workspace_root = self.workspace / "skillspec"
         if not self.skillspec_config.workspace_override_enabled:
@@ -187,6 +213,8 @@ class AgentLoop:
             route_log_enabled=self.skillspec_config.route_log_enabled,
             route_log_top_k=self.skillspec_config.route_log_top_k,
             reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
+            runtime_text=self._runtime_text,
+            table_registry=TableRegistry(workspace=self.workspace),
         )
 
         if self.skillspec_config.startup_report_enabled:
@@ -292,94 +320,289 @@ class AgentLoop:
     def _extract_onboarding_action(self, msg: InboundMessage) -> tuple[str, dict[str, Any], dict[str, Any]]:
         metadata = msg.metadata or {}
         action_key = str(metadata.get("action_key") or "").strip()
+        action_name = str(metadata.get("action_name") or "").strip()
         if not action_key:
             for line in msg.content.splitlines():
                 stripped = line.strip()
                 if stripped.startswith("action_key:"):
                     action_key = stripped.split(":", 1)[1].strip()
                     break
+        if not action_name:
+            for line in msg.content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("action_name:"):
+                    action_name = stripped.split(":", 1)[1].strip()
+                    break
 
+        action_payload = self._extract_card_json_block(msg.content, "action")
         action_value = self._extract_card_json_block(msg.content, "action_value")
         if not action_key and isinstance(action_value, dict):
-            action_key = self._normalize_form_value(action_value.get("action_key") or action_value.get("action"))
+            action_key = self._normalize_form_value(
+                action_value.get("action_key") or action_value.get("action") or action_value.get("name")
+            )
+        if not action_key and isinstance(action_payload, dict):
+            action_key = self._normalize_form_value(
+                action_payload.get("action_key") or action_payload.get("action") or action_payload.get("name")
+            )
+        if not action_name and isinstance(action_payload, dict):
+            action_name = self._normalize_form_value(action_payload.get("name"))
+        if not action_key and action_name:
+            action_key = action_name
 
         form_value = self._extract_card_json_block(msg.content, "form_value")
+        if not form_value and isinstance(action_payload, dict):
+            payload_form = action_payload.get("form_value")
+            if isinstance(payload_form, dict):
+                form_value = payload_form
+        if isinstance(form_value, dict) and len(form_value) == 1:
+            nested = form_value.get("onboarding_form")
+            if isinstance(nested, dict):
+                form_value = nested
+
         return action_key, action_value, form_value
 
-    def _build_onboarding_identity_card(self, feishu_cfg: Any) -> str:
-        role_options = [
-            {
-                "text": {"tag": "plain_text", "content": str(role)},
-                "value": str(role),
-            }
-            for role in getattr(feishu_cfg, "onboarding_role_options", [])
-            if str(role).strip()
-        ]
-        if not role_options:
-            role_options = [
-                {"text": {"tag": "plain_text", "content": "律师"}, "value": "律师"},
-                {"text": {"tag": "plain_text", "content": "助理"}, "value": "助理"},
-                {"text": {"tag": "plain_text", "content": "实习生"}, "value": "实习生"},
-            ]
+    @staticmethod
+    def _guess_preferred_name(user_name: str, role: str) -> str:
+        if not user_name:
+            return ""
+        if user_name.endswith("律师") and len(user_name) > 2:
+            return f"{user_name[:-2]}律"
+        if role in {"lawyer", "律师"} and not user_name.endswith("律"):
+            return f"{user_name}律"
+        return ""
 
-        team_options = [
-            {
-                "text": {"tag": "plain_text", "content": str(team)},
-                "value": str(team),
-            }
-            for team in getattr(feishu_cfg, "onboarding_team_options", [])
-            if str(team).strip()
-        ]
-        if not team_options:
-            team_options = [
-                {"text": {"tag": "plain_text", "content": "诉讼组"}, "value": "诉讼组"},
-                {"text": {"tag": "plain_text", "content": "合同组"}, "value": "合同组"},
-                {"text": {"tag": "plain_text", "content": "招投标组"}, "value": "招投标组"},
-                {"text": {"tag": "plain_text", "content": "综合组"}, "value": "综合组"},
-            ]
+    def _build_onboarding_single_card(self, feishu_cfg: Any, profile: dict[str, Any] | None = None) -> str:
+        normalized_profile = self._normalize_profile(profile or {})
+        identity = cast(dict[str, Any], normalized_profile["identity"])
+        preferences = cast(dict[str, Any], normalized_profile["preferences"])
+        skillspec = cast(dict[str, Any], normalized_profile["skillspec"])
+        onboarding_tpl = self._runtime_text.template("onboarding_form")
+
+        header_tpl = onboarding_tpl.get("header") if isinstance(onboarding_tpl.get("header"), dict) else {}
+        labels_tpl = onboarding_tpl.get("labels") if isinstance(onboarding_tpl.get("labels"), dict) else {}
+        placeholders_tpl = (
+            onboarding_tpl.get("placeholders") if isinstance(onboarding_tpl.get("placeholders"), dict) else {}
+        )
+        sections_tpl = onboarding_tpl.get("sections") if isinstance(onboarding_tpl.get("sections"), dict) else {}
+        buttons_tpl = onboarding_tpl.get("buttons") if isinstance(onboarding_tpl.get("buttons"), dict) else {}
+        tone_options_tpl = onboarding_tpl.get("tone_options") if isinstance(onboarding_tpl.get("tone_options"), list) else []
+        confirm_write_options_tpl = (
+            onboarding_tpl.get("confirm_write_options")
+            if isinstance(onboarding_tpl.get("confirm_write_options"), list)
+            else []
+        )
+        query_scope_options_tpl = (
+            onboarding_tpl.get("query_scope_options")
+            if isinstance(onboarding_tpl.get("query_scope_options"), list)
+            else []
+        )
+
+        user_name_default = self._normalize_form_value(identity.get("name"))
+        role_for_guess = self._normalize_form_value(identity.get("role"))
+        display_name_default = self._normalize_form_value(preferences.get("preferred_name"))
+        if not display_name_default:
+            display_name_default = self._guess_preferred_name(user_name_default, role_for_guess)
+
+        tone_default = self._normalize_form_value(preferences.get("response_style"))
+        if tone_default not in {"concise", "standard", "detailed"}:
+            tone_default = ""
+
+        query_scope_default = self._normalize_form_value(preferences.get("query_scope"))
+        if query_scope_default not in {"self", "all"}:
+            query_scope_default = ""
+
+        confirm_pref = self._normalize_form_value(skillspec.get("confirm_preference"))
+        if confirm_pref == "auto":
+            confirm_write_default = "no"
+        elif confirm_pref == "manual":
+            confirm_write_default = "yes"
+        else:
+            confirm_write_default = ""
 
         card = {
-            "config": {"wide_screen_mode": True},
+            "config": {"wide_screen_mode": True, "update_multi": True},
             "header": {
                 "template": "blue",
-                "title": {"tag": "plain_text", "content": "欢迎使用 Omnibot"},
+                "title": {"tag": "plain_text", "content": str(header_tpl.get("title") or "Welcome")},
+                "subtitle": {
+                    "tag": "plain_text",
+                    "content": str(header_tpl.get("subtitle") or "Complete setup in one minute."),
+                },
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "先花 30 秒完成初始化。你可以随时点击“跳过”，后续也可通过 `/setup` 重新设置。",
+                    "content": str(onboarding_tpl.get("intro_markdown") or ""),
                 },
                 {
-                    "tag": "input",
-                    "name": "display_name",
-                    "label": {"tag": "plain_text", "content": "姓名"},
-                    "placeholder": {"tag": "plain_text", "content": "例如：张律师（可选）"},
+                    "tag": "hr",
                 },
                 {
-                    "tag": "select_static",
-                    "name": "role",
-                    "placeholder": {"tag": "plain_text", "content": "请选择职位"},
-                    "options": role_options,
-                },
-                {
-                    "tag": "select_static",
-                    "name": "team",
-                    "placeholder": {"tag": "plain_text", "content": "请选择团队"},
-                    "options": team_options,
-                },
-                {
-                    "tag": "action",
-                    "actions": [
+                    "tag": "form",
+                    "name": "onboarding_form",
+                    "elements": [
                         {
-                            "tag": "button",
-                            "type": "primary",
-                            "text": {"tag": "plain_text", "content": "提交"},
-                            "value": {"action_key": "onboarding_identity_submit"},
+                            "tag": "markdown",
+                            "content": str(sections_tpl.get("identity") or "**Basic Info**"),
                         },
                         {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "跳过"},
-                            "value": {"action_key": "onboarding_identity_skip"},
+                            "tag": "input",
+                            "name": "user_name",
+                            "label": {"tag": "plain_text", "content": str(labels_tpl.get("name") or "Name")},
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": str(placeholders_tpl.get("name") or "Auto-filled from profile"),
+                            },
+                            "default_value": user_name_default,
+                            "required": False,
+                        },
+                        {
+                            "tag": "hr",
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": str(sections_tpl.get("preferences") or "**Preferences**"),
+                        },
+                        {
+                            "tag": "select_static",
+                            "name": "tone",
+                            "label": {"tag": "plain_text", "content": str(labels_tpl.get("tone") or "Tone")},
+                            "placeholder": {"tag": "plain_text", "content": str(placeholders_tpl.get("select") or "Select")},
+                            "initial_option": tone_default,
+                            "options": [
+                                {
+                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                    "value": str(item.get("value") or ""),
+                                }
+                                for item in tone_options_tpl
+                                if isinstance(item, dict)
+                                and str(item.get("text") or "").strip()
+                                and str(item.get("value") or "").strip()
+                            ],
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "bisect",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "select_static",
+                                            "name": "confirm_write",
+                                            "label": {
+                                                "tag": "plain_text",
+                                                "content": str(labels_tpl.get("confirm_write") or "Write behavior"),
+                                            },
+                                            "placeholder": {
+                                                "tag": "plain_text",
+                                                "content": str(placeholders_tpl.get("select") or "Select"),
+                                            },
+                                            "initial_option": confirm_write_default,
+                                            "options": [
+                                                {
+                                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                                    "value": str(item.get("value") or ""),
+                                                }
+                                                for item in confirm_write_options_tpl
+                                                if isinstance(item, dict)
+                                                and str(item.get("text") or "").strip()
+                                                and str(item.get("value") or "").strip()
+                                            ],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "select_static",
+                                            "name": "query_scope",
+                                            "label": {
+                                                "tag": "plain_text",
+                                                "content": str(labels_tpl.get("query_scope") or "Default scope"),
+                                            },
+                                            "placeholder": {
+                                                "tag": "plain_text",
+                                                "content": str(placeholders_tpl.get("select") or "Select"),
+                                            },
+                                            "initial_option": query_scope_default,
+                                            "options": [
+                                                {
+                                                    "text": {"tag": "plain_text", "content": str(item.get("text") or "")},
+                                                    "value": str(item.get("value") or ""),
+                                                }
+                                                for item in query_scope_options_tpl
+                                                if isinstance(item, dict)
+                                                and str(item.get("text") or "").strip()
+                                                and str(item.get("value") or "").strip()
+                                            ],
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "tag": "input",
+                            "name": "display_name",
+                            "label": {
+                                "tag": "plain_text",
+                                "content": str(labels_tpl.get("display_name") or "Preferred name"),
+                            },
+                            "placeholder": {
+                                "tag": "plain_text",
+                                "content": str(placeholders_tpl.get("display_name") or "Optional"),
+                            },
+                            "default_value": display_name_default,
+                            "required": False,
+                        },
+                        {
+                            "tag": "markdown",
+                            "content": str(onboarding_tpl.get("footer_hint") or ""),
+                        },
+                        {
+                            "tag": "column_set",
+                            "flex_mode": "bisect",
+                            "columns": [
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": str(buttons_tpl.get("submit") or "Submit"),
+                                            },
+                                            "type": "primary",
+                                            "action_type": "form_submit",
+                                            "name": "submit_onboarding",
+                                        }
+                                    ],
+                                },
+                                {
+                                    "tag": "column",
+                                    "width": "weighted",
+                                    "weight": 1,
+                                    "elements": [
+                                        {
+                                            "tag": "button",
+                                            "text": {
+                                                "tag": "plain_text",
+                                                "content": str(buttons_tpl.get("skip") or "Skip"),
+                                            },
+                                            "type": "default",
+                                            "action_type": "form_submit",
+                                            "name": "skip_onboarding",
+                                        }
+                                    ],
+                                },
+                            ],
                         },
                     ],
                 },
@@ -388,72 +611,64 @@ class AgentLoop:
         return json.dumps(card, ensure_ascii=False)
 
     @staticmethod
-    def _build_onboarding_preference_card() -> str:
+    def _onboarding_defaults() -> dict[str, Any]:
+        return {
+            "identity": {
+                "name": "",
+                "role": "",
+                "team": "",
+            },
+            "preferences": {
+                "response_style": "standard",
+                "preferred_name": "",
+                "query_scope": "self",
+            },
+            "skillspec_confirm_preference": "manual",
+        }
+
+    def _resolve_profile_display_name(self, profile: dict[str, Any] | None = None) -> str:
+        normalized_profile = self._normalize_profile(profile or {})
+        identity = cast(dict[str, Any], normalized_profile["identity"])
+        preferences = cast(dict[str, Any], normalized_profile["preferences"])
+
+        preferred_name = self._normalize_form_value(preferences.get("preferred_name"))
+        if preferred_name:
+            return preferred_name
+
+        user_name = self._normalize_form_value(identity.get("name"))
+        role = self._normalize_form_value(identity.get("role"))
+        guessed = self._guess_preferred_name(user_name, role)
+        if guessed:
+            return guessed
+        if user_name:
+            return user_name
+        return "你"
+
+    def _build_onboarding_guide_message(self, profile: dict[str, Any] | None = None) -> str:
+        lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+        preferred_name = self._resolve_profile_display_name(profile)
+        rendered_lines = [line.replace("{preferred_name}", preferred_name) for line in lines]
+        return "\n".join(rendered_lines)
+
+    def _build_onboarding_completed_card(self, profile: dict[str, Any] | None = None) -> str:
+        onboarding_tpl = self._runtime_text.template("onboarding_form")
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
-                "template": "green",
-                "title": {"tag": "plain_text", "content": "设置回复偏好"},
+                "template": "turquoise",
+                "title": {
+                    "tag": "plain_text",
+                    "content": str(onboarding_tpl.get("completed_card_title") or "Completed"),
+                },
             },
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "最后一步：设置回复风格与写入确认偏好。",
-                },
-                {
-                    "tag": "select_static",
-                    "name": "response_style",
-                    "placeholder": {"tag": "plain_text", "content": "回复风格"},
-                    "options": [
-                        {"text": {"tag": "plain_text", "content": "简洁"}, "value": "concise"},
-                        {"text": {"tag": "plain_text", "content": "详细"}, "value": "detailed"},
-                    ],
-                },
-                {
-                    "tag": "select_static",
-                    "name": "write_confirm",
-                    "placeholder": {"tag": "plain_text", "content": "写入前是否确认"},
-                    "options": [
-                        {"text": {"tag": "plain_text", "content": "每次确认"}, "value": "manual"},
-                        {"text": {"tag": "plain_text", "content": "直接执行"}, "value": "auto"},
-                    ],
-                },
-                {
-                    "tag": "input",
-                    "name": "preferred_name",
-                    "label": {"tag": "plain_text", "content": "称呼偏好"},
-                    "placeholder": {"tag": "plain_text", "content": "例如：张律（可选）"},
-                },
-                {
-                    "tag": "action",
-                    "actions": [
-                        {
-                            "tag": "button",
-                            "type": "primary",
-                            "text": {"tag": "plain_text", "content": "提交"},
-                            "value": {"action_key": "onboarding_pref_submit"},
-                        },
-                        {
-                            "tag": "button",
-                            "text": {"tag": "plain_text", "content": "跳过"},
-                            "value": {"action_key": "onboarding_pref_skip"},
-                        },
-                    ],
-                },
+                    "content": self._build_onboarding_guide_message(profile).replace("\n", "  \n"),
+                }
             ],
         }
         return json.dumps(card, ensure_ascii=False)
-
-    @staticmethod
-    def _build_onboarding_guide_message() -> str:
-        return "\n".join([
-            "初始化已完成，欢迎使用 Omnibot。",
-            "你可以试试：",
-            "- 查一下最近的案件",
-            "- 帮我录入一个新案件",
-            "- 本周有什么截止日",
-            "提示：随时可发送 `/setup` 或“重新设置”调整偏好。",
-        ])
 
     def _build_onboarding_card_outbound(
         self,
@@ -462,12 +677,16 @@ class AgentLoop:
         card_payload: str,
         stage: str,
         intro_text: str,
+        update_message_id: str | None = None,
     ) -> OutboundMessage:
         metadata = dict(msg.metadata or {})
         metadata["interactive_content"] = card_payload
         metadata["onboarding"] = True
         metadata["onboarding_stage"] = stage
         metadata["_reply_in_thread"] = False
+        metadata["_disable_reply_to_message"] = True
+        if update_message_id:
+            metadata["_update_message_id"] = update_message_id
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -497,77 +716,140 @@ class AgentLoop:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         onboarding = profile["onboarding"]
         status = str(onboarding.get("status") or "").lower()
-        step = str(onboarding.get("step") or "identity").lower()
 
         is_card_action = str((msg.metadata or {}).get("msg_type") or "") == "card_action"
         action_key, action_value, form_value = self._extract_onboarding_action(msg)
+        normalized_action_key = action_key.strip().lower()
+        callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
 
         if is_reentry:
             onboarding.update({"status": "pending", "step": "identity", "updated_at": self._now_iso()})
             self._user_memory_store.write(msg.channel, msg.sender_id, profile)
             return self._build_onboarding_card_outbound(
                 msg,
-                card_payload=self._build_onboarding_identity_card(feishu_cfg),
-                stage="identity",
-                intro_text="欢迎回来，我们重新快速设置一次。",
+                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                stage="single",
+                intro_text=self._runtime_text.prompt_text(
+                    "onboarding", "intro_reentry", "Welcome back, let's set up again quickly."
+                ),
             )
 
-        if is_card_action and action_key.startswith("onboarding_"):
-            if action_key == "onboarding_identity_submit":
-                merged_form = {**action_value, **form_value}
-                display_name = self._normalize_form_value(merged_form.get("display_name"))
-                role = self._normalize_form_value(merged_form.get("role"))
-                team = self._normalize_form_value(merged_form.get("team"))
-                identity = profile["identity"]
-                if display_name:
-                    identity["name"] = display_name
-                if role:
-                    identity["role"] = role
-                if team:
-                    identity["team"] = team
+        onboarding_action_keys = {
+            "submit_onboarding",
+            "skip_onboarding",
+            "start_onboarding",
+            "skip_all_onboarding",
+            "onboarding_submit",
+            "onboarding_skip",
+            "onboarding_identity_submit",
+            "onboarding_identity_skip",
+            "onboarding_pref_submit",
+            "onboarding_pref_skip",
+        }
+        is_onboarding_action = (
+            normalized_action_key.startswith("onboarding_")
+            or normalized_action_key in onboarding_action_keys
+        )
 
-                onboarding.update({"status": "pending", "step": "preference", "updated_at": self._now_iso()})
-                self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+        if is_card_action and is_onboarding_action:
+            if status == "completed":
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_preference_card(),
-                    stage="preference",
-                    intro_text="身份信息已保存，请继续设置偏好。",
+                    card_payload=self._build_onboarding_completed_card(profile),
+                    stage="completed",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding",
+                        "intro_completed_reentry",
+                        "Setup already completed. Send /setup to reset.",
+                    ),
+                    update_message_id=callback_message_id or None,
                 )
 
-            if action_key == "onboarding_identity_skip":
+            if normalized_action_key == "start_onboarding":
                 onboarding.update(
                     {
-                        "status": "completed",
-                        "step": "completed",
-                        "completed_at": self._now_iso(),
+                        "status": "pending",
+                        "step": "identity",
+                        "started_at": onboarding.get("started_at") or self._now_iso(),
                         "updated_at": self._now_iso(),
-                        "skip_reason": "identity_skipped",
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                    stage="single",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_start", "Let's begin setup."
+                    ),
+                    update_message_id=callback_message_id or None,
                 )
 
-            if action_key == "onboarding_pref_submit":
-                merged_form = {**action_value, **form_value}
-                style = self._normalize_form_value(merged_form.get("response_style"))
-                write_confirm = self._normalize_form_value(merged_form.get("write_confirm"))
-                preferred_name = self._normalize_form_value(merged_form.get("preferred_name"))
+            submit_action_keys = {
+                "submit_onboarding",
+                "onboarding_submit",
+                "onboarding_identity_submit",
+                "onboarding_pref_submit",
+            }
+            skip_action_keys = {
+                "skip_onboarding",
+                "skip_all_onboarding",
+                "onboarding_skip",
+                "onboarding_identity_skip",
+                "onboarding_pref_skip",
+            }
 
+            if normalized_action_key in submit_action_keys:
+                merged_form = {**action_value, **form_value}
+                user_name = self._normalize_form_value(merged_form.get("user_name"))
+                if not user_name and normalized_action_key in {"onboarding_submit", "onboarding_identity_submit"}:
+                    user_name = self._normalize_form_value(merged_form.get("display_name"))
+
+                role = self._normalize_form_value(merged_form.get("role"))
+                team = self._normalize_form_value(merged_form.get("team"))
+                style = self._normalize_form_value(merged_form.get("tone") or merged_form.get("response_style"))
+                if style not in {"concise", "standard", "detailed"}:
+                    style = ""
+
+                write_confirm = self._normalize_form_value(
+                    merged_form.get("confirm_write") or merged_form.get("write_confirm")
+                )
+                query_scope = self._normalize_form_value(merged_form.get("query_scope"))
+                if query_scope not in {"self", "all"}:
+                    query_scope = ""
+
+                preferred_name = self._normalize_form_value(merged_form.get("preferred_name"))
+                if not preferred_name and normalized_action_key in {"submit_onboarding"}:
+                    preferred_name = self._normalize_form_value(merged_form.get("display_name"))
+
+                identity = profile["identity"]
                 preferences = profile["preferences"]
+
+                resolved_name = user_name or self._normalize_form_value(identity.get("name"))
+                resolved_role = role or self._normalize_form_value(identity.get("role"))
+                resolved_team = team or self._normalize_form_value(identity.get("team"))
+                identity["name"] = resolved_name
+                identity["role"] = resolved_role
+                identity["team"] = resolved_team
+
                 if style:
                     preferences["response_style"] = style
                 if preferred_name:
                     preferences["preferred_name"] = preferred_name
+                if query_scope:
+                    preferences["query_scope"] = query_scope
 
-                skillspec_pref = profile.get("skillspec") if isinstance(profile.get("skillspec"), dict) else {}
-                if write_confirm in {"auto", "skip"}:
+                skillspec_raw = profile.get("skillspec")
+                skillspec_pref: dict[str, Any]
+                if isinstance(skillspec_raw, dict):
+                    skillspec_pref = cast(dict[str, Any], skillspec_raw)
+                else:
+                    skillspec_pref = {}
+
+                if write_confirm in {"auto", "skip", "no", "false"}:
                     skillspec_pref["confirm_preference"] = "auto"
+                elif write_confirm in {"manual", "yes", "true", "confirm"}:
+                    skillspec_pref["confirm_preference"] = "manual"
                 elif write_confirm:
                     skillspec_pref["confirm_preference"] = "manual"
                 profile["skillspec"] = skillspec_pref
@@ -581,29 +863,35 @@ class AgentLoop:
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(profile),
+                    stage="completed",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_submit_done", "Setup completed."
+                    ),
+                    update_message_id=callback_message_id or None,
                 )
 
-            if action_key == "onboarding_pref_skip":
+            if normalized_action_key in skip_action_keys:
                 onboarding.update(
                     {
                         "status": "completed",
                         "step": "completed",
                         "completed_at": self._now_iso(),
                         "updated_at": self._now_iso(),
-                        "skip_reason": "preference_skipped",
+                        "skip_reason": "single_skipped",
                     }
                 )
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=self._build_onboarding_guide_message(),
-                    metadata={**(msg.metadata or {}), "onboarding": "completed", "_reply_in_thread": False},
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_completed_card(profile),
+                    stage="completed",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding", "intro_skip_done", "Skipped setup. Preferences will be learned in dialogue."
+                    ),
+                    update_message_id=callback_message_id or None,
                 )
 
             return None
@@ -611,32 +899,23 @@ class AgentLoop:
         if status == "completed":
             return None
 
-        if command.startswith("/") and not is_reentry:
-            return None
-
         onboarding.update(
             {
                 "status": "pending",
-                "step": "preference" if step == "preference" else "identity",
+                "step": "identity",
                 "started_at": onboarding.get("started_at") or self._now_iso(),
                 "updated_at": self._now_iso(),
             }
         )
         self._user_memory_store.write(msg.channel, msg.sender_id, profile)
 
-        if onboarding["step"] == "preference":
-            return self._build_onboarding_card_outbound(
-                msg,
-                card_payload=self._build_onboarding_preference_card(),
-                stage="preference",
-                intro_text="请继续完成偏好设置，也可以点击跳过。",
-            )
-
         return self._build_onboarding_card_outbound(
             msg,
-            card_payload=self._build_onboarding_identity_card(feishu_cfg),
-            stage="identity",
-            intro_text="欢迎使用 Omnibot，请先完成初始化。",
+            card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+            stage="single",
+            intro_text=self._runtime_text.prompt_text(
+                "onboarding", "intro_first", "Welcome, please complete setup first."
+            ),
         )
 
     def _register_default_tools(self) -> None:
@@ -659,7 +938,7 @@ class AgentLoop:
 
         if self.feishu_data_config and self.feishu_data_config.enabled:
             from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-            for tool in build_feishu_data_tools(self.feishu_data_config):
+            for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
                 self.tools.register(tool)
 
     # endregion
@@ -787,35 +1066,112 @@ class AgentLoop:
         timings: list[dict[str, int | str | bool]],
         total_ms: int,
     ) -> str | None:
-        if not self.response_template_config.enabled:
-            return fallback_text
+        return fallback_text
 
-        from nanobot.agent.response_templates import (
-            build_audit_summary,
-            collect_tool_payloads,
-            uses_structured_feishu_data,
+    async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
+        content = raw_content.strip()
+        if not content:
+            return raw_content
+        if len(content) > self._SKILLSPEC_RENDER_MAX_INPUT_CHARS:
+            logger.info(
+                "Skillspec LLM render skipped for {} due to large payload ({} chars)",
+                msg.session_key,
+                len(content),
+            )
+            return raw_content
+
+        primary_prompt = (
+            "你已经得到一次结构化技能执行结果，请直接用自然语言回复用户。\n"
+            "要求：\n"
+            "1) 只基于给定结果回答，不要再次调用工具。\n"
+            "2) 不要提及内部实现（如 skillspec、tool、路由）。\n"
+            "3) 结果为空时，简短说明并给出下一步建议。\n\n"
+            f"用户请求：\n{msg.content}\n\n"
+            f"结构化结果：\n{content}\n"
         )
 
-        payloads = collect_tool_payloads(turn_messages)
-        if not payloads or not uses_structured_feishu_data(payloads):
-            return fallback_text
+        retry_prompt = (
+            "把下面结果改写成给用户的简短自然语言回复。"
+            "不要调用工具，不要解释内部机制。\n\n"
+            f"用户请求：{msg.content}\n"
+            f"结果：{content}\n"
+        )
 
-        decision = self._template_router.route(user_text=user_text, payloads=payloads)
-        if decision.template_id == "chat.PLAIN":
-            return fallback_text
+        base_messages = [
+            {"role": "system", "content": self.context.build_system_prompt()},
+            {"role": "user", "content": ContextBuilder._build_runtime_context(msg.channel, msg.chat_id)},
+        ]
 
-        if not self.response_template_config.strict_mode and decision.template_id == "generic.SUMMARY":
-            return fallback_text
+        max_tokens = max(128, min(self.max_tokens, self._SKILLSPEC_RENDER_MAX_TOKENS))
+        attempts = (
+            (
+                "primary",
+                primary_prompt,
+                min(self._llm_timeout_seconds, self._skillspec_render_primary_timeout_seconds),
+                self.reasoning_effort,
+            ),
+            (
+                "retry",
+                retry_prompt,
+                min(self._llm_timeout_seconds, self._skillspec_render_retry_timeout_seconds),
+                "low",
+            ),
+        )
 
-        rendered = self._template_renderer.render(decision=decision, payloads=payloads, fallback_text=fallback_text)
-        audit = build_audit_summary(decision=decision, payloads=payloads, timings=timings, total_ms=total_ms)
-        if self.response_template_config.log_audit_summary:
-            logger.info("Template audit: {}", audit.replace("\n", " | "))
+        for index, (label, prompt, timeout_seconds, reasoning_effort) in enumerate(attempts, start=1):
+            messages = [*base_messages, {"role": "user", "content": prompt}]
+            llm_started = time.perf_counter()
+            try:
+                response = await asyncio.wait_for(
+                    self.provider.chat(
+                        messages=messages,
+                        tools=None,
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+                logger.warning(
+                    "Skillspec LLM render {} timed out for {} after {} ms (limit={}s)",
+                    label,
+                    msg.session_key,
+                    elapsed_ms,
+                    timeout_seconds,
+                )
+                continue
+            except Exception as exc:
+                logger.warning(
+                    "Skillspec LLM render {} failed for {}: {}",
+                    label,
+                    msg.session_key,
+                    exc,
+                )
+                continue
 
-        if not self.response_template_config.show_audit_summary:
-            return rendered
+            if response.finish_reason == "error":
+                logger.warning("Skillspec LLM render {} returned finish_reason=error", label)
+                continue
+            if response.has_tool_calls:
+                logger.warning("Skillspec LLM render {} returned tool_calls, retrying", label)
+                continue
 
-        return f"{audit}\n\n{rendered}"
+            rewritten = self._strip_think(response.content)
+            if rewritten:
+                return rewritten
+
+            logger.warning(
+                "Skillspec LLM render {} produced empty content for {} (attempt {})",
+                label,
+                msg.session_key,
+                index,
+            )
+
+        logger.warning("Skillspec LLM render exhausted retries for {}, fallback to raw result", msg.session_key)
+        return raw_content
 
     # endregion
 
@@ -825,6 +1181,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        session_key: str = "unknown",
     ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
         messages = initial_messages
@@ -842,6 +1199,30 @@ class AgentLoop:
                 await on_progress(content, **kwargs)
             except TypeError:
                 await on_progress(content)
+
+        def _start_stage_heartbeat(stage: str, started_at: float) -> asyncio.Task[None] | None:
+            if self._stage_heartbeat_seconds <= 0:
+                return None
+
+            async def _heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(self._stage_heartbeat_seconds)
+                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                    logger.warning(
+                        "Stage {} still running for session {} ({} ms elapsed)",
+                        stage,
+                        session_key,
+                        elapsed_ms,
+                    )
+
+            return asyncio.create_task(_heartbeat())
+
+        async def _stop_stage_heartbeat(task: asyncio.Task[None] | None) -> None:
+            if task is None or task.done():
+                return
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -871,7 +1252,8 @@ class AgentLoop:
                 if not on_progress or not name or name in announced_tool_names:
                     return
                 announced_tool_names.add(name)
-                await _emit_progress(f"准备调用 {name}", phase="thinking")
+                template = self._runtime_text.prompt_text("progress", "prepare_tool", "准备调用 {tool}")
+                await _emit_progress(template.format(tool=name), phase="thinking")
                 thinking_detail_emitted = True
 
             async def _emit_answer_placeholder() -> None:
@@ -880,28 +1262,60 @@ class AgentLoop:
                 await asyncio.sleep(self._ANSWER_PLACEHOLDER_DELAY_MS / 1000)
                 if published_stream or thinking_detail_emitted:
                     return
-                await _emit_progress(self._ANSWER_PLACEHOLDER_TEXT, phase="answer")
+                await _emit_progress(self._answer_placeholder_text, phase="answer")
 
             if on_progress and iteration == 1:
                 answer_placeholder_task = asyncio.create_task(_emit_answer_placeholder())
 
             llm_started = time.perf_counter()
+            llm_heartbeat_task = _start_stage_heartbeat(f"llm:{iteration}", llm_started)
+            response: LLMResponse | None = None
             try:
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=self.tools.get_definitions(),
-                    model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
-                    on_delta=_on_delta if on_progress else None,
-                    on_tool_call_name=_on_tool_call_name if on_progress else None,
+                response = await asyncio.wait_for(
+                    self.provider.chat(
+                        messages=messages,
+                        tools=self.tools.get_definitions(),
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        reasoning_effort=self.reasoning_effort,
+                        on_delta=_on_delta if on_progress else None,
+                        on_tool_call_name=_on_tool_call_name if on_progress else None,
+                    ),
+                    timeout=self._llm_timeout_seconds,
                 )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+                logger.error(
+                    "LLM stage timed out for session {} after {} ms (limit={}s)",
+                    session_key,
+                    elapsed_ms,
+                    self._llm_timeout_seconds,
+                )
+                final_content = self._runtime_text.prompt_text(
+                    "progress",
+                    "llm_timeout",
+                    "抱歉，这次处理超时了。请重试或把问题拆小一些。",
+                )
+                if on_progress:
+                    await _emit_progress(final_content, phase="answer")
+                timings.append({
+                    "stage": f"llm:{iteration}",
+                    "duration_ms": elapsed_ms,
+                    "timeout": True,
+                })
+                break
             finally:
+                await _stop_stage_heartbeat(llm_heartbeat_task)
                 if answer_placeholder_task and not answer_placeholder_task.done():
                     answer_placeholder_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await answer_placeholder_task
+
+            if response is None:
+                final_content = "Sorry, I encountered an unexpected model response issue."
+                break
+
             timings.append({
                 "stage": f"llm:{iteration}",
                 "duration_ms": int((time.perf_counter() - llm_started) * 1000),
@@ -936,12 +1350,25 @@ class AgentLoop:
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     args_preview = self._short_text(tool_call.arguments, limit=160)
                     if args_preview:
-                        await _emit_progress(f"调用 {tool_call.name}，参数：{args_preview}", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "call_tool_with_args", "调用 {tool}，参数：{args}"
+                        )
+                        await _emit_progress(
+                            template.format(tool=tool_call.name, args=args_preview),
+                            phase="thinking",
+                        )
                         thinking_detail_emitted = True
                     else:
-                        await _emit_progress(f"正在调用 {tool_call.name} ...", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "call_tool_no_args", "正在调用 {tool} ..."
+                        )
+                        await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     tool_started = time.perf_counter()
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    tool_heartbeat_task = _start_stage_heartbeat(f"tool:{tool_call.name}", tool_started)
+                    try:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    finally:
+                        await _stop_stage_heartbeat(tool_heartbeat_task)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
                     timings.append({
                         "stage": f"tool:{tool_call.name}",
@@ -949,15 +1376,27 @@ class AgentLoop:
                     })
                     result_preview = self._short_text(result, limit=200)
                     if result_preview:
-                        await _emit_progress(f"{tool_call.name} 结果：{result_preview}", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "tool_result", "{tool} 结果：{result}"
+                        )
+                        await _emit_progress(
+                            template.format(tool=tool_call.name, result=result_preview),
+                            phase="thinking",
+                        )
                         thinking_detail_emitted = True
                     else:
-                        await _emit_progress(f"{tool_call.name} 完成，继续思考中...", phase="thinking")
+                        template = self._runtime_text.prompt_text(
+                            "progress", "tool_done", "{tool} 完成，继续思考中..."
+                        )
+                        await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
 
-                await _emit_progress("已获取数据，正在整理答案...", phase="thinking")
+                await _emit_progress(
+                    self._runtime_text.prompt_text("progress", "data_ready", "已获取数据，正在整理答案..."),
+                    phase="thinking",
+                )
                 thinking_detail_emitted = True
             else:
                 clean = self._strip_think(response.content)
@@ -969,7 +1408,10 @@ class AgentLoop:
                     break
 
                 if on_progress and not thinking_done_sent and thinking_detail_emitted:
-                    await _emit_progress("思考完成", phase="thinking_done")
+                    await _emit_progress(
+                        self._runtime_text.prompt_text("progress", "thinking_done", "思考完成"),
+                        phase="thinking_done",
+                    )
                     thinking_done_sent = True
 
                 if on_progress and clean and not published_stream:
@@ -1010,6 +1452,13 @@ class AgentLoop:
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
+    def _get_session_lock(self, session_key: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_key] = lock
+        return lock
+
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """取消会话的所有活动任务和子代理（subagents）。"""
         tasks = self._active_tasks.pop(msg.session_key, [])
@@ -1027,8 +1476,9 @@ class AgentLoop:
         ))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """在全局锁下处理一条消息。"""
-        async with self._processing_lock:
+        """在会话级锁下处理一条消息。"""
+        lock = self._get_session_lock(msg.session_key)
+        async with lock:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -1066,18 +1516,55 @@ class AgentLoop:
 
     # region [消息处理核心逻辑]
 
-    @staticmethod
-    def _build_commands_help_text() -> str:
+    def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
+        return self._runtime_text.prompt_text("help", "commands_help_text", "").strip()
+
+    def _build_status_text(self, msg: InboundMessage) -> str:
+        profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
+        preferences = cast(dict[str, Any], profile["preferences"])
+        skillspec = cast(dict[str, Any], profile["skillspec"])
+        onboarding = cast(dict[str, Any], profile["onboarding"])
+
+        display_name = self._resolve_profile_display_name(profile)
+
+        style = self._normalize_form_value(preferences.get("response_style")).lower()
+        style_label = {
+            "concise": "简洁",
+            "detailed": "详细",
+        }.get(style, "标准")
+
+        confirm_pref = self._normalize_form_value(
+            skillspec.get("confirm_preference")
+            or profile.get("confirm_preference")
+            or profile.get("write_confirm")
+        ).lower()
+        if confirm_pref in {"auto", "skip", "none", "no_confirm", "no-confirm", "off", "no", "false"}:
+            confirm_label = "直接写入，不用每次确认"
+        else:
+            confirm_label = "先确认再写入"
+
+        query_scope = self._normalize_form_value(preferences.get("query_scope")).lower()
+        scope_label = "查全部" if query_scope == "all" else "只查我参与的"
+
+        onboarding_status = self._normalize_form_value(onboarding.get("status")).lower()
+        status_label = {
+            "completed": "已完成",
+            "pending": "进行中",
+        }.get(onboarding_status, "未设置")
+
         return (
-            "🐈 可用指令\n\n"
-            "- /help 或 /commands：显示全部指令说明\n"
-            "- /new：归档并清空当前会话\n"
-            "- /stop：停止当前会话中的进行中任务\n"
-            "- /session：查看会话子命令\n"
-            "- /session new [标题]：创建飞书话题会话\n"
-            "- /session list：列出当前聊天下的会话\n"
-            "- /session del [id|main]：删除指定会话"
+            "📌 当前设置\n\n"
+            f"怎么称呼您：{display_name}\n"
+            f"回复风格：{style_label}\n"
+            f"录入数据时：{confirm_label}\n"
+            f"查案件时默认范围：{scope_label}\n"
+            f"引导状态：{status_label}\n\n"
+            "可用快捷调整：\n"
+            "- 叫我XX\n"
+            "- 以后简洁点 / 以后详细点\n"
+            "- 不用确认直接录入\n"
+            "- /setup"
         )
 
     def _list_chat_session_keys(self, channel: str, chat_id: str, current_key: str) -> list[str]:
@@ -1090,6 +1577,41 @@ class AgentLoop:
                 keys.add(key)
         return sorted(keys, key=lambda x: (0 if x == base_key else 1, x))
 
+    def _list_pending_topic_titles(self, base_key: str) -> list[str]:
+        session = self.sessions.get_or_create(base_key)
+        raw = session.metadata.get(self._PENDING_TOPIC_METADATA_KEY)
+        if not isinstance(raw, list):
+            return []
+        out: list[str] = []
+        for item in raw:
+            title = str(item).strip()
+            if title:
+                out.append(title)
+        return out
+
+    def _save_pending_topic_titles(self, base_key: str, titles: list[str]) -> None:
+        session = self.sessions.get_or_create(base_key)
+        session.metadata[self._PENDING_TOPIC_METADATA_KEY] = titles
+        self.sessions.save(session)
+
+    def _add_pending_topic_title(self, base_key: str, title: str) -> None:
+        cleaned = title.strip()
+        if not cleaned:
+            return
+        pending = self._list_pending_topic_titles(base_key)
+        if cleaned in pending:
+            return
+        pending.append(cleaned)
+        self._save_pending_topic_titles(base_key, pending)
+
+    def _consume_one_pending_topic_title(self, base_key: str, current_key: str) -> None:
+        if current_key == base_key or not current_key.startswith(f"{base_key}:"):
+            return
+        pending = self._list_pending_topic_titles(base_key)
+        if not pending:
+            return
+        self._save_pending_topic_titles(base_key, pending[1:])
+
     def _handle_session_command(self, msg: InboundMessage, current_key: str, raw_cmd: str) -> OutboundMessage:
         """处理 /session 子命令。"""
         parts = raw_cmd.split()
@@ -1097,12 +1619,7 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = (
-                "会话子命令：\n\n"
-                "- /session new [标题]：创建飞书话题会话（缺省为 会话-YYYYMMDD-HHMM）\n"
-                "- /session list：列出当前聊天下的会话\n"
-                "- /session del [id|main]：删除当前/指定会话"
-            )
+            content = self._runtime_text.prompt_text("help", "session_help_text", "").strip()
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -1117,6 +1634,8 @@ class AgentLoop:
             title = raw_cmd[len(prefix):].strip() if raw_cmd.lower().startswith(prefix) else ""
             if not title:
                 title = datetime.now().strftime("会话-%Y%m%d-%H%M")
+
+            self._add_pending_topic_title(base_key, title)
 
             meta = dict(msg.metadata or {})
             meta["_start_topic_session"] = True
@@ -1139,6 +1658,12 @@ class AgentLoop:
                     label = key.removeprefix(f"{base_key}:")
                 marker = "（当前）" if key == current_key else ""
                 lines.append(f"{idx}. {label}{marker}")
+
+            pending_titles = self._list_pending_topic_titles(base_key)
+            if pending_titles:
+                lines.append("待激活话题：")
+                for title in pending_titles:
+                    lines.append(f"- {title}（待激活）")
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -1208,7 +1733,7 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
             turn_started = time.perf_counter()
-            final_content, _, all_msgs, timings = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key)
             turn_new = all_msgs[1 + len(history):]
             total_ms = int((time.perf_counter() - turn_started) * 1000)
             final_content = self._render_with_template(
@@ -1228,6 +1753,8 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        base_key = f"{msg.channel}:{msg.chat_id}"
+        self._consume_one_pending_topic_title(base_key, key)
 
         # 斜杠命令 (Slash commands)
         raw_cmd = msg.content.strip()
@@ -1239,10 +1766,19 @@ class AgentLoop:
             return onboarding_outbound
 
         if cmd in {"/help", "/commands"}:
+            help_text = self._build_commands_help_text()
+            if not help_text:
+                help_text = self._build_status_text(msg)
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content=self._build_commands_help_text(),
+                content=help_text,
+            )
+        if cmd == "/status":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_status_text(msg),
             )
         if cmd.startswith("/session"):
             return self._handle_session_command(msg, key, raw_cmd)
@@ -1278,23 +1814,25 @@ class AgentLoop:
         if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
+                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
                 self.sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=msg.chat_id,
-                    content=continuation.content,
+                    content=rendered,
                     metadata={**(msg.metadata or {}), "_tool_turn": continuation.tool_turn},
                 )
             return OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
-                content="没有可继续的内容了。",
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
 
         if self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
+                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
                 self.sessions.save(session)
                 outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
                 outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
@@ -1306,7 +1844,7 @@ class AgentLoop:
                 return OutboundMessage(
                     channel=msg.channel,
                     chat_id=outbound_chat_id,
-                    content=skillspec_result.content,
+                    content=rendered,
                     metadata=outbound_metadata,
                 )
 
@@ -1351,7 +1889,9 @@ class AgentLoop:
 
         turn_started = time.perf_counter()
         final_content, tools_used, all_msgs, timings = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
+            session_key=key,
         )
 
         if final_content is None:

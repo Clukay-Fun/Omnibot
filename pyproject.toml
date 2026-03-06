@@ -75,6 +75,9 @@ packages = ["nanobot"]
 include = [
     "nanobot/**/*.py",
     "nanobot/templates/**/*.md",
+    "nanobot/templates/**/*.json",
+    "nanobot/templates/**/*.yaml",
+    "nanobot/templates/**/*.yml",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
     "nanobot/skills/**/*.yaml",

@@ -1,4 +1,7 @@
-"""Reminder runtime with file-based persistence."""
+"""描述:
+主要功能:
+    - 管理提醒项的创建、查询、取消与汇总。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +13,16 @@ from typing import Any, Awaitable, Callable
 CalendarHook = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
+#region 提醒管理组件实现
+
 class ReminderRuntime:
+    """
+    用处: 执行提醒事务记录控制及回调调度的运行期核心类。
+
+    功能:
+        - 将事件持久化至硬盘，承接外部新增与清理命令调度外部日历同步回调接口动作。
+    """
+
     def __init__(
         self,
         store_path: Path,
@@ -18,6 +30,12 @@ class ReminderRuntime:
         now_fn: Callable[[], datetime] | None = None,
         calendar_hook: CalendarHook | None = None,
     ):
+        """
+        用处: 建构基础文件关联器与依赖指针注入。参数 store_path: 落地数据源址。
+
+        功能:
+            - 设置运行时必要时钟抓取柄和相关联的日历挂载操作处理钩。
+        """
         self._store_path = store_path
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
         self._calendar_hook = calendar_hook
@@ -32,6 +50,13 @@ class ReminderRuntime:
         channel: str,
         calendar_requested: bool = False,
     ) -> dict[str, Any]:
+        """
+        用处: 初始化新增一枚定时的待提醒事件。
+
+        功能:
+            - 组装包含发起人在内在的基础信息进入全记录列表。
+            - 若需要关联日程，激活对应钩子并将结果与原信息绑定打包发还前端呈现反馈。
+        """
         reminders = self._load_all()
         reminder = {
             "id": self._next_id(reminders),
@@ -62,6 +87,12 @@ class ReminderRuntime:
         return {"reminder": reminder, "calendar": calendar_payload}
 
     def list_reminders(self, *, user_id: str, include_cancelled: bool = False) -> dict[str, Any]:
+        """
+        用处: 分解呈现目标账户名下的有效待办备忘项。参数 user_id: 账户源。
+
+        功能:
+            - 按时域对符合提取前提的清单做排定排序然后打包下发。
+        """
         reminders = [item for item in self._load_all() if item.get("user_id") == user_id]
         if not include_cancelled:
             reminders = [item for item in reminders if item.get("status") == "active"]
@@ -69,6 +100,12 @@ class ReminderRuntime:
         return {"reminders": reminders}
 
     def cancel_reminder(self, *, user_id: str, reminder_id: str) -> dict[str, Any]:
+        """
+        用处: 根据指示定点打断或停用一项现存备忘安排。参数 reminder_id: 操作的单一指针键。
+
+        功能:
+            - 复查账户归属并把处于生机状态的项目打上取消休眠标签。
+        """
         reminders = self._load_all()
         for item in reminders:
             if item.get("id") != reminder_id or item.get("user_id") != user_id:
@@ -82,6 +119,12 @@ class ReminderRuntime:
         return {"cancelled": False, "reason": "not_found", "reminder_id": reminder_id}
 
     def build_daily_summary(self, *, user_id: str, date: str) -> dict[str, Any]:
+        """
+        用处: 拼接当日提醒概要报表面版内容供摘要汇报。
+
+        功能:
+            - 透视并过滤指定日期的条目量和具体分布情况，组建统计面板形态。
+        """
         reminders = self.list_reminders(user_id=user_id).get("reminders", [])
         due_today = [item for item in reminders if str(item.get("due_at") or "").startswith(date)]
         return {
@@ -93,6 +136,12 @@ class ReminderRuntime:
         }
 
     def _load_all(self) -> list[dict[str, Any]]:
+        """
+        用处: 安全载入 JSON 长储的所有源记录。
+
+        功能:
+            - 防暴解析，对断链或受损文段主动抹平返回安全序列。
+        """
         if not self._store_path.exists():
             return []
         try:
@@ -104,15 +153,29 @@ class ReminderRuntime:
         return [dict(item) for item in payload if isinstance(item, dict)]
 
     def _save_all(self, reminders: list[dict[str, Any]]) -> None:
+        """
+        用处: 覆写全体现存记录数据池至储存磁盘。
+
+        功能:
+            - 针对 ID 特征对散乱的数据施加稳定排布再回灌写入。
+        """
         self._store_path.parent.mkdir(parents=True, exist_ok=True)
         normalized = sorted(reminders, key=lambda item: str(item.get("id") or ""))
         self._store_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
 
     @staticmethod
     def _next_id(reminders: list[dict[str, Any]]) -> str:
+        """
+        用处: 分发无碰撞序列的下一个单号代号。
+
+        功能:
+            - 在获取已有上限值基础之上计算并提供标准化自增前缀。
+        """
         max_id = 0
         for item in reminders:
             raw = str(item.get("id") or "")
             if raw.startswith("r") and raw[1:].isdigit():
                 max_id = max(max_id, int(raw[1:]))
         return f"r{max_id + 1:06d}"
+
+#endregion

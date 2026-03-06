@@ -1,4 +1,7 @@
-"""SkillSpec runtime executor with query/write routing."""
+"""描述:
+主要功能:
+    - 执行 SkillSpec 的路由匹配、参数解析与动作调度。
+"""
 
 from __future__ import annotations
 
@@ -6,7 +9,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
@@ -16,19 +19,28 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     Environment = None  # type: ignore[assignment]
 
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
+from nanobot.agent.skill_runtime.table_registry import TableRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 
 
+#region 执行器结果模型
+
 @dataclass(slots=True)
 class SkillExecutionResult:
+    """用处，参数
+
+    功能:
+        - 表示一次技能执行后的处理结果。
+    """
     handled: bool
     content: str = ""
     tool_turn: bool = False
@@ -36,11 +48,20 @@ class SkillExecutionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+#endregion
+
+#region 执行器核心类
+
+
 class SkillSpecExecutor:
+    """用处，参数
+
+    功能:
+        - 负责技能匹配、执行与结果渲染。
+    """
     _SESSION_CONTINUATION_TOKEN = "skillspec_continuation_token"
     _SESSION_CONTINUATION_POLICY = "skillspec_continuation_policy"
     _SESSION_PENDING_WRITES = "skillspec_pending_writes"
-    _CONTINUE_COMMANDS = {"继续", "展开"}
 
     def __init__(
         self,
@@ -54,7 +75,52 @@ class SkillSpecExecutor:
         route_log_enabled: bool = False,
         route_log_top_k: int = 3,
         reminder_runtime: ReminderRuntime | None = None,
+        runtime_text: RuntimeTextCatalog | None = None,
+        table_registry: TableRegistry | None = None,
     ):
+        self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
+        self._continue_commands = {
+            cmd.strip()
+            for cmd in self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue", "more"]
+            )
+            if cmd.strip()
+        }
+        self._reminder_domain_keywords = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("domain_hints", "reminder_keywords", ["reminder"])
+            if keyword.strip()
+        )
+        self._cancel_intent_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("domain_hints", "cancel_intent_tokens", ["cancel"])
+            if token.strip()
+        )
+        self._smalltalk_hints = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("smalltalk_triggers", "smalltalk_hints", ["hello"])
+            if keyword.strip()
+        )
+        self._business_hints = tuple(
+            keyword.strip().lower()
+            for keyword in self._runtime_text.routing_list("domain_hints", "business_keywords", ["task"])
+            if keyword.strip()
+        )
+        self._ability_subject_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_subject_tokens", ["you"])
+            if token.strip()
+        )
+        self._ability_aux_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_aux_tokens", ["can"])
+            if token.strip()
+        )
+        self._ability_action_tokens = tuple(
+            token.strip().lower()
+            for token in self._runtime_text.routing_list("smalltalk_triggers", "ability_action_tokens", ["do"])
+            if token.strip()
+        )
         self.registry = registry
         self.tools = tools
         self.output_guard = output_guard
@@ -64,23 +130,46 @@ class SkillSpecExecutor:
         self._route_log_enabled = bool(route_log_enabled)
         self._route_log_top_k = max(1, int(route_log_top_k))
         self._reminder_runtime = reminder_runtime
+        self._table_registry = table_registry
         self._jinja_env = Environment(trim_blocks=True, lstrip_blocks=True) if Environment is not None else None
-        self.matcher = SkillSpecMatcher(
-            registry.specs,
-            embedding_router=self._embedding_router,
-            embedding_min_score=self._embedding_min_score,
-        )
+        self.matcher = self._build_matcher(registry.specs)
         self.param_parser = SkillSpecParamParser()
 
     def reload(self) -> None:
-        self.matcher = SkillSpecMatcher(
-            self.registry.specs,
+        self.matcher = self._build_matcher(self.registry.specs)
+
+    def _build_matcher(self, specs: dict[str, Any]) -> SkillSpecMatcher:
+        return SkillSpecMatcher(
+            specs,
             embedding_router=self._embedding_router,
             embedding_min_score=self._embedding_min_score,
+            case_query_keywords=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_keywords", ["case"])
+            ),
+            case_query_intent_tokens=tuple(
+                self._runtime_text.routing_list(
+                    "domain_hints",
+                    "case_query_intent_tokens",
+                    ["查", "查询", "搜索", "查找", "看看", "找"],
+                )
+            ),
+            case_query_exclude_tokens=tuple(
+                self._runtime_text.routing_list(
+                    "domain_hints",
+                    "case_query_exclude_tokens",
+                    ["代办", "待办", "清单", "勾选", "卡片", "记一下", "记录"],
+                )
+            ),
+            case_query_prefixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_prefixes", [])
+            ),
+            case_query_suffixes=tuple(
+                self._runtime_text.routing_list("domain_hints", "case_query_suffixes", [])
+            ),
         )
 
     def can_handle_continuation(self, text: str) -> bool:
-        return text.strip() in self._CONTINUE_COMMANDS
+        return text.strip() in self._continue_commands
 
     def continue_from_session(self, session: Any) -> SkillExecutionResult | None:
         token = str(session.metadata.get(self._SESSION_CONTINUATION_TOKEN, "")).strip()
@@ -90,7 +179,10 @@ class SkillSpecExecutor:
         session.metadata.pop(self._SESSION_CONTINUATION_TOKEN, None)
         policy = session.metadata.get(self._SESSION_CONTINUATION_POLICY, {})
         if payload is None:
-            return SkillExecutionResult(handled=True, content="没有可继续的内容了。")
+            return SkillExecutionResult(
+                handled=True,
+                content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
+            )
         return SkillExecutionResult(
             handled=True,
             content=self._render_guarded(payload, policy=policy, session=session),
@@ -126,7 +218,17 @@ class SkillSpecExecutor:
             }
         }
         action = spec.action if isinstance(spec.action, dict) else {}
+        params = self._apply_nlp_extract(action=action, params=params)
         kind = str(action.get("kind", "")).lower()
+
+        if selection.reason != "explicit" and self._looks_like_smalltalk(msg.content):
+            self._log_route_miss(msg.content)
+            return SkillExecutionResult(handled=False)
+
+        if kind in {"reminder_set", "reminder_list", "reminder_cancel", "daily_summary"}:
+            if not self._is_reminder_intent(msg=msg, selection=selection, kind=kind):
+                self._log_route_miss(msg.content)
+                return SkillExecutionResult(handled=False)
 
         if kind == "query":
             payload = await self._run_query_action(action=action, params=params, runtime=runtime)
@@ -190,6 +292,43 @@ class SkillSpecExecutor:
             return SkillExecutionResult(handled=True, content=response, tool_turn=True, metadata=route_metadata)
 
         return SkillExecutionResult(handled=False)
+
+    def _is_reminder_intent(self, *, msg: InboundMessage, selection: MatchSelection, kind: str) -> bool:
+        if selection.reason == "explicit":
+            return True
+
+        content = msg.content.strip().lower()
+        if not content:
+            return False
+
+        if any(keyword in content for keyword in self._reminder_domain_keywords):
+            return True
+
+        if kind == "reminder_cancel":
+            has_cancel = any(token in content for token in self._cancel_intent_tokens)
+            has_reminder_id = re.search(r"\br\d{4,}\b", content) is not None
+            return has_cancel and has_reminder_id
+
+        return False
+
+    def _looks_like_smalltalk(self, text: str) -> bool:
+        compact = re.sub(r"\s+", "", text).strip().lower().rstrip("。.!！?？")
+        if not compact:
+            return False
+
+        if any(keyword in compact for keyword in self._business_hints):
+            return False
+
+        if compact in self._smalltalk_hints:
+            return True
+
+        if any(token in compact for token in self._ability_subject_tokens) and any(
+            token in compact for token in self._ability_aux_tokens
+        ):
+            if any(token in compact for token in self._ability_action_tokens):
+                return True
+
+        return False
 
     def _build_route_metadata(self, selection: MatchSelection, source_text: str) -> dict[str, Any]:
         route: dict[str, Any] = {
@@ -257,12 +396,65 @@ class SkillSpecExecutor:
             step_id = str(step.get("id", "")).strip()
             if not step_id:
                 continue
+            if not self._cross_query_dependencies_ready(step=step, steps=results):
+                warning = "依赖步骤无结果，已跳过当前查询。"
+                results[step_id] = {
+                    "rows": [],
+                    "raw": {"warning": warning},
+                    "warning": warning,
+                    "skipped": True,
+                }
+                continue
             resolved_step = self._resolve_templates(step, params=params, steps=results, runtime=runtime)
             args = self._build_query_args(resolved_step, params=params, steps=results, runtime=runtime)
+            if not self._cross_query_has_target(args):
+                warning = "数据表目标未配置，已跳过当前查询。"
+                results[step_id] = {
+                    "rows": [],
+                    "raw": {"warning": warning},
+                    "warning": warning,
+                    "skipped": True,
+                }
+                continue
             payload = await self._execute_tool_json("bitable_search", args)
             rows = self._extract_records(payload) or []
-            results[step_id] = {"rows": rows, "raw": payload}
+            step_result: dict[str, Any] = {"rows": rows, "raw": payload}
+            warning = self._extract_tool_warning(payload)
+            if warning:
+                step_result["warning"] = warning
+            error = self._extract_tool_error(payload)
+            if error:
+                step_result["error"] = error
+            results[step_id] = step_result
         return {"steps": results}
+
+    @staticmethod
+    def _cross_query_dependencies_ready(*, step: dict[str, Any], steps: dict[str, Any]) -> bool:
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list) or not depends_on:
+            return True
+        for dep in depends_on:
+            dep_id = str(dep).strip()
+            if not dep_id:
+                continue
+            dep_payload = steps.get(dep_id)
+            if not isinstance(dep_payload, dict):
+                return False
+            rows = dep_payload.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return False
+        return True
+
+    @staticmethod
+    def _cross_query_has_target(args: dict[str, Any]) -> bool:
+        app_token = args.get("app_token")
+        table_id = args.get("table_id")
+        return (
+            isinstance(app_token, str)
+            and bool(app_token.strip())
+            and isinstance(table_id, str)
+            and bool(table_id.strip())
+        )
 
     def _build_query_args(
         self,
@@ -273,14 +465,11 @@ class SkillSpecExecutor:
         runtime: dict[str, Any],
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
+        table_alias: str | None = None
         table = action.get("table")
         if isinstance(table, dict):
-            app_token = table.get("app_token")
-            table_id = table.get("table_id")
-            if app_token:
-                args["app_token"] = app_token
-            if table_id:
-                args["table_id"] = table_id
+            table_args, table_alias = self._resolve_table_args(table)
+            args.update(table_args)
 
         filter_template = action.get("filter_template")
         filters: dict[str, Any] = {}
@@ -289,7 +478,10 @@ class SkillSpecExecutor:
             resolved = self._resolve_templates(filter_template, params=params, steps=steps, runtime=runtime)
             keyword, filters = self._parse_filter_template(resolved)
 
-        if keyword is None:
+        if table_alias and filters and self._table_registry is not None:
+            filters = self._table_registry.map_filters(table_alias, filters)
+
+        if keyword is None and not filters:
             query = params.get("query")
             if isinstance(query, str) and query.strip():
                 keyword = query.strip()
@@ -301,6 +493,31 @@ class SkillSpecExecutor:
         if isinstance(params.get("page_size"), int):
             args["limit"] = int(params["page_size"])
         return args
+
+    def _resolve_table_args(self, table: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        alias_raw = table.get("alias")
+        if not isinstance(alias_raw, str) or not alias_raw.strip():
+            alias_raw = table.get("table_alias")
+        alias = str(alias_raw).strip() or None
+
+        resolved: dict[str, Any] = {}
+        if alias and self._table_registry is not None:
+            loaded = self._table_registry.resolve_table(alias)
+            if isinstance(loaded, dict):
+                resolved = loaded
+
+        app_token = table.get("app_token") or resolved.get("app_token")
+        table_id = table.get("table_id") or resolved.get("table_id")
+        view_id = table.get("view_id") or resolved.get("view_id")
+
+        args: dict[str, Any] = {}
+        if isinstance(app_token, str) and app_token.strip():
+            args["app_token"] = app_token.strip()
+        if isinstance(table_id, str) and table_id.strip():
+            args["table_id"] = table_id.strip()
+        if isinstance(view_id, str) and view_id.strip():
+            args["view_id"] = view_id.strip()
+        return args, alias
 
     async def _run_write_dry_run(
         self,
@@ -488,8 +705,15 @@ class SkillSpecExecutor:
         channel = str(user_ctx.get("channel") or "")
 
         if kind == "reminder_set":
-            text = str(params.get("text") or params.get("query") or "").strip()
+            query_text = str(params.get("query") or "").strip()
+            text = str(params.get("text") or "").strip()
             due_at = str(params.get("due_at") or "").strip()
+            if query_text and (not text or not due_at):
+                inferred_text, inferred_due_at = self._infer_reminder_fields(query_text)
+                if not text and inferred_text:
+                    text = inferred_text
+                if not due_at and inferred_due_at:
+                    due_at = inferred_due_at
             if not text or not due_at:
                 return {"error": "text and due_at are required"}
             calendar_requested = bool(params.get("calendar_sync") or action.get("calendar_enabled"))
@@ -549,6 +773,89 @@ class SkillSpecExecutor:
 
         date = str(params.get("date") or datetime.now(timezone.utc).date().isoformat())
         return self._reminder_runtime.build_daily_summary(user_id=user_id, date=date)
+
+    def _infer_reminder_fields(self, query: str) -> tuple[str | None, str | None]:
+        due_at = self._extract_due_at_from_query(query)
+        text = self._strip_reminder_query_noise(query)
+        if not text:
+            text = query.strip()
+        return (text or None, due_at)
+
+    def _extract_due_at_from_query(self, query: str) -> str | None:
+        text = query.strip()
+        if not text:
+            return None
+
+        absolute = re.search(
+            r"(?P<date>\d{4}[./-]\d{1,2}[./-]\d{1,2})(?:\s*(?P<period>上午|下午|中午|晚上|早上))?\s*(?P<hour>\d{1,2})?(?:[:：点时](?P<minute>\d{1,2}))?",
+            text,
+        )
+        if absolute:
+            parsed = self._format_due_at(
+                date_token=str(absolute.group("date") or ""),
+                period=absolute.group("period"),
+                hour_token=absolute.group("hour"),
+                minute_token=absolute.group("minute"),
+            )
+            if parsed:
+                return parsed
+
+        relative = re.search(
+            r"(?P<date>今天|明天|后天|昨天|昨日)(?:\s*(?P<period>上午|下午|中午|晚上|早上))?\s*(?P<hour>\d{1,2})?(?:[:：点时](?P<minute>\d{1,2}))?",
+            text,
+        )
+        if relative:
+            return self._format_due_at(
+                date_token=str(relative.group("date") or ""),
+                period=relative.group("period"),
+                hour_token=relative.group("hour"),
+                minute_token=relative.group("minute"),
+            )
+        return None
+
+    def _format_due_at(
+        self,
+        *,
+        date_token: str,
+        period: str | None,
+        hour_token: str | None,
+        minute_token: str | None,
+    ) -> str | None:
+        date_value = self._normalize_relative_date(date_token)
+        if not date_value:
+            return None
+
+        hour = 9
+        minute = 0
+        if hour_token and hour_token.isdigit():
+            hour = int(hour_token)
+        if minute_token and minute_token.isdigit():
+            minute = int(minute_token)
+
+        if period in {"下午", "晚上"} and hour < 12:
+            hour += 12
+        elif period == "中午" and hour < 11:
+            hour += 12
+        elif period == "早上" and hour == 12:
+            hour = 0
+
+        if hour > 23 or minute > 59:
+            return None
+        return f"{date_value}T{hour:02d}:{minute:02d}:00"
+
+    @staticmethod
+    def _strip_reminder_query_noise(query: str) -> str:
+        text = query.strip()
+        text = re.sub(r"^(请)?(帮我)?提醒我", "", text)
+        text = re.sub(r"^(请)?(帮我)?提醒", "", text)
+        text = re.sub(
+            r"(今天|明天|后天|昨天|昨日)(\s*(上午|下午|中午|晚上|早上))?\s*\d{0,2}(?:[:：点时]\d{0,2})?",
+            " ",
+            text,
+        )
+        text = re.sub(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}(\s*\d{0,2}(?:[:：点时]\d{0,2})?)?", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip(" ，,。；;:：在于")
 
     async def _run_record_bridge(
         self,
@@ -704,6 +1011,15 @@ class SkillSpecExecutor:
                 return str(error)
         return None
 
+    @staticmethod
+    def _extract_tool_warning(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        warning = payload.get("warning")
+        if warning in (None, ""):
+            return None
+        return str(warning)
+
     async def _handle_write_confirmation(self, msg: InboundMessage, session: Any) -> SkillExecutionResult | None:
         pending = self._pending_writes(session)
         if not pending:
@@ -798,18 +1114,139 @@ class SkillSpecExecutor:
         runtime: dict[str, Any],
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
+        table_alias: str | None = None
         table = action.get("table")
         if isinstance(table, dict):
-            if table.get("app_token"):
-                args["app_token"] = table["app_token"]
-            if table.get("table_id"):
-                args["table_id"] = table["table_id"]
+            table_args, table_alias = self._resolve_table_args(table)
+            args.update(table_args)
 
         base_args = action.get("args")
         if isinstance(base_args, dict):
             args.update(self._resolve_templates(base_args, params=params, steps={}, runtime=runtime))
         args.update(params)
+        fields = args.get("fields")
+        if isinstance(fields, dict):
+            if table_alias and self._table_registry is not None:
+                fields = self._table_registry.map_fields(table_alias, fields)
+            args["fields"] = {
+                key: value
+                for key, value in fields.items()
+                if value not in (None, "", [], {})
+            }
         return args
+
+    def _apply_nlp_extract(self, *, action: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+        extract_cfg = action.get("nlp_extract")
+        if not isinstance(extract_cfg, dict):
+            return params
+        if extract_cfg.get("enabled") is False:
+            return params
+
+        source_param = str(extract_cfg.get("source_param") or "query").strip() or "query"
+        source_value = params.get(source_param)
+        if not isinstance(source_value, str):
+            return params
+        source_text = source_value.strip()
+        if not source_text:
+            return params
+
+        field_patterns = extract_cfg.get("field_patterns")
+        if not isinstance(field_patterns, dict):
+            return params
+
+        date_fields = {
+            str(item).strip()
+            for item in (extract_cfg.get("date_fields") or ["report_date"])
+            if str(item).strip()
+        }
+
+        merged = dict(params)
+        for field_name, pattern_list in field_patterns.items():
+            key = str(field_name).strip()
+            if not key or merged.get(key) not in (None, ""):
+                continue
+            extracted = self._extract_first_pattern(source_text, pattern_list)
+            if not extracted:
+                continue
+            if key in date_fields:
+                normalized_date = self._normalize_relative_date(extracted)
+                extracted = normalized_date or extracted
+            merged[key] = extracted
+
+        if merged.get("task_summary") in (None, ""):
+            stripped = self._strip_report_noise(source_text, extract_cfg.get("strip_patterns"))
+            if stripped:
+                merged["task_summary"] = stripped
+
+        return merged
+
+    @staticmethod
+    def _extract_first_pattern(text: str, patterns: Any) -> str | None:
+        if isinstance(patterns, str):
+            pattern_list = [patterns]
+        elif isinstance(patterns, list):
+            pattern_list = [str(item) for item in patterns if str(item).strip()]
+        else:
+            return None
+
+        for pattern in pattern_list:
+            try:
+                match = re.search(pattern, text, flags=re.IGNORECASE)
+            except re.error:
+                continue
+            if not match:
+                continue
+            if match.lastindex:
+                for index in range(1, match.lastindex + 1):
+                    group = match.group(index)
+                    if group and group.strip():
+                        return group.strip()
+            value = match.group(0)
+            if value and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def _strip_report_noise(text: str, strip_patterns: Any) -> str:
+        result = text
+        if isinstance(strip_patterns, list):
+            for pattern in strip_patterns:
+                pattern_text = str(pattern).strip()
+                if not pattern_text:
+                    continue
+                try:
+                    result = re.sub(pattern_text, " ", result, flags=re.IGNORECASE)
+                except re.error:
+                    continue
+        result = re.sub(r"\s+", " ", result)
+        return result.strip(" ，,。；;:：")
+
+    @staticmethod
+    def _normalize_relative_date(value: str) -> str | None:
+        text = value.strip()
+        if not text:
+            return None
+
+        today = datetime.now().date()
+        relative_map = {
+            "今天": 0,
+            "昨日": -1,
+            "昨天": -1,
+            "明天": 1,
+            "后天": 2,
+        }
+        if text in relative_map:
+            target = today + timedelta(days=relative_map[text])
+            return target.isoformat()
+
+        match = re.fullmatch(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", text)
+        if not match:
+            return None
+        year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        try:
+            return datetime(year=year, month=month, day=day).date().isoformat()
+        except ValueError:
+            return None
 
     async def _execute_tool_json(self, tool_name: str, args: dict[str, Any]) -> Any:
         raw = await self.tools.execute(tool_name, args)
@@ -822,7 +1259,12 @@ class SkillSpecExecutor:
         policy = self._resolve_output_policy(spec)
         response_cfg = spec.response if isinstance(spec.response, dict) else {}
         mapped_payload = self._apply_response_field_mapping(payload, response_cfg=response_cfg)
-        rendered = self._render_payload(mapped_payload, response_cfg=response_cfg)
+        not_found_message = self._resolve_not_found_message(spec)
+        rendered = self._render_payload(
+            mapped_payload,
+            response_cfg=response_cfg,
+            not_found_message=not_found_message,
+        )
         if isinstance(rendered, list):
             result = self.output_guard.guard_items(rendered, max_items=int(policy.get("max_items", 5)))
             return self._persist_guard_result(result, policy=policy, session=session)
@@ -831,6 +1273,14 @@ class SkillSpecExecutor:
             result = self.output_guard.guard_text(str(rendered), max_chars=int(policy["max_chars"]))
             return self._persist_guard_result(result, policy=policy, session=session)
         return str(rendered)
+
+    def _resolve_not_found_message(self, spec: Any) -> str:
+        error_cfg = spec.error if isinstance(getattr(spec, "error", None), dict) else {}
+        for key in ("not_found", "not_found_message"):
+            value = error_cfg.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return self._runtime_text.prompt_text("pagination", "not_found_data", "未查询到数据。")
 
     def _render_guarded(self, payload: Any, *, policy: dict[str, Any], session: Any) -> str:
         if isinstance(payload, list):
@@ -857,7 +1307,14 @@ class SkillSpecExecutor:
         else:
             content = str(result.content)
         if result.truncated:
-            return f"{content}\n\n回复“继续”查看剩余内容"
+            continuation_commands = self._runtime_text.routing_list(
+                "pagination_triggers", "continuation_commands", ["continue"]
+            )
+            continuation_cmd = continuation_commands[0] if continuation_commands else "continue"
+            hint_template = self._runtime_text.prompt_text(
+                "pagination", "continuation_hint", "回复“{continue_command}”查看剩余内容"
+            )
+            return f"{content}\n\n{hint_template.format(continue_command=continuation_cmd)}"
         return content
 
     def _resolve_output_policy(self, spec: Any) -> dict[str, Any]:
@@ -872,7 +1329,13 @@ class SkillSpecExecutor:
         policy.setdefault("max_items", 5)
         return policy
 
-    def _render_payload(self, payload: Any, *, response_cfg: dict[str, Any] | None = None) -> str | list[Any]:
+    def _render_payload(
+        self,
+        payload: Any,
+        *,
+        response_cfg: dict[str, Any] | None = None,
+        not_found_message: str,
+    ) -> str | list[Any]:
         template = ""
         if isinstance(response_cfg, dict):
             template = str(response_cfg.get("template") or "").strip()
@@ -887,15 +1350,22 @@ class SkillSpecExecutor:
             lines: list[str] = []
             for step_id, step_data in payload["steps"].items():
                 rows = step_data.get("rows") if isinstance(step_data, dict) else []
+                error = step_data.get("error") if isinstance(step_data, dict) else None
+                warning = step_data.get("warning") if isinstance(step_data, dict) else None
                 if isinstance(rows, list):
-                    lines.append(f"[{step_id}] 命中 {len(rows)} 条")
+                    summary = f"[{step_id}] 命中 {len(rows)} 条"
+                    if error not in (None, ""):
+                        summary += f"（错误：{error}）"
+                    elif warning not in (None, ""):
+                        summary += f"（提示：{warning}）"
+                    lines.append(summary)
                     for row in rows[:3]:
                         lines.append(self._stringify_row(row))
-            return lines or "未查询到数据。"
+            return lines or not_found_message
 
         if isinstance(records, list):
             if not records:
-                return "未查询到数据。"
+                return not_found_message
             return records
 
         return self._stringify_payload(payload)
@@ -1094,10 +1564,12 @@ class SkillSpecExecutor:
         sender_id = str(msg.sender_id or "").strip()
         return sender_id or None
 
-    @staticmethod
-    def _format_write_confirmation(*, preview: Any, token: str) -> str:
+    def _format_write_confirmation(self, *, preview: Any, token: str) -> str:
         preview_text = json.dumps(preview, ensure_ascii=False)
-        return f"写入预览：{preview_text}\n确认 {token} / 取消 {token}"
+        template = self._runtime_text.template("card_confirm").get("text")
+        if isinstance(template, str) and template.strip():
+            return template.format(preview=preview_text, token=token)
+        return f"{preview_text}\nconfirm {token} / cancel {token}"
 
     def _build_sensitive_metadata(self, *, spec: Any, msg: InboundMessage) -> dict[str, Any]:
         private_chat_id = self._resolve_sensitive_reply_chat_id(spec=spec, msg=msg)
@@ -1261,6 +1733,7 @@ class SkillSpecExecutor:
 
         conditions = filter_template.get("conditions")
         if isinstance(conditions, list):
+            parsed_conditions: list[dict[str, Any]] = []
             for cond in conditions:
                 if not isinstance(cond, dict):
                     continue
@@ -1269,20 +1742,39 @@ class SkillSpecExecutor:
                 value = cond.get("value")
                 if value in (None, ""):
                     continue
-                if op == "contains" and keyword is None:
+                if not field and op == "contains" and keyword is None:
                     keyword = str(value)
                     continue
                 if field:
-                    filters[field] = value
+                    parsed_conditions.append({
+                        "field_name": field,
+                        "operator": op,
+                        "value": value,
+                    })
+            if parsed_conditions:
+                conjunction = str(filter_template.get("op") or "and").strip().lower()
+                filters = {
+                    "conjunction": "or" if conjunction == "or" else "and",
+                    "conditions": parsed_conditions,
+                }
             return keyword, filters
 
         field = str(filter_template.get("field", "")).strip()
         value = filter_template.get("value")
         op = str(filter_template.get("op", "eq")).lower()
-        if op == "contains":
+        if not field and op == "contains":
             keyword = None if value is None else str(value)
         elif field and value not in (None, ""):
-            filters[field] = value
+            filters = {
+                "conjunction": "and",
+                "conditions": [
+                    {
+                        "field_name": field,
+                        "operator": op,
+                        "value": value,
+                    }
+                ],
+            }
         return keyword, filters
 
     @staticmethod
@@ -1313,3 +1805,6 @@ class SkillSpecExecutor:
     def _pending_writes(self, session: Any) -> dict[str, dict[str, Any]]:
         raw = session.metadata.get(self._SESSION_PENDING_WRITES)
         return dict(raw) if isinstance(raw, dict) else {}
+
+
+#endregion

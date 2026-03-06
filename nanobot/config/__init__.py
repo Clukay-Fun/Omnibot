@@ -1,4 +1,4 @@
-"""Configuration module for nanobot."""
+"""配置管理模块。"""
 
 from nanobot.config.loader import load_config, get_config_path
 from nanobot.config.schema import Config

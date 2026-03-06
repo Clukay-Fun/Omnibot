@@ -1,4 +1,7 @@
-"""Matrix (Element) 通讯频道的实现 — 负责支撑双向接收以及外联式纯文本带多媒体的数据内容交付与投递动作同步任务流。"""
+"""描述:
+主要功能:
+    - 提供 Matrix (Element) 频道的双向消息收发能力。
+"""
 
 import asyncio
 import logging
@@ -61,7 +64,7 @@ MATRIX_ALLOWED_HTML_ATTRIBUTES: dict[str, set[str]] = {
 MATRIX_ALLOWED_URL_SCHEMES = {"https", "http", "matrix", "mailto", "mxc"}
 
 
-# region [工具与辅助方法]
+#region 辅助方法
 
 def _filter_matrix_html_attribute(tag: str, attr: str, value: str) -> str | None:
     """筛除过滤提取 Matrix 所支持认可且可以平稳使用的安全性限制较严格的一小部分特定的 HTML 属性集合列表值。"""
@@ -132,9 +135,9 @@ def _configure_nio_logging_bridge() -> None:
         nio_logger.propagate = False
 
 
-# endregion
+#endregion
 
-# region [Matrix 频道核心类]
+#region Matrix频道核心类
 
 class MatrixChannel(BaseChannel):
     """通过采取使用长时间拉起持有关联等待反馈形态连接挂起操作来进行通信的底层驱动模式运行架构在之上的 Matrix (Element) 会话连接交流频道类封装。"""
@@ -687,4 +690,4 @@ class MatrixChannel(BaseChannel):
             await self._stop_typing_keepalive(room.room_id, clear_typing=True)
             raise
 
-# endregion
+#endregion

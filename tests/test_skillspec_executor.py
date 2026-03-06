@@ -11,6 +11,7 @@ from nanobot.agent.skill_runtime.output_guard import OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
+from nanobot.agent.skill_runtime.table_registry import TableRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -99,6 +100,12 @@ def _build_registry(tmp_path: Path, spec_name: str, spec_yaml: str) -> SkillSpec
     return registry
 
 
+def _build_table_registry(tmp_path: Path, payload: str) -> TableRegistry:
+    path = tmp_path / "table_registry.yaml"
+    _write_yaml(path, payload)
+    return TableRegistry(workspace=tmp_path / "workspace", builtin_path=path)
+
+
 def test_matcher_prefers_explicit_then_regex_then_keywords(tmp_path: Path) -> None:
     registry = _build_registry(
         tmp_path,
@@ -153,6 +160,137 @@ error: {}
     selection = matcher.select("no lexical hit")
 
     assert selection is None
+
+
+@pytest.mark.asyncio
+async def test_executor_case_search_avoids_todo_false_positive(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_search",
+        """
+meta:
+  id: case_search
+  version: "0.1"
+  description: 案件查询
+  match:
+    regex: "(案号|案件|案子|项目ID|开庭)"
+    keywords: [案件, 案子, 案号, 项目ID, 开庭]
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {app_token: app_case, table_id: tbl_case}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="帮我记一下案件A的代办清单"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is False
+    assert search.calls == []
+
+
+@pytest.mark.asyncio
+async def test_executor_case_search_keeps_query_intent_hit(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_search",
+        """
+meta:
+  id: case_search
+  version: "0.1"
+  description: 案件查询
+  match:
+    regex: "(案号|案件|案子|项目ID|开庭)"
+    keywords: [案件, 案子, 案号, 项目ID, 开庭]
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {app_token: app_case, table_id: tbl_case}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="帮我查一下案件A"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(search.calls) == 1
+    assert search.calls[0]["app_token"] == "app_case"
+    assert search.calls[0]["table_id"] == "tbl_case"
+
+
+@pytest.mark.asyncio
+async def test_executor_case_search_rejects_generic_query_without_subject(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_search",
+        """
+meta:
+  id: case_search
+  version: "0.1"
+  description: 案件查询
+  match:
+    regex: "(案号|案件|案子|项目ID|开庭)"
+    keywords: [案件, 案子, 案号, 项目ID, 开庭]
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {app_token: app_case, table_id: tbl_case}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="查询案件"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is False
+    assert search.calls == []
 
 
 def test_param_parser_extracts_key_value_and_query() -> None:
@@ -231,7 +369,130 @@ error: {}
     assert "someone-else" not in result.content
     assert search.calls[0]["app_token"] == "app_x"
     assert search.calls[0]["table_id"] == "tbl_x"
-    assert search.calls[0]["keyword"] == "alpha"
+    first_filters = search.calls[0]["filters"]
+    assert first_filters["conjunction"] == "and"
+    assert first_filters["conditions"][0]["field_name"] == "title"
+    assert first_filters["conditions"][0]["operator"] == "contains"
+    assert first_filters["conditions"][0]["value"] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_executor_resolves_table_alias_and_filter_field_alias(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_query",
+        """
+meta: {id: case_query, version: "0.1", description: 案件查询}
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {alias: case_registry}
+  filter_template:
+    field: title
+    op: contains
+    value: "{{ params.query }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_registry:
+    app_token: app_case
+    table_id: tbl_case
+    field_aliases:
+      title: 案号
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_query 纳川旧四案"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert search.calls[0]["app_token"] == "app_case"
+    assert search.calls[0]["table_id"] == "tbl_case"
+    assert search.calls[0]["filters"]["conditions"][0]["field_name"] == "案号"
+
+
+@pytest.mark.asyncio
+async def test_executor_resolves_table_alias_for_write_fields(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_update",
+        """
+meta: {id: task_update, version: "0.1", description: 更新任务}
+params:
+  type: object
+  properties:
+    record_id: {type: string}
+    owner: {type: string}
+action:
+  kind: update
+  table: {alias: case_tasks}
+  args:
+    record_id: "{{ params.record_id }}"
+    fields:
+      owner: "{{ params.owner }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    update_tool = _FakeTool("bitable_update", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tokA"})
+    tools.register(update_tool)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_tasks:
+    app_token: app_task
+    table_id: tbl_task
+    field_aliases:
+      owner: 主办律师
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill task_update record_id=r1 owner=刘达",
+        ),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    call = update_tool.calls[0]
+    assert call["app_token"] == "app_task"
+    assert call["table_id"] == "tbl_task"
+    assert call["fields"]["主办律师"] == "刘达"
 
 
 @pytest.mark.asyncio
@@ -291,8 +552,137 @@ error: {}
 
     assert result.handled is True
     assert len(search.calls) == 2
-    assert search.calls[0]["keyword"] == "CASE-1"
-    assert search.calls[1]["filters"]["case_id"] == "C-001"
+    first_filters = search.calls[0]["filters"]
+    assert first_filters["conditions"][0]["field_name"] == "case_no"
+    assert first_filters["conditions"][0]["operator"] == "contains"
+    assert first_filters["conditions"][0]["value"] == "CASE-1"
+
+    second_filters = search.calls[1]["filters"]
+    assert second_filters["conditions"][0]["field_name"] == "case_id"
+    assert second_filters["conditions"][0]["operator"] == "eq"
+    assert second_filters["conditions"][0]["value"] == "C-001"
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_query_skips_step_when_dependency_has_no_rows(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_detail",
+        """
+meta: {id: case_detail, version: "0.1", description: 案件详情}
+params:
+  type: object
+  properties:
+    case_no: {type: string}
+action:
+  kind: query
+  cross_query:
+    steps:
+      - id: case_base
+        table: {app_token: app_case, table_id: tbl_case}
+        filter_template:
+          field: case_no
+          op: contains
+          value: "{{ params.case_no }}"
+      - id: related_tasks
+        depends_on: [case_base]
+        table: {app_token: app_task, table_id: tbl_task}
+        filter_template:
+          field: case_id
+          op: eq
+          value: "{{ steps.case_base.rows[0].fields.case_id }}"
+response: {}
+error: {}
+""",
+    )
+
+    class _CrossQueryTool(_FakeTool):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps({"records": []}, ensure_ascii=False)
+
+    tools = ToolRegistry()
+    search = _CrossQueryTool("bitable_search", {})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_detail case_no=CASE-1"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(search.calls) == 1
+    assert "依赖步骤无结果" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_query_skips_step_when_table_target_missing(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_detail",
+        """
+meta: {id: case_detail, version: "0.1", description: 案件详情}
+params:
+  type: object
+  properties:
+    case_no: {type: string}
+action:
+  kind: query
+  cross_query:
+    steps:
+      - id: case_base
+        table: {app_token: app_case, table_id: tbl_case}
+        filter_template:
+          field: case_no
+          op: contains
+          value: "{{ params.case_no }}"
+      - id: related_tasks
+        table: {alias: case_tasks}
+response: {}
+error: {}
+""",
+    )
+
+    class _CrossQueryTool(_FakeTool):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps({"records": [{"fields": {"case_id": "C-001"}}]}, ensure_ascii=False)
+
+    tools = ToolRegistry()
+    search = _CrossQueryTool("bitable_search", {})
+    tools.register(search)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_tasks:
+    field_aliases:
+      case_id: 项目ID
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_detail case_no=CASE-1"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(search.calls) == 1
+    assert "数据表目标未配置" in result.content
 
 
 @pytest.mark.asyncio
@@ -791,6 +1181,84 @@ error: {}
     assert result.handled is True
     assert "当前提醒 1 条" in result.content
     assert "PayBill" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_guard_blocks_non_reminder_text_but_allows_explicit(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_list",
+        """
+meta: {id: reminder_list, version: "0.1", description: 提醒列表}
+params: {type: object, properties: {}}
+action: {kind: reminder_list}
+response: {}
+error: {}
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        embedding_router=cast(Any, _FixedEmbeddingRouter([("reminder_list", 0.91)])),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders.json"),
+    )
+    session = Session("feishu:chat")
+
+    blocked = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="叫我什么"),
+        session,
+    )
+    assert blocked.handled is False
+
+    explicit = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill reminder_list"),
+        session,
+    )
+    assert explicit.handled is True
+
+
+@pytest.mark.asyncio
+async def test_executor_smalltalk_guard_blocks_embedding_false_positive(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_query",
+        """
+meta: {id: task_query, version: "0.1", description: 查询任务数据}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        embedding_router=cast(Any, _FixedEmbeddingRouter([("task_query", 0.95)])),
+    )
+    session = Session("feishu:chat")
+
+    blocked = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="您能干嘛"),
+        session,
+    )
+    assert blocked.handled is False
+    assert search.calls == []
+
+    routed = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="查任务"),
+        session,
+    )
+    assert routed.handled is True
+    assert len(search.calls) == 1
 
 
 @pytest.mark.asyncio
@@ -1324,3 +1792,130 @@ error: {}
 
     add_calls = [call for call in cron_tool.calls if call.get("action") == "add"]
     assert len(add_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_work_report_extracts_fields_from_natural_language(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "work_report_create",
+        """
+meta:
+  id: work_report_create
+  version: "0.1"
+  description: 工作汇报入表
+  match:
+    regex: "(工作汇报|日报|周报)"
+    keywords: [工作汇报, 日报, 周报]
+params:
+  type: object
+  properties:
+    query: {type: string}
+    report_date: {type: string}
+    project: {type: string}
+    task_summary: {type: string}
+    hours: {type: string}
+    output: {type: string}
+    risk: {type: string}
+action:
+  kind: create
+  nlp_extract:
+    enabled: true
+    source_param: query
+    date_fields: [report_date]
+    field_patterns:
+      report_date:
+        - "(今天|昨日|昨天)"
+      project:
+        - "(?:项目|案件)[:：\\s]*([^，,。；;\\n]+)"
+      hours:
+        - "(?:耗时|工时|时长)[:：\\s]*([0-9]+(?:\\.[0-9]+)?)"
+      output:
+        - "(?:产出|结果|完成)[:：\\s]*([^\\n]+)"
+      risk:
+        - "(?:风险|阻塞|问题)[:：\\s]*([^\\n]+)"
+  args:
+    fields:
+      汇报日期: "{{ params.report_date }}"
+      项目: "{{ params.project }}"
+      工作内容: "{{ params.task_summary }}"
+      耗时小时: "{{ params.hours }}"
+      工作产出: "{{ params.output }}"
+      风险阻塞: "{{ params.risk }}"
+      原始汇报: "{{ params.query }}"
+response:
+  confirm_required: true
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    create_tool = _FakeTool("bitable_create", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "wr1"})
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="今天工作汇报：项目 案件A，事项 起草答辩状，耗时 2.5小时，产出 已提交，风险 等待证据。",
+        ),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(create_tool.calls) == 1
+    fields = create_tool.calls[0]["fields"]
+    assert fields["项目"] == "案件A"
+    assert fields["耗时小时"] == "2.5"
+    assert fields["工作产出"].startswith("已提交")
+    assert fields["风险阻塞"].startswith("等待证据")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(fields["汇报日期"]))
+
+
+@pytest.mark.asyncio
+async def test_executor_reminder_set_infers_due_at_and_text_from_query(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "reminder_set",
+        """
+meta:
+  id: reminder_set
+  version: "0.1"
+  description: 设置提醒
+  match:
+    regex: "(提醒|提醒我)"
+    keywords: [提醒, 提醒我]
+params:
+  type: object
+  properties:
+    query: {type: string}
+    text: {type: string}
+    due_at: {type: string}
+action: {kind: reminder_set}
+response:
+  template: "{{ reminder.text }} @ {{ reminder.due_at }}"
+error: {}
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=ToolRegistry(),
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        reminder_runtime=ReminderRuntime(tmp_path / "reminders-natural.json"),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="提醒我明天9点提交工作汇报"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert "提交工作汇报" in result.content
+    assert re.search(r"\d{4}-\d{2}-\d{2}T09:00:00", result.content)

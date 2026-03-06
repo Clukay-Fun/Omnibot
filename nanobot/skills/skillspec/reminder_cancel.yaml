@@ -5,6 +5,12 @@ meta:
   description: Cancel an existing reminder by id (record-first runtime).
   owner: built_in
   domain: productivity
+  match:
+    regex: "(取消提醒|删除提醒|不再提醒)"
+    keywords:
+      - 取消提醒
+      - 删除提醒
+      - 不再提醒
 params:
   type: object
   required:

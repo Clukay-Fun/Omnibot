@@ -1,4 +1,7 @@
-"""采用 Stream Mode 的 DingTalk/钉钉频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 Stream Mode 的钉钉频道收发实现。
+"""
 
 import asyncio
 import json
@@ -37,12 +40,13 @@ except ImportError:
     ChatbotMessage = None  # type: ignore[assignment,misc]
 
 
-# region [DingTalk SDK 回调处理器]
+#region DingTalk回调处理器
 
 class NanobotDingTalkHandler(CallbackHandler):
-    """
-    标准的 DingTalk Stream SDK 回调处理器。
-    负责解析传入的消息并将它们转发到 Nanobot 频道中。
+    """用处，参数
+
+    功能:
+        - 解析 Stream 回调并转发到频道消息处理。
     """
 
     def __init__(self, channel: "DingTalkChannel"):
@@ -90,18 +94,15 @@ class NanobotDingTalkHandler(CallbackHandler):
             return AckMessage.STATUS_OK, "Error"
 
 
-# endregion
+#endregion
 
-# region [DingTalk 频道核心类]
+#region DingTalk频道核心类
 
 class DingTalkChannel(BaseChannel):
-    """
-    基于 Stream Mode 的 DingTalk 频道。
+    """用处，参数
 
-    使用 WebSocket 接收事件通过 `dingtalk-stream` SDK 实现。
-    通过直接调用 HTTP API 来发送消息 (SDK 仅被用作主要接收手段)。
-
-    注意: 当前仅支持私聊 (1:1)。接收群组消息后，回复内容仍将通过私聊发送给发送者。
+    功能:
+        - 管理钉钉事件接入、鉴权与消息发送流程。
     """
 
     name = "dingtalk"
@@ -205,9 +206,19 @@ class DingTalkChannel(BaseChannel):
 
     @staticmethod
     def _is_http_url(value: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 判断字符串是否为 HTTP/HTTPS 地址。
+        """
         return urlparse(value).scheme in ("http", "https")
 
     def _guess_upload_type(self, media_ref: str) -> str:
+        """用处，参数
+
+        功能:
+            - 根据扩展名推断钉钉上传类型。
+        """
         ext = Path(urlparse(media_ref).path).suffix.lower()
         if ext in self._IMAGE_EXTS: return "image"
         if ext in self._AUDIO_EXTS: return "voice"
@@ -215,6 +226,11 @@ class DingTalkChannel(BaseChannel):
         return "file"
 
     def _guess_filename(self, media_ref: str, upload_type: str) -> str:
+        """用处，参数
+
+        功能:
+            - 生成媒体上传时使用的文件名。
+        """
         name = os.path.basename(urlparse(media_ref).path)
         return name or {"image": "image.jpg", "voice": "audio.amr", "video": "video.mp4"}.get(upload_type, "file.bin")
 
@@ -268,6 +284,11 @@ class DingTalkChannel(BaseChannel):
         filename: str,
         content_type: str | None,
     ) -> str | None:
+        """用处，参数
+
+        功能:
+            - 上传媒体并返回可发送的 media_id。
+        """
         if not self._http:
             return None
         url = f"https://oapi.dingtalk.com/media/upload?access_token={token}&type={media_type}"
@@ -302,6 +323,11 @@ class DingTalkChannel(BaseChannel):
         msg_key: str,
         msg_param: dict[str, Any],
     ) -> bool:
+        """用处，参数
+
+        功能:
+            - 调用批量发送接口投递单条消息。
+        """
         if not self._http:
             logger.warning("DingTalk HTTP client not initialized, cannot send")
             return False
@@ -334,6 +360,11 @@ class DingTalkChannel(BaseChannel):
             return False
 
     async def _send_markdown_text(self, token: str, chat_id: str, content: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 发送 Markdown 文本消息。
+        """
         return await self._send_batch_message(
             token,
             chat_id,
@@ -342,6 +373,11 @@ class DingTalkChannel(BaseChannel):
         )
 
     async def _send_media_ref(self, token: str, chat_id: str, media_ref: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 发送媒体引用并按需执行上传回退。
+        """
         media_ref = (media_ref or "").strip()
         if not media_ref:
             return True
@@ -441,4 +477,4 @@ class DingTalkChannel(BaseChannel):
         except Exception as e:
             logger.error("Error publishing DingTalk message: {}", e)
 
-# endregion
+#endregion

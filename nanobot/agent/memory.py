@@ -1,4 +1,7 @@
-"""用于持久化智能体记忆的记忆系统。"""
+"""描述:
+主要功能:
+    - 管理长期记忆与历史日志的读写和整合。
+"""
 
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ if TYPE_CHECKING:
     from nanobot.session.manager import Session
 
 
-# region [工具模式定义]
+#region 工具模式定义
 
 _SAVE_MEMORY_TOOL = [
     {
@@ -43,32 +46,61 @@ _SAVE_MEMORY_TOOL = [
 ]
 
 
-# endregion
+#endregion
 
-# region [记忆存储核心类]
+#region 记忆存储核心类
 
 
 class MemoryStore:
-    """双层记忆：MEMORY.md（长期事实）+ HISTORY.md（可 grep 搜索的日志）。"""
+    """用处，参数
+
+    功能:
+        - 提供记忆文件读写与会话整合能力。
+    """
 
     def __init__(self, workspace: Path):
+        """用处，参数
+
+        功能:
+            - 初始化记忆目录与文件路径。
+        """
         self.memory_dir = ensure_dir(workspace / "memory")
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.history_file = self.memory_dir / "HISTORY.md"
 
     def read_long_term(self) -> str:
+        """用处，参数
+
+        功能:
+            - 读取长期记忆内容。
+        """
         if self.memory_file.exists():
             return self.memory_file.read_text(encoding="utf-8")
         return ""
 
     def write_long_term(self, content: str) -> None:
+        """用处，参数
+
+        功能:
+            - 覆盖写入长期记忆内容。
+        """
         self.memory_file.write_text(content, encoding="utf-8")
 
     def append_history(self, entry: str) -> None:
+        """用处，参数
+
+        功能:
+            - 追加一条历史日志记录。
+        """
         with open(self.history_file, "a", encoding="utf-8") as f:
             f.write(entry.rstrip() + "\n\n")
 
     def get_memory_context(self) -> str:
+        """用处，参数
+
+        功能:
+            - 生成注入提示词的长期记忆片段。
+        """
         long_term = self.read_long_term()
         return f"## Long-term Memory\n{long_term}" if long_term else ""
 
@@ -81,9 +113,10 @@ class MemoryStore:
         archive_all: bool = False,
         memory_window: int = 50,
     ) -> bool:
-        """通过大语言模型（LLM）工具调用，将旧消息整合到 MEMORY.md + HISTORY.md 中。
+        """用处，参数
 
-        成功时返回 True（包括无操作），失败时返回 False。
+        功能:
+            - 调用模型整合旧消息并更新记忆文件。
         """
         if archive_all:
             old_messages = session.messages
@@ -155,4 +188,4 @@ class MemoryStore:
             logger.exception("Memory consolidation failed")
             return False
 
-    # endregion
+#endregion

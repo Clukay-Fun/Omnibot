@@ -120,7 +120,7 @@ class SubagentManager:
 
             if self.feishu_data_config and self.feishu_data_config.enabled:
                 from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-                for tool in build_feishu_data_tools(self.feishu_data_config):
+                for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
                     tools.register(tool)
 
             system_prompt = self._build_subagent_prompt()

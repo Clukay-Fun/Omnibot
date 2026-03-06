@@ -1,7 +1,20 @@
+"""描述:
+主要功能:
+    - 验证输出截断与续传令牌行为。
+"""
+
 from nanobot.agent.skill_runtime.output_guard import ContinuationCache, OutputGuard
 
 
+#region 输出保护测试
+
+
 def test_output_guard_truncates_text_and_recovers_continuation() -> None:
+    """用处，参数
+
+    功能:
+        - 断言文本截断后可用令牌恢复剩余内容。
+    """
     guard = OutputGuard(ContinuationCache(ttl_seconds=60))
 
     result = guard.guard_text("abcdefgh", max_chars=3)
@@ -16,9 +29,19 @@ def test_output_guard_truncates_text_and_recovers_continuation() -> None:
 
 
 def test_output_guard_items_and_expired_continuation() -> None:
+    """用处，参数
+
+    功能:
+        - 断言条目截断后令牌过期不可继续读取。
+    """
     now = {"t": 10.0}
 
     def _now() -> float:
+        """用处，参数
+
+        功能:
+            - 为缓存提供可控的当前时间。
+        """
         return now["t"]
 
     cache = ContinuationCache(ttl_seconds=2, now_fn=_now)
@@ -31,3 +54,6 @@ def test_output_guard_items_and_expired_continuation() -> None:
 
     now["t"] = 20.0
     assert guard.continue_from(result.continuation_token) is None
+
+
+#endregion

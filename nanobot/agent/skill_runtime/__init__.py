@@ -1,4 +1,4 @@
-"""Skill runtime foundations for skillspec v0.1."""
+"""技能运行时模块。"""
 
 from nanobot.agent.skill_runtime.document_pipeline import process_document
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter

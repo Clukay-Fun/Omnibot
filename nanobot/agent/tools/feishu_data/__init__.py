@@ -1,4 +1,4 @@
-"""飞书数据工具包：提供对飞书多维表格和云文档的原生操作能力。"""
+"""飞书数据工具模块。"""
 
 from nanobot.agent.tools.feishu_data.bitable import (
     BitableGetTool,
