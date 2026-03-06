@@ -109,29 +109,33 @@ class SkillSpecExecutor:
         self._route_log_top_k = max(1, int(route_log_top_k))
         self._reminder_runtime = reminder_runtime
         self._jinja_env = Environment(trim_blocks=True, lstrip_blocks=True) if Environment is not None else None
-        self.matcher = SkillSpecMatcher(
-            registry.specs,
-            embedding_router=self._embedding_router,
-            embedding_min_score=self._embedding_min_score,
-            case_query_keywords=tuple(
-                self._runtime_text.routing_list("domain_hints", "case_query_keywords", ["case"])
-            ),
-            case_query_prefixes=tuple(
-                self._runtime_text.routing_list("domain_hints", "case_query_prefixes", [])
-            ),
-            case_query_suffixes=tuple(
-                self._runtime_text.routing_list("domain_hints", "case_query_suffixes", [])
-            ),
-        )
+        self.matcher = self._build_matcher(registry.specs)
         self.param_parser = SkillSpecParamParser()
 
     def reload(self) -> None:
-        self.matcher = SkillSpecMatcher(
-            self.registry.specs,
+        self.matcher = self._build_matcher(self.registry.specs)
+
+    def _build_matcher(self, specs: dict[str, Any]) -> SkillSpecMatcher:
+        return SkillSpecMatcher(
+            specs,
             embedding_router=self._embedding_router,
             embedding_min_score=self._embedding_min_score,
             case_query_keywords=tuple(
                 self._runtime_text.routing_list("domain_hints", "case_query_keywords", ["case"])
+            ),
+            case_query_intent_tokens=tuple(
+                self._runtime_text.routing_list(
+                    "domain_hints",
+                    "case_query_intent_tokens",
+                    ["查", "查询", "搜索", "查找", "看看", "找"],
+                )
+            ),
+            case_query_exclude_tokens=tuple(
+                self._runtime_text.routing_list(
+                    "domain_hints",
+                    "case_query_exclude_tokens",
+                    ["代办", "待办", "清单", "勾选", "卡片", "记一下", "记录"],
+                )
             ),
             case_query_prefixes=tuple(
                 self._runtime_text.routing_list("domain_hints", "case_query_prefixes", [])

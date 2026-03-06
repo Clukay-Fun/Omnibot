@@ -18,6 +18,8 @@ class MatchSelection:
 
 
 class SkillSpecMatcher:
+    _CASE_SEARCH_SPEC_ID = "case_search"
+
     def __init__(
         self,
         specs: dict[str, SkillSpec],
@@ -25,6 +27,8 @@ class SkillSpecMatcher:
         embedding_router: EmbeddingSkillRouter | None = None,
         embedding_min_score: float = 0.15,
         case_query_keywords: tuple[str, ...] | None = None,
+        case_query_intent_tokens: tuple[str, ...] | None = None,
+        case_query_exclude_tokens: tuple[str, ...] | None = None,
         case_query_prefixes: tuple[str, ...] | None = None,
         case_query_suffixes: tuple[str, ...] | None = None,
     ):
@@ -32,6 +36,34 @@ class SkillSpecMatcher:
         self._embedding_router = embedding_router
         self._embedding_min_score = max(0.0, float(embedding_min_score))
         self._case_query_keywords = tuple(case_query_keywords or ("case",))
+        self._case_query_intent_tokens = tuple(
+            case_query_intent_tokens
+            or (
+                "查",
+                "查下",
+                "查一下",
+                "查询",
+                "搜索",
+                "查找",
+                "检索",
+                "看看",
+                "找",
+                "找下",
+                "找一下",
+            )
+        )
+        self._case_query_exclude_tokens = tuple(
+            case_query_exclude_tokens
+            or (
+                "代办",
+                "待办",
+                "清单",
+                "勾选",
+                "卡片",
+                "记一下",
+                "记录",
+            )
+        )
         self._case_query_prefixes = tuple(case_query_prefixes or ())
         self._case_query_suffixes = tuple(case_query_suffixes or ())
 
@@ -55,7 +87,7 @@ class SkillSpecMatcher:
         return self._select_by_keywords(content)
 
     def _select_domain_hint(self, text: str) -> MatchSelection | None:
-        case_skill = "case_search"
+        case_skill = self._CASE_SEARCH_SPEC_ID
         if case_skill in self._specs and self._looks_like_case_query(text):
             return MatchSelection(
                 spec_id=case_skill,
@@ -66,7 +98,17 @@ class SkillSpecMatcher:
 
     def _looks_like_case_query(self, text: str) -> bool:
         lowered = text.lower()
-        return any(keyword and keyword.lower() in lowered for keyword in self._case_query_keywords)
+        if any(token and token.lower() in lowered for token in self._case_query_exclude_tokens):
+            return False
+        has_object = any(keyword and keyword.lower() in lowered for keyword in self._case_query_keywords)
+        if not has_object:
+            return False
+        return any(token and token.lower() in lowered for token in self._case_query_intent_tokens)
+
+    def _allow_case_search_match(self, *, spec_id: str, text: str) -> bool:
+        if spec_id != self._CASE_SEARCH_SPEC_ID:
+            return True
+        return self._looks_like_case_query(text)
 
     def _extract_case_query(self, text: str) -> str:
         segment = re.split(r"[，,。！？!?\n]", text.strip(), maxsplit=1)[0].strip()
@@ -100,6 +142,8 @@ class SkillSpecMatcher:
             if not regex:
                 continue
             if re.search(regex, text, flags=re.IGNORECASE):
+                if not self._allow_case_search_match(spec_id=spec_id, text=text):
+                    continue
                 return MatchSelection(spec_id=spec_id, remainder=text, reason="regex")
         return None
 
@@ -111,6 +155,8 @@ class SkillSpecMatcher:
         best_id: str | None = None
         best_score = 0
         for spec_id, spec in self._specs.items():
+            if not self._allow_case_search_match(spec_id=spec_id, text=text):
+                continue
             score = 0
             description = (spec.meta.description or "").lower()
             for token in tokens:
@@ -146,9 +192,18 @@ class SkillSpecMatcher:
         if not ranked:
             return None
 
-        spec_id, score = ranked[0]
-        if score < self._embedding_min_score:
+        selected: tuple[str, float] | None = None
+        for spec_id, score in ranked:
+            if spec_id not in self._specs:
+                continue
+            if not self._allow_case_search_match(spec_id=spec_id, text=text):
+                continue
+            selected = (spec_id, score)
+            break
+        if selected is None:
             return None
-        if spec_id not in self._specs:
+
+        spec_id, score = selected
+        if score < self._embedding_min_score:
             return None
         return MatchSelection(spec_id=spec_id, remainder=text, reason="embedding", score=float(score))

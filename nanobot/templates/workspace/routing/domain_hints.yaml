@@ -41,6 +41,28 @@ case_query_keywords:
   - 主办律师
   - 委托人
 
+case_query_intent_tokens:
+  - 查
+  - 查下
+  - 查一下
+  - 查询
+  - 搜索
+  - 查找
+  - 检索
+  - 看看
+  - 找
+  - 找下
+  - 找一下
+
+case_query_exclude_tokens:
+  - 代办
+  - 待办
+  - 清单
+  - 勾选
+  - 卡片
+  - 记一下
+  - 记录
+
 case_query_prefixes:
   - 请
   - 帮我

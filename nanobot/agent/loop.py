@@ -91,6 +91,8 @@ class AgentLoop:
         response_template_config: "ResponseTemplateConfig | None" = None,
         skillspec_config: "SkillSpecConfig | None" = None,
         skillspec_embedding_provider_config: "ProviderConfig | None" = None,
+        llm_timeout_seconds: float = 90.0,
+        stage_heartbeat_seconds: float = 15.0,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -117,6 +119,8 @@ class AgentLoop:
         self.exec_config = exec_config or ExecToolConfig()
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
+        self._llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
+        self._stage_heartbeat_seconds = max(0.0, float(stage_heartbeat_seconds))
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
@@ -149,7 +153,7 @@ class AgentLoop:
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
-        self._processing_lock = asyncio.Lock()
+        self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._template_router = TemplateRouter(runtime_text=self._runtime_text)
         self._template_renderer = TemplateRenderer(
             self.response_template_config.max_list_items,
@@ -1095,6 +1099,7 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        session_key: str = "unknown",
     ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
         messages = initial_messages
@@ -1112,6 +1117,30 @@ class AgentLoop:
                 await on_progress(content, **kwargs)
             except TypeError:
                 await on_progress(content)
+
+        def _start_stage_heartbeat(stage: str, started_at: float) -> asyncio.Task[None] | None:
+            if self._stage_heartbeat_seconds <= 0:
+                return None
+
+            async def _heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(self._stage_heartbeat_seconds)
+                    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                    logger.warning(
+                        "Stage {} still running for session {} ({} ms elapsed)",
+                        stage,
+                        session_key,
+                        elapsed_ms,
+                    )
+
+            return asyncio.create_task(_heartbeat())
+
+        async def _stop_stage_heartbeat(task: asyncio.Task[None] | None) -> None:
+            if task is None or task.done():
+                return
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -1157,22 +1186,54 @@ class AgentLoop:
                 answer_placeholder_task = asyncio.create_task(_emit_answer_placeholder())
 
             llm_started = time.perf_counter()
+            llm_heartbeat_task = _start_stage_heartbeat(f"llm:{iteration}", llm_started)
+            response: LLMResponse | None = None
             try:
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=self.tools.get_definitions(),
-                    model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                    reasoning_effort=self.reasoning_effort,
-                    on_delta=_on_delta if on_progress else None,
-                    on_tool_call_name=_on_tool_call_name if on_progress else None,
+                response = await asyncio.wait_for(
+                    self.provider.chat(
+                        messages=messages,
+                        tools=self.tools.get_definitions(),
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        reasoning_effort=self.reasoning_effort,
+                        on_delta=_on_delta if on_progress else None,
+                        on_tool_call_name=_on_tool_call_name if on_progress else None,
+                    ),
+                    timeout=self._llm_timeout_seconds,
                 )
+            except asyncio.TimeoutError:
+                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
+                logger.error(
+                    "LLM stage timed out for session {} after {} ms (limit={}s)",
+                    session_key,
+                    elapsed_ms,
+                    self._llm_timeout_seconds,
+                )
+                final_content = self._runtime_text.prompt_text(
+                    "progress",
+                    "llm_timeout",
+                    "抱歉，这次处理超时了。请重试或把问题拆小一些。",
+                )
+                if on_progress:
+                    await _emit_progress(final_content, phase="answer")
+                timings.append({
+                    "stage": f"llm:{iteration}",
+                    "duration_ms": elapsed_ms,
+                    "timeout": True,
+                })
+                break
             finally:
+                await _stop_stage_heartbeat(llm_heartbeat_task)
                 if answer_placeholder_task and not answer_placeholder_task.done():
                     answer_placeholder_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await answer_placeholder_task
+
+            if response is None:
+                final_content = "Sorry, I encountered an unexpected model response issue."
+                break
+
             timings.append({
                 "stage": f"llm:{iteration}",
                 "duration_ms": int((time.perf_counter() - llm_started) * 1000),
@@ -1221,7 +1282,11 @@ class AgentLoop:
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     tool_started = time.perf_counter()
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    tool_heartbeat_task = _start_stage_heartbeat(f"tool:{tool_call.name}", tool_started)
+                    try:
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    finally:
+                        await _stop_stage_heartbeat(tool_heartbeat_task)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
                     timings.append({
                         "stage": f"tool:{tool_call.name}",
@@ -1305,6 +1370,13 @@ class AgentLoop:
                 self._active_tasks.setdefault(msg.session_key, []).append(task)
                 task.add_done_callback(lambda t, k=msg.session_key: self._active_tasks.get(k, []) and self._active_tasks[k].remove(t) if t in self._active_tasks.get(k, []) else None)
 
+    def _get_session_lock(self, session_key: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_key] = lock
+        return lock
+
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """取消会话的所有活动任务和子代理（subagents）。"""
         tasks = self._active_tasks.pop(msg.session_key, [])
@@ -1322,8 +1394,9 @@ class AgentLoop:
         ))
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """在全局锁下处理一条消息。"""
-        async with self._processing_lock:
+        """在会话级锁下处理一条消息。"""
+        lock = self._get_session_lock(msg.session_key)
+        async with lock:
             try:
                 response = await self._process_message(msg)
                 if response is not None:
@@ -1578,7 +1651,7 @@ class AgentLoop:
                 current_message=msg.content, channel=channel, chat_id=chat_id,
             )
             turn_started = time.perf_counter()
-            final_content, _, all_msgs, timings = await self._run_agent_loop(messages)
+            final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key)
             turn_new = all_msgs[1 + len(history):]
             total_ms = int((time.perf_counter() - turn_started) * 1000)
             final_content = self._render_with_template(
@@ -1729,7 +1802,9 @@ class AgentLoop:
 
         turn_started = time.perf_counter()
         final_content, tools_used, all_msgs, timings = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
+            session_key=key,
         )
 
         if final_content is None:

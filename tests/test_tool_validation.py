@@ -1,6 +1,8 @@
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.filesystem import EditFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 
@@ -106,3 +108,44 @@ def test_exec_extract_absolute_paths_captures_posix_absolute_paths() -> None:
     paths = ExecTool._extract_absolute_paths(cmd)
     assert "/tmp/data.txt" in paths
     assert "/tmp/out.txt" in paths
+
+
+async def test_write_file_redirects_skill_md_to_workspace_skills(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    repo_skill = tmp_path / "repo" / "nanobot" / "skills" / "planner" / "SKILL.md"
+
+    tool = WriteFileTool(workspace=workspace)
+    result = await tool.execute(path=str(repo_skill), content="# planner")
+
+    expected = workspace / "skills" / "planner" / "SKILL.md"
+    assert expected.read_text(encoding="utf-8") == "# planner"
+    assert not repo_skill.exists()
+    assert str(expected) in result
+
+
+async def test_edit_file_copies_builtin_skill_into_workspace_before_edit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    builtin_skill = tmp_path / "repo" / "nanobot" / "skills" / "summarize" / "SKILL.md"
+    builtin_skill.parent.mkdir(parents=True, exist_ok=True)
+    builtin_skill.write_text("line old\n", encoding="utf-8")
+
+    tool = EditFileTool(workspace=workspace)
+    result = await tool.execute(path=str(builtin_skill), old_text="old", new_text="new")
+
+    expected = workspace / "skills" / "summarize" / "SKILL.md"
+    assert expected.read_text(encoding="utf-8") == "line new\n"
+    assert builtin_skill.read_text(encoding="utf-8") == "line old\n"
+    assert str(expected) in result
+
+
+async def test_write_file_keeps_non_skill_paths_unchanged(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    target = workspace / "notes" / "todo.md"
+
+    tool = WriteFileTool(workspace=workspace)
+    await tool.execute(path=str(target), content="todo")
+
+    assert target.read_text(encoding="utf-8") == "todo"
