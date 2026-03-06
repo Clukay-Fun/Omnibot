@@ -1,4 +1,7 @@
-"""SkillSpec runtime executor with query/write routing."""
+"""描述:
+主要功能:
+    - 执行 SkillSpec 的路由匹配、参数解析与动作调度。
+"""
 
 from __future__ import annotations
 
@@ -16,20 +19,28 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     Environment = None  # type: ignore[assignment]
 
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.matcher import MatchSelection, SkillSpecMatcher
 from nanobot.agent.skill_runtime.output_guard import GuardResult, OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
-from nanobot.agent.runtime_texts import RuntimeTextCatalog
+from nanobot.agent.skill_runtime.table_registry import TableRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 
 
+#region 执行器结果模型
+
 @dataclass(slots=True)
 class SkillExecutionResult:
+    """用处，参数
+
+    功能:
+        - 表示一次技能执行后的处理结果。
+    """
     handled: bool
     content: str = ""
     tool_turn: bool = False
@@ -37,7 +48,17 @@ class SkillExecutionResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+#endregion
+
+#region 执行器核心类
+
+
 class SkillSpecExecutor:
+    """用处，参数
+
+    功能:
+        - 负责技能匹配、执行与结果渲染。
+    """
     _SESSION_CONTINUATION_TOKEN = "skillspec_continuation_token"
     _SESSION_CONTINUATION_POLICY = "skillspec_continuation_policy"
     _SESSION_PENDING_WRITES = "skillspec_pending_writes"
@@ -55,6 +76,7 @@ class SkillSpecExecutor:
         route_log_top_k: int = 3,
         reminder_runtime: ReminderRuntime | None = None,
         runtime_text: RuntimeTextCatalog | None = None,
+        table_registry: TableRegistry | None = None,
     ):
         self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
         self._continue_commands = {
@@ -108,6 +130,7 @@ class SkillSpecExecutor:
         self._route_log_enabled = bool(route_log_enabled)
         self._route_log_top_k = max(1, int(route_log_top_k))
         self._reminder_runtime = reminder_runtime
+        self._table_registry = table_registry
         self._jinja_env = Environment(trim_blocks=True, lstrip_blocks=True) if Environment is not None else None
         self.matcher = self._build_matcher(registry.specs)
         self.param_parser = SkillSpecParamParser()
@@ -373,12 +396,65 @@ class SkillSpecExecutor:
             step_id = str(step.get("id", "")).strip()
             if not step_id:
                 continue
+            if not self._cross_query_dependencies_ready(step=step, steps=results):
+                warning = "依赖步骤无结果，已跳过当前查询。"
+                results[step_id] = {
+                    "rows": [],
+                    "raw": {"warning": warning},
+                    "warning": warning,
+                    "skipped": True,
+                }
+                continue
             resolved_step = self._resolve_templates(step, params=params, steps=results, runtime=runtime)
             args = self._build_query_args(resolved_step, params=params, steps=results, runtime=runtime)
+            if not self._cross_query_has_target(args):
+                warning = "数据表目标未配置，已跳过当前查询。"
+                results[step_id] = {
+                    "rows": [],
+                    "raw": {"warning": warning},
+                    "warning": warning,
+                    "skipped": True,
+                }
+                continue
             payload = await self._execute_tool_json("bitable_search", args)
             rows = self._extract_records(payload) or []
-            results[step_id] = {"rows": rows, "raw": payload}
+            step_result: dict[str, Any] = {"rows": rows, "raw": payload}
+            warning = self._extract_tool_warning(payload)
+            if warning:
+                step_result["warning"] = warning
+            error = self._extract_tool_error(payload)
+            if error:
+                step_result["error"] = error
+            results[step_id] = step_result
         return {"steps": results}
+
+    @staticmethod
+    def _cross_query_dependencies_ready(*, step: dict[str, Any], steps: dict[str, Any]) -> bool:
+        depends_on = step.get("depends_on")
+        if not isinstance(depends_on, list) or not depends_on:
+            return True
+        for dep in depends_on:
+            dep_id = str(dep).strip()
+            if not dep_id:
+                continue
+            dep_payload = steps.get(dep_id)
+            if not isinstance(dep_payload, dict):
+                return False
+            rows = dep_payload.get("rows")
+            if not isinstance(rows, list) or not rows:
+                return False
+        return True
+
+    @staticmethod
+    def _cross_query_has_target(args: dict[str, Any]) -> bool:
+        app_token = args.get("app_token")
+        table_id = args.get("table_id")
+        return (
+            isinstance(app_token, str)
+            and bool(app_token.strip())
+            and isinstance(table_id, str)
+            and bool(table_id.strip())
+        )
 
     def _build_query_args(
         self,
@@ -389,14 +465,11 @@ class SkillSpecExecutor:
         runtime: dict[str, Any],
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
+        table_alias: str | None = None
         table = action.get("table")
         if isinstance(table, dict):
-            app_token = table.get("app_token")
-            table_id = table.get("table_id")
-            if app_token:
-                args["app_token"] = app_token
-            if table_id:
-                args["table_id"] = table_id
+            table_args, table_alias = self._resolve_table_args(table)
+            args.update(table_args)
 
         filter_template = action.get("filter_template")
         filters: dict[str, Any] = {}
@@ -404,6 +477,9 @@ class SkillSpecExecutor:
         if isinstance(filter_template, dict):
             resolved = self._resolve_templates(filter_template, params=params, steps=steps, runtime=runtime)
             keyword, filters = self._parse_filter_template(resolved)
+
+        if table_alias and filters and self._table_registry is not None:
+            filters = self._table_registry.map_filters(table_alias, filters)
 
         if keyword is None and not filters:
             query = params.get("query")
@@ -417,6 +493,31 @@ class SkillSpecExecutor:
         if isinstance(params.get("page_size"), int):
             args["limit"] = int(params["page_size"])
         return args
+
+    def _resolve_table_args(self, table: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
+        alias_raw = table.get("alias")
+        if not isinstance(alias_raw, str) or not alias_raw.strip():
+            alias_raw = table.get("table_alias")
+        alias = str(alias_raw).strip() or None
+
+        resolved: dict[str, Any] = {}
+        if alias and self._table_registry is not None:
+            loaded = self._table_registry.resolve_table(alias)
+            if isinstance(loaded, dict):
+                resolved = loaded
+
+        app_token = table.get("app_token") or resolved.get("app_token")
+        table_id = table.get("table_id") or resolved.get("table_id")
+        view_id = table.get("view_id") or resolved.get("view_id")
+
+        args: dict[str, Any] = {}
+        if isinstance(app_token, str) and app_token.strip():
+            args["app_token"] = app_token.strip()
+        if isinstance(table_id, str) and table_id.strip():
+            args["table_id"] = table_id.strip()
+        if isinstance(view_id, str) and view_id.strip():
+            args["view_id"] = view_id.strip()
+        return args, alias
 
     async def _run_write_dry_run(
         self,
@@ -910,6 +1011,15 @@ class SkillSpecExecutor:
                 return str(error)
         return None
 
+    @staticmethod
+    def _extract_tool_warning(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        warning = payload.get("warning")
+        if warning in (None, ""):
+            return None
+        return str(warning)
+
     async def _handle_write_confirmation(self, msg: InboundMessage, session: Any) -> SkillExecutionResult | None:
         pending = self._pending_writes(session)
         if not pending:
@@ -1004,12 +1114,11 @@ class SkillSpecExecutor:
         runtime: dict[str, Any],
     ) -> dict[str, Any]:
         args: dict[str, Any] = {}
+        table_alias: str | None = None
         table = action.get("table")
         if isinstance(table, dict):
-            if table.get("app_token"):
-                args["app_token"] = table["app_token"]
-            if table.get("table_id"):
-                args["table_id"] = table["table_id"]
+            table_args, table_alias = self._resolve_table_args(table)
+            args.update(table_args)
 
         base_args = action.get("args")
         if isinstance(base_args, dict):
@@ -1017,6 +1126,8 @@ class SkillSpecExecutor:
         args.update(params)
         fields = args.get("fields")
         if isinstance(fields, dict):
+            if table_alias and self._table_registry is not None:
+                fields = self._table_registry.map_fields(table_alias, fields)
             args["fields"] = {
                 key: value
                 for key, value in fields.items()
@@ -1239,8 +1350,15 @@ class SkillSpecExecutor:
             lines: list[str] = []
             for step_id, step_data in payload["steps"].items():
                 rows = step_data.get("rows") if isinstance(step_data, dict) else []
+                error = step_data.get("error") if isinstance(step_data, dict) else None
+                warning = step_data.get("warning") if isinstance(step_data, dict) else None
                 if isinstance(rows, list):
-                    lines.append(f"[{step_id}] 命中 {len(rows)} 条")
+                    summary = f"[{step_id}] 命中 {len(rows)} 条"
+                    if error not in (None, ""):
+                        summary += f"（错误：{error}）"
+                    elif warning not in (None, ""):
+                        summary += f"（提示：{warning}）"
+                    lines.append(summary)
                     for row in rows[:3]:
                         lines.append(self._stringify_row(row))
             return lines or not_found_message
@@ -1687,3 +1805,6 @@ class SkillSpecExecutor:
     def _pending_writes(self, session: Any) -> dict[str, dict[str, Any]]:
         raw = session.metadata.get(self._SESSION_PENDING_WRITES)
         return dict(raw) if isinstance(raw, dict) else {}
+
+
+#endregion

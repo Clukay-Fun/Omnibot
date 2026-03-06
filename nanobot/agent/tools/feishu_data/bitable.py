@@ -3,6 +3,8 @@
 import asyncio
 import json
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -70,6 +72,20 @@ class BitableSearchTool(Tool):
         if not keyword:
             return True
         return any(self._is_value_match(v, keyword) for v in fields.values())
+
+    @staticmethod
+    def _is_target_not_found_error(error: FeishuDataAPIError) -> bool:
+        """识别飞书返回的 NOTEXIST 类错误（常见于表不存在或未授权）。"""
+        if int(getattr(error, "code", 0) or 0) == 91402:
+            return True
+        message = str(getattr(error, "message", "") or "").upper()
+        if "NOTEXIST" in message:
+            return True
+        detail = getattr(error, "detail", None)
+        if isinstance(detail, dict):
+            detail_msg = str(detail.get("msg") or "").upper()
+            return "NOTEXIST" in detail_msg
+        return False
 
     @staticmethod
     def _normalize_filter_operator(op: str) -> str:
@@ -273,40 +289,56 @@ class BitableSearchTool(Tool):
                 "total": response.get("data", {}).get("total", len(normalized)),
             }
         except FeishuDataAPIError as e:
-            if e.code != 1254018:
-                logger.error(f"Bitable search API error (table={table_id}): {e}")
-                return {"table_id": table_id, "records": [], "total": 0, "error": str(e)}
-
-            logger.warning(
-                f"Bitable search filter failed (table={table_id}): {e}. Falling back to non-filtered search."
-            )
-            try:
-                fallback_payload = payload.copy()
-                fallback_payload.pop("filter", None)
-                fallback_page_size = max(page_size, self._fallback_scan_page_size)
-                response = await self.client.request(
-                    "POST",
-                    path,
-                    params={"page_size": fallback_page_size},
-                    json_body=fallback_payload,
+            if e.code == 1254018:
+                logger.warning(
+                    f"Bitable search filter failed (table={table_id}): {e}. Falling back to non-filtered search."
                 )
-                items = response.get("data", {}).get("items", [])
-                normalized = self._normalize_records(
-                    items=items,
-                    app_token=app_token,
-                    table_id=table_id,
-                    keyword=keyword,
-                    searchable_fields=[],
+                try:
+                    fallback_payload = payload.copy()
+                    fallback_payload.pop("filter", None)
+                    fallback_page_size = max(page_size, self._fallback_scan_page_size)
+                    response = await self.client.request(
+                        "POST",
+                        path,
+                        params={"page_size": fallback_page_size},
+                        json_body=fallback_payload,
+                    )
+                    items = response.get("data", {}).get("items", [])
+                    normalized = self._normalize_records(
+                        items=items,
+                        app_token=app_token,
+                        table_id=table_id,
+                        keyword=keyword,
+                        searchable_fields=[],
+                    )
+                    return {
+                        "table_id": table_id,
+                        "records": normalized[:page_size],
+                        "total": len(normalized),
+                        "warning": "部分搜索字段不存在，已回退到全量匹配模式。",
+                    }
+                except Exception as ex:
+                    logger.error(f"Fallback search failed (table={table_id}): {ex}")
+                    return {"table_id": table_id, "records": [], "total": 0, "error": str(ex)}
+
+            if self._is_target_not_found_error(e):
+                hint = "目标数据表不存在或未授权，请检查 table_registry.yaml 中的 app_token/table_id 配置。"
+                logger.warning(
+                    "Bitable target missing (table={} app={}): {}",
+                    table_id,
+                    app_token,
+                    e,
                 )
                 return {
                     "table_id": table_id,
-                    "records": normalized[:page_size],
-                    "total": len(normalized),
-                    "warning": "部分搜索字段不存在，已回退到全量匹配模式。",
+                    "records": [],
+                    "total": 0,
+                    "error": hint,
+                    "error_code": e.code,
                 }
-            except Exception as ex:
-                logger.error(f"Fallback search failed (table={table_id}): {ex}")
-                return {"table_id": table_id, "records": [], "total": 0, "error": str(ex)}
+
+            logger.error(f"Bitable search API error (table={table_id}): {e}")
+            return {"table_id": table_id, "records": [], "total": 0, "error": str(e)}
         except Exception as e:
             logger.error(f"Bitable search failed (table={table_id}): {e}")
             return {"table_id": table_id, "records": [], "total": 0, "error": str(e)}
@@ -529,6 +561,198 @@ class BitableListTablesTool(Tool):
             return json.dumps(payload, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e), "tables": []}, ensure_ascii=False)
+
+
+class BitableListFieldsTool(Tool):
+    """列出飞书多维表格指定数据表的字段定义。"""
+
+    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
+        self.config = config
+        self.client = client
+        cache_cfg = self.config.cache
+        self._field_cache = TTLCache[str, dict[str, Any]](
+            ttl_seconds=cache_cfg.table_schema_ttl_seconds if cache_cfg.enabled else 0,
+            max_entries=cache_cfg.max_entries,
+        )
+
+    @property
+    def name(self) -> str:
+        return "bitable_list_fields"
+
+    @property
+    def description(self) -> str:
+        return "List field schema for a Feishu Bitable table."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "app_token": {
+                    "type": "string",
+                    "description": "Bitable App Token. Defaults to config.",
+                },
+                "table_id": {
+                    "type": "string",
+                    "description": "Table ID. Defaults to config.",
+                },
+            },
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
+        table_id = kwargs.get("table_id") or self.config.bitable.default_table_id
+        if not app_token or not table_id:
+            return json.dumps(
+                {
+                    "error": "Missing app_token or table_id.",
+                    "fields": [],
+                },
+                ensure_ascii=False,
+            )
+
+        cache_key = f"fields:{app_token}:{table_id}"
+        cached = self._field_cache.get(cache_key)
+        if cached is not None:
+            return json.dumps(cached, ensure_ascii=False)
+
+        path = FeishuEndpoints.bitable_fields(app_token, table_id)
+        try:
+            response = await self.client.request("GET", path)
+            items = response.get("data", {}).get("items", [])
+            fields = [self._serialize_field(item) for item in items if isinstance(item, dict)]
+            payload = {
+                "app_token": app_token,
+                "table_id": table_id,
+                "fields": fields,
+                "total": len(fields),
+            }
+            self._field_cache.set(cache_key, payload)
+            return json.dumps(payload, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps(
+                {
+                    "error": str(e),
+                    "app_token": app_token,
+                    "table_id": table_id,
+                    "fields": [],
+                },
+                ensure_ascii=False,
+            )
+
+    @staticmethod
+    def _serialize_field(field: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "field_id": field.get("field_id") or field.get("id"),
+            "field_name": field.get("field_name") or field.get("name") or "",
+            "type": field.get("type"),
+            "property": field.get("property") if isinstance(field.get("property"), dict) else {},
+        }
+
+
+class BitableSyncSchemaTool(Tool):
+    """拉取多维表格 schema 快照并可落盘到 workspace。"""
+
+    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient, workspace: Path | None = None):
+        self.config = config
+        self.client = client
+        self._workspace = workspace
+        self._snapshot_path = (workspace / "skills" / "table_schema_snapshot.json") if workspace else None
+
+    @property
+    def name(self) -> str:
+        return "bitable_sync_schema"
+
+    @property
+    def description(self) -> str:
+        return "Sync Feishu Bitable table and field schema snapshot."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "app_token": {
+                    "type": "string",
+                    "description": "Bitable App Token. Defaults to config.",
+                },
+                "table_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional table IDs to sync. Defaults to all tables in app.",
+                },
+            },
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
+        if not app_token:
+            return json.dumps({"error": "Missing app_token.", "tables": []}, ensure_ascii=False)
+
+        table_name_map: dict[str, str] = {}
+        selected_table_ids = kwargs.get("table_ids")
+        target_table_ids = [
+            str(item).strip()
+            for item in selected_table_ids
+            if isinstance(item, str) and str(item).strip()
+        ] if isinstance(selected_table_ids, list) else []
+
+        try:
+            table_response = await self.client.request("GET", FeishuEndpoints.bitable_tables(app_token))
+            table_items = table_response.get("data", {}).get("items", [])
+            for item in table_items:
+                if not isinstance(item, dict):
+                    continue
+                table_id = str(item.get("table_id") or "").strip()
+                if not table_id:
+                    continue
+                table_name_map[table_id] = str(item.get("name") or "")
+            if not target_table_ids:
+                target_table_ids = list(table_name_map.keys())
+        except Exception as e:
+            if not target_table_ids:
+                return json.dumps({"error": str(e), "tables": []}, ensure_ascii=False)
+
+        tables_payload: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for table_id in target_table_ids:
+            try:
+                response = await self.client.request("GET", FeishuEndpoints.bitable_fields(app_token, table_id))
+                raw_fields = response.get("data", {}).get("items", [])
+                fields = [
+                    BitableListFieldsTool._serialize_field(item)
+                    for item in raw_fields
+                    if isinstance(item, dict)
+                ]
+                tables_payload.append(
+                    {
+                        "table_id": table_id,
+                        "name": table_name_map.get(table_id, ""),
+                        "fields": fields,
+                        "field_count": len(fields),
+                    }
+                )
+            except Exception as e:
+                errors.append({"table_id": table_id, "error": str(e)})
+
+        payload: dict[str, Any] = {
+            "app_token": app_token,
+            "synced_at": datetime.now(UTC).isoformat(),
+            "tables": tables_payload,
+            "total_tables": len(tables_payload),
+        }
+        if errors:
+            payload["errors"] = errors
+
+        if self._snapshot_path is not None:
+            try:
+                self._snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                self._snapshot_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                payload["saved_to"] = str(self._snapshot_path)
+            except Exception as e:
+                payload["save_error"] = str(e)
+
+        return json.dumps(payload, ensure_ascii=False)
 
 
 class BitableGetTool(Tool):

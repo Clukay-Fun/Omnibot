@@ -1,4 +1,7 @@
-"""Deterministic skillspec matcher and selector."""
+"""描述:
+主要功能:
+    - 根据规则与向量回退策略选择目标技能。
+"""
 
 from __future__ import annotations
 
@@ -9,15 +12,34 @@ from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 
 
+#region 匹配模型层
+
 @dataclass(slots=True)
 class MatchSelection:
+    """
+    用处: 反馈分析器最终敲定的单一决策面。
+
+    功能:
+        - 携带命中技能 ID 及其所依据的原因。
+        - 剥余除去关键字外的纯参数内容，为后向逻辑补提供残余查询段。
+    """
     spec_id: str
     remainder: str
     reason: str
     score: float | None = None
 
+#endregion
+
+#region 匹配器实现层
 
 class SkillSpecMatcher:
+    """
+    用处: 主导语言与配置间的双向桥接定位工作。
+
+    功能:
+        - 内嵌了面向特定诸如 `case_search` 的查询专用清洗词典。
+        - 根据阶梯级的选择规则逐次降级匹配出目标触发动作。
+    """
     _CASE_SEARCH_SPEC_ID = "case_search"
 
     def __init__(
@@ -32,6 +54,12 @@ class SkillSpecMatcher:
         case_query_prefixes: tuple[str, ...] | None = None,
         case_query_suffixes: tuple[str, ...] | None = None,
     ):
+        """
+        用处: 注射核心字典及特定场景下的清洗分词数组支持。参数 specs: 全量的配置。
+
+        功能:
+            - 初始化向量路由和内置检索相关的专用词根、意图、规避词数组。
+        """
         self._specs = specs
         self._embedding_router = embedding_router
         self._embedding_min_score = max(0.0, float(embedding_min_score))
@@ -68,6 +96,12 @@ class SkillSpecMatcher:
         self._case_query_suffixes = tuple(case_query_suffixes or ())
 
     def select(self, text: str) -> MatchSelection | None:
+        """
+        用处: 主入口防爆分流总函数。参数 text: 客户端用户输入的完整指令。
+
+        功能:
+            - 依次串联通过强制直通、垂直域探测、精准正则匹配以及通用文本嵌入路由四大阶段进行排查并锁定技能。
+        """
         content = text.strip()
         if not content:
             return None
@@ -87,6 +121,12 @@ class SkillSpecMatcher:
         return self._select_by_keywords(content)
 
     def _select_domain_hint(self, text: str) -> MatchSelection | None:
+        """
+        用处: 根据专有名词指涉来预判是否走固定垂直检索技能。参数 text: 用户下发字符串样本。
+
+        功能:
+            - 针对硬编码的搜索能力预判文本结构以决定应否跳过耗时深层次比对直接派发。
+        """
         case_skill = self._CASE_SEARCH_SPEC_ID
         if case_skill in self._specs and self._looks_like_case_query(text):
             return MatchSelection(
@@ -97,6 +137,12 @@ class SkillSpecMatcher:
         return None
 
     def _looks_like_case_query(self, text: str) -> bool:
+        """
+        用处: 意图初判断探测器。参数 text: 用户查询句。
+
+        功能:
+            - 在遇到拦截意图或没触发特征字时剔除干扰，并深度诊断残余串是否携带搜索必要关键位。
+        """
         lowered = text.lower()
         if any(token and token.lower() in lowered for token in self._case_query_exclude_tokens):
             return False
@@ -109,6 +155,12 @@ class SkillSpecMatcher:
         return self._has_meaningful_case_query(text)
 
     def _has_meaningful_case_query(self, text: str) -> bool:
+        """
+        用处: 清污探源诊断是否具有实在意义的搜索请求。参数 text: 输入段。
+
+        功能:
+            - 将预设定指令去除再排除空值等干扰，若为空表明没有实质参数则折返否定结果。
+        """
         extracted = self._extract_case_query(text)
         if not extracted:
             return False
@@ -121,11 +173,23 @@ class SkillSpecMatcher:
         return bool(normalized)
 
     def _allow_case_search_match(self, *, spec_id: str, text: str) -> bool:
+        """
+        用处: 防范泛听导致专有检索误开启的守门器。参数 spec_id: 处理候选名，text: 交互文案。
+
+        功能:
+            - 判断候选的是否属于限制级检索分支并对其实行更严酷的表观预校验。
+        """
         if spec_id != self._CASE_SEARCH_SPEC_ID:
             return True
         return self._looks_like_case_query(text)
 
     def _extract_case_query(self, text: str) -> str:
+        """
+        用处: 分离洗刷核心意途搜索条件。参数 text: 原始数据。
+
+        功能:
+            - 根据字典在句首和句尾剔除类似"帮忙查找"、"的数据"等修饰残渣，精辟提炼中心字块。
+        """
         segment = re.split(r"[，,。！？!?\n]", text.strip(), maxsplit=1)[0].strip()
         if self._case_query_prefixes:
             prefix_pattern = "|".join(re.escape(token) for token in self._case_query_prefixes if token)
@@ -139,6 +203,12 @@ class SkillSpecMatcher:
         return segment
 
     def _select_explicit(self, text: str) -> MatchSelection | None:
+        """
+        用处: 精准明确的长串指令（类似硬链接触发方式）捕手。参数 text: 聊天串。
+
+        功能:
+            - 解析带有 /skill 开首的调试/特定强触发形态语句直接映射命中。
+        """
         match = re.match(r"^/skill\s+([a-zA-Z0-9_\-]+)\s*(.*)$", text, re.IGNORECASE)
         if not match:
             return None
@@ -148,6 +218,12 @@ class SkillSpecMatcher:
         return MatchSelection(spec_id=spec_id, remainder=match.group(2).strip(), reason="explicit")
 
     def _select_regex(self, text: str) -> MatchSelection | None:
+        """
+        用处: 根据自定义正则表达式阵列来探索技能库。参数 text: 人工文案。
+
+        功能:
+            - 遍历在规格档案内设定的正则表达式条件只要符合就产生挂靠绑定。
+        """
         for spec_id, spec in self._specs.items():
             regex = None
             if spec.meta.match and spec.meta.match.regex:
@@ -163,6 +239,12 @@ class SkillSpecMatcher:
         return None
 
     def _select_by_keywords(self, text: str) -> MatchSelection | None:
+        """
+        用处: 散列关键字权值计分系统来进行粗筛评判器。参数 text: 清理后的用户字音。
+
+        功能:
+            - 依据名字、配置内声明的关键锚点甚至是说明文本的囊括程度进行分制积分战，得胜者晋级，反之呼唤后备。
+        """
         tokens = {token for token in re.findall(r"[\w\u4e00-\u9fff]+", text.lower()) if token}
         if not tokens:
             return self._select_by_embedding(text)
@@ -201,6 +283,12 @@ class SkillSpecMatcher:
         return self._select_by_embedding(text)
 
     def _select_by_embedding(self, text: str) -> MatchSelection | None:
+        """
+        用处: 当所有字符特征探索均落败后启用的高维智能路由。参数 text: 无特征文本。
+
+        功能:
+            - 交涉底层向量引擎取得各任务技能逼近系数排行榜，取及格线以上最相符项。
+        """
         if not self._embedding_router:
             return None
         ranked = self._embedding_router.rank(text, self._specs)
@@ -222,3 +310,5 @@ class SkillSpecMatcher:
         if score < self._embedding_min_score:
             return None
         return MatchSelection(spec_id=spec_id, remainder=text, reason="embedding", score=float(score))
+
+#endregion

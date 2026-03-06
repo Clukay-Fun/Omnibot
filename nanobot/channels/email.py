@@ -1,4 +1,7 @@
-"""基于 IMAP 轮询和 SMTP 回复机制的 Email 频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 IMAP/SMTP 的邮件收发频道实现。
+"""
 
 import asyncio
 import html
@@ -22,18 +25,13 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import EmailConfig
 
 
-# region [Email 频道核心类]
+#region Email频道核心类
 
 class EmailChannel(BaseChannel):
-    """
-    Email 频道。
+    """用处，参数
 
-    接收端 (Inbound):
-    - 轮询 IMAP 邮箱收集未读邮件。
-    - 将每封邮件转换为传入事件。
-
-    发送端 (Outbound):
-    - 借助 SMTP 协议将回复通过原发送地址发回。
+    功能:
+        - 轮询邮件并转发为入站消息，同时支持 SMTP 回复。
     """
 
     name = "email"
@@ -153,6 +151,11 @@ class EmailChannel(BaseChannel):
             raise
 
     def _validate_config(self) -> bool:
+        """用处，参数
+
+        功能:
+            - 校验邮件通道所需配置项是否完整。
+        """
         missing = []
         if not self.config.imap_host:
             missing.append("imap_host")
@@ -173,6 +176,11 @@ class EmailChannel(BaseChannel):
         return True
 
     def _smtp_send(self, msg: EmailMessage) -> None:
+        """用处，参数
+
+        功能:
+            - 按配置通过 SMTP 或 SMTP_SSL 发送邮件。
+        """
         timeout = 30
         if self.config.smtp_use_ssl:
             with smtplib.SMTP_SSL(
@@ -331,6 +339,11 @@ class EmailChannel(BaseChannel):
 
     @staticmethod
     def _extract_message_bytes(fetched: list[Any]) -> bytes | None:
+        """用处，参数
+
+        功能:
+            - 从 IMAP fetch 结果中提取原始邮件字节。
+        """
         for item in fetched:
             if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
                 return bytes(item[1])
@@ -338,6 +351,11 @@ class EmailChannel(BaseChannel):
 
     @staticmethod
     def _extract_uid(fetched: list[Any]) -> str:
+        """用处，参数
+
+        功能:
+            - 从 IMAP fetch 响应头中解析 UID。
+        """
         for item in fetched:
             if isinstance(item, tuple) and item and isinstance(item[0], (bytes, bytearray)):
                 head = bytes(item[0]).decode("utf-8", errors="ignore")
@@ -348,6 +366,11 @@ class EmailChannel(BaseChannel):
 
     @staticmethod
     def _decode_header_value(value: str) -> str:
+        """用处，参数
+
+        功能:
+            - 解码 MIME 头字段为可读字符串。
+        """
         if not value:
             return ""
         try:
@@ -403,10 +426,15 @@ class EmailChannel(BaseChannel):
         return html.unescape(text)
 
     def _reply_subject(self, base_subject: str) -> str:
+        """用处，参数
+
+        功能:
+            - 生成回复邮件主题并处理前缀。
+        """
         subject = (base_subject or "").strip() or "nanobot reply"
         prefix = self.config.subject_prefix or "Re: "
         if subject.lower().startswith("re:"):
             return subject
         return f"{prefix}{subject}"
 
-# endregion
+#endregion

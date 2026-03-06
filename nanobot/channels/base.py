@@ -1,4 +1,7 @@
-"""聊天平台的频道基类接口。"""
+"""描述:
+主要功能:
+    - 定义频道实现的统一抽象接口。
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any
@@ -9,24 +12,22 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
 
-# region [频道基类]
+#region 频道基类
 
 class BaseChannel(ABC):
-    """
-    聊天频道实现的抽象基类。
-    
-    每一个频道（Telegram、Discord 等）都应实现此接口，以便与 nanobot 消息总线集成。
+    """用处，参数
+
+    功能:
+        - 约束各频道的启动、停止、发送与入站处理行为。
     """
     
     name: str = "base"
     
     def __init__(self, config: Any, bus: MessageBus):
-        """
-        初始化频道。
-        
-        参数:
-            config: 特定频道的配置。
-            bus: 用于通信的消息总线。
+        """用处，参数
+
+        功能:
+            - 保存配置与消息总线并初始化运行状态。
         """
         self.config = config
         self.bus = bus
@@ -34,40 +35,36 @@ class BaseChannel(ABC):
     
     @abstractmethod
     async def start(self) -> None:
-        """
-        启动频道并开始监听消息。
-        
-        这应当是一个长时间运行的异步任务，它会：
-        1. 连接到聊天平台
-        2. 监听传入消息
-        3. 通过 _handle_message() 将消息转发至总线
+        """用处，参数
+
+        功能:
+            - 启动频道连接并进入消息监听循环。
         """
         pass
     
     @abstractmethod
     async def stop(self) -> None:
-        """停止频道并清理资源。"""
+        """用处，参数
+
+        功能:
+            - 停止频道并释放连接资源。
+        """
         pass
     
     @abstractmethod
     async def send(self, msg: OutboundMessage) -> None:
-        """
-        通过此频道发送消息。
-        
-        参数:
-            msg: 要发送的消息。
+        """用处，参数
+
+        功能:
+            - 将外发消息投递到具体平台。
         """
         pass
     
     def is_allowed(self, sender_id: str) -> bool:
-        """
-        检查发送者是否具有使用该机器人的权限。
-        
-        参数:
-            sender_id: 发送者的标识符。
-        
-        返回:
-            如果拥有权限则返回 True，否则返回 False。
+        """用处，参数
+
+        功能:
+            - 根据 allow_list 规则判断发送者是否可用。
         """
         allow_list = getattr(self.config, "allow_from", [])
         
@@ -93,18 +90,10 @@ class BaseChannel(ABC):
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
     ) -> None:
-        """
-        处理来自聊天平台的传入消息。
-        
-        该方法会检查权限并将消息转发给总线。
-        
-        参数:
-            sender_id: 发送者的标识符。
-            chat_id: 聊天/频道的标识符。
-            content: 消息纯文本内容。
-            media: 可选的媒体资源 URL 列表。
-            metadata: 可选的频道特定元数据。
-            session_key: 可选的会话 Key 覆盖（例如用于基于帖子的会话）。
+        """用处，参数
+
+        功能:
+            - 校验权限并把入站消息写入总线。
         """
         if not self.is_allowed(sender_id):
             logger.warning(
@@ -128,7 +117,11 @@ class BaseChannel(ABC):
     
     @property
     def is_running(self) -> bool:
-        """检查频道是否正在运行。"""
+        """用处，参数
+
+        功能:
+            - 返回频道当前运行状态。
+        """
         return self._running
 
-# endregion
+#endregion

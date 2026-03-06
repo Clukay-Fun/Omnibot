@@ -1,4 +1,7 @@
-"""基于 lark-oapi SDK 且使用 WebSocket 长连接的 Feishu/Lark 频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 lark-oapi 的 Feishu/Lark 频道收发实现。
+"""
 
 import asyncio
 import json
@@ -420,7 +423,7 @@ def _extract_post_text(content_json: dict) -> str:
     return text
 
 
-# region [Feishu 频道核心类]
+#region Feishu频道核心类
 
 class FeishuChannel(BaseChannel):
     """
@@ -2034,4 +2037,4 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error("Error processing Feishu message: {}", e)
 
-# endregion
+#endregion

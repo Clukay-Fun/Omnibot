@@ -1,1 +1,1 @@
-"""CLI module for nanobot."""
+"""命令行入口模块。"""

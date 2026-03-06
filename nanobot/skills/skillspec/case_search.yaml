@@ -47,7 +47,8 @@ params:
 action:
   kind: query
   data_source: bitable
-  table: {}
+  table:
+    alias: case_registry
   select_fields:
     - case_id
     - case_no
@@ -60,8 +61,7 @@ action:
   filter_template:
     op: and
     conditions:
-      - field: title
-        op: contains
+      - op: contains
         value: "{{ params.query }}"
       - field: status
         op: eq

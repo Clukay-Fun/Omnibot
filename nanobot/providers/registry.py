@@ -1,13 +1,6 @@
-"""
-Provider Registry — single source of truth for LLM provider metadata.
-
-Adding a new provider:
-  1. Add a ProviderSpec to PROVIDERS below.
-  2. Add a field to ProvidersConfig in config/schema.py.
-  Done. Env vars, prefixing, config matching, status display all derive from here.
-
-Order matters — it controls match priority and fallback. Gateways first.
-Every entry writes out all fields so you can copy-paste as a template.
+"""描述:
+主要功能:
+    - 维护模型提供方元数据及匹配查询入口。
 """
 
 from __future__ import annotations
@@ -16,13 +9,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
+#region 提供方元数据
+
 @dataclass(frozen=True)
 class ProviderSpec:
-    """One LLM provider's metadata. See PROVIDERS below for real examples.
+    """用处，参数
 
-    Placeholders in env_extras values:
-      {api_key}  — the user's API key
-      {api_base} — api_base from config, or this spec's default_api_base
+    功能:
+        - 定义单个提供方的匹配和路由元信息。
     """
 
     # identity
@@ -62,12 +56,22 @@ class ProviderSpec:
 
     @property
     def label(self) -> str:
+        """用处，参数
+
+        功能:
+            - 返回用于展示的提供方标签。
+        """
         return self.display_name or self.name.title()
+
+
+#endregion
 
 
 # ---------------------------------------------------------------------------
 # PROVIDERS — the registry. Order = priority. Copy any entry as template.
 # ---------------------------------------------------------------------------
+
+#region 提供方注册表
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
 
@@ -399,13 +403,21 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 )
 
 
+#endregion
+
+
 # ---------------------------------------------------------------------------
 # Lookup helpers
 # ---------------------------------------------------------------------------
 
+#region 查询函数
+
 def find_by_model(model: str) -> ProviderSpec | None:
-    """Match a standard provider by model-name keyword (case-insensitive).
-    Skips gateways/local — those are matched by api_key/api_base instead."""
+    """用处，参数
+
+    功能:
+        - 按模型名称匹配标准提供方。
+    """
     model_lower = model.lower()
     model_normalized = model_lower.replace("-", "_")
     model_prefix = model_lower.split("/", 1)[0] if "/" in model_lower else ""
@@ -428,15 +440,10 @@ def find_gateway(
     api_key: str | None = None,
     api_base: str | None = None,
 ) -> ProviderSpec | None:
-    """Detect gateway/local provider.
+    """用处，参数
 
-    Priority:
-      1. provider_name — if it maps to a gateway/local spec, use it directly.
-      2. api_key prefix — e.g. "sk-or-" → OpenRouter.
-      3. api_base keyword — e.g. "aihubmix" in URL → AiHubMix.
-
-    A standard provider with a custom api_base (e.g. DeepSeek behind a proxy)
-    will NOT be mistaken for vLLM — the old fallback is gone.
+    功能:
+        - 按 provider_name、api_key、api_base 识别网关或本地提供方。
     """
     # 1. Direct match by config key
     if provider_name:
@@ -455,8 +462,15 @@ def find_gateway(
 
 
 def find_by_name(name: str) -> ProviderSpec | None:
-    """Find a provider spec by config field name, e.g. "dashscope"."""
+    """用处，参数
+
+    功能:
+        - 按名称查找提供方配置项。
+    """
     for spec in PROVIDERS:
         if spec.name == name:
             return spec
     return None
+
+
+#endregion

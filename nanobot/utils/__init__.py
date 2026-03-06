@@ -1,4 +1,4 @@
-"""Utility functions for nanobot."""
+"""通用工具模块。"""
 
 from nanobot.utils.helpers import ensure_dir, get_workspace_path, get_data_path
 

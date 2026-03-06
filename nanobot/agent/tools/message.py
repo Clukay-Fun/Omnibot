@@ -1,4 +1,7 @@
-"""用于向用户发送消息的消息工具。"""
+"""描述:
+主要功能:
+    - 提供向外部频道发送消息的工具能力。
+"""
 
 from typing import Any, Awaitable, Callable
 
@@ -6,10 +9,14 @@ from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
 
 
-# region [消息发送工具]
+#region 消息发送工具
 
 class MessageTool(Tool):
-    """向聊天频道上的用户发送消息的工具。"""
+    """用处，参数
+
+    功能:
+        - 封装消息发送流程并管理轮次发送状态。
+    """
 
     def __init__(
         self,
@@ -18,6 +25,11 @@ class MessageTool(Tool):
         default_chat_id: str = "",
         default_message_id: str | None = None,
     ):
+        """用处，参数
+
+        功能:
+            - 初始化默认发送上下文与回调。
+        """
         self._send_callback = send_callback
         self._default_channel = default_channel
         self._default_chat_id = default_chat_id
@@ -25,29 +37,56 @@ class MessageTool(Tool):
         self._sent_in_turn: bool = False
 
     def set_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
-        """设置当前的消息上下文。"""
+        """用处，参数
+
+        功能:
+            - 更新当前轮次默认发送目标。
+        """
         self._default_channel = channel
         self._default_chat_id = chat_id
         self._default_message_id = message_id
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
-        """设置发送消息的回调函数。"""
+        """用处，参数
+
+        功能:
+            - 注入实际的消息发送实现。
+        """
         self._send_callback = callback
 
     def start_turn(self) -> None:
-        """重置每一轮的发送跟踪状态。"""
+        """用处，参数
+
+        功能:
+            - 在新轮次开始时重置发送标记。
+        """
         self._sent_in_turn = False
 
     @property
     def name(self) -> str:
+        """用处，参数
+
+        功能:
+            - 返回工具注册名称。
+        """
         return "message"
 
     @property
     def description(self) -> str:
+        """用处，参数
+
+        功能:
+            - 返回工具功能说明。
+        """
         return "向用户发送一条消息。当你需要交流某些内容时使用它。"
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """用处，参数
+
+        功能:
+            - 定义工具入参 schema。
+        """
         return {
             "type": "object",
             "properties": {
@@ -81,6 +120,11 @@ class MessageTool(Tool):
         media: list[str] | None = None,
         **kwargs: Any
     ) -> str:
+        """用处，参数
+
+        功能:
+            - 组装外发消息并通过回调发送。
+        """
         channel = channel or self._default_channel
         chat_id = chat_id or self._default_chat_id
         message_id = message_id or self._default_message_id
@@ -110,4 +154,4 @@ class MessageTool(Tool):
         except Exception as e:
             return f"Error sending message: {str(e)}"
 
-# endregion
+#endregion

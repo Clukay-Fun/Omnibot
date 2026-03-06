@@ -71,6 +71,13 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     except Exception:
         pass
 
+    try:
+        table_registry_tpl = pkg_files("nanobot") / "skills" / "table_registry.yaml"
+        if table_registry_tpl.is_file():
+            _write(table_registry_tpl, workspace / "skills" / "table_registry.yaml")
+    except Exception:
+        pass
+
     (workspace / "skills").mkdir(exist_ok=True)
     bootstrap_workspace_dirs(workspace)
 

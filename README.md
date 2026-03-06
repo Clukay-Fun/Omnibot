@@ -1,6 +1,6 @@
 # nanobot
 
-## Feishu single-card streaming configuration (Card 2.0 default)
+Feishu single-card streaming configuration (Card 2.0 default)
 
 Feishu channel reuses one Card 2.0 interactive card for progress updates (`metadata._progress == true`) and final response updates.
 
@@ -44,6 +44,7 @@ channels:
 ```
 
 Notes:
+
 - `stream_card_enabled`: master switch for single-card progress updates.
 - `react_enabled`: enable/disable emoji reaction on inbound user messages (default `false`).
 - `reply_to_message`: use `im.v1.message.reply` when source `message_id` is available.
@@ -131,6 +132,7 @@ providers:
 ```
 
 Notes:
+
 - `embedding_enabled=false` keeps lexical-only behavior (runtime-compatible default).
 - `embedding_min_score` gates low-confidence embedding routes; low-score candidates fall back to the normal LLM loop.
 - If SiliconFlow embedding config is missing or provider calls fail, router falls back to lexical scoring.
@@ -153,6 +155,14 @@ Notes:
   - primary reminder write always lands first in local store
   - bridge failures/unavailable states are returned under `bridges.*.status`
   - legacy `calendar` status from reminder runtime remains backward compatible
+
+## Feishu table aliases and schema audit
+
+- Built-in SkillSpec table aliases are defined in `nanobot/skills/table_registry.yaml`.
+- Runtime override location is `~/.nanobot/workspace/skills/table_registry.yaml` (same alias keys, workspace value wins).
+- This avoids hardcoding app/table IDs directly in skillspec files and makes table migration safer.
+- Use `bitable_sync_schema` to fetch current tables + fields and persist a snapshot to `~/.nanobot/workspace/skills/table_schema_snapshot.json` for review.
+- Use `bitable_list_fields` to inspect one table quickly before adjusting field aliases.
 
 ## CI and release gates
 

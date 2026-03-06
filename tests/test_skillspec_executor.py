@@ -11,6 +11,7 @@ from nanobot.agent.skill_runtime.output_guard import OutputGuard
 from nanobot.agent.skill_runtime.param_parser import SkillSpecParamParser
 from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skill_runtime.reminder_runtime import ReminderRuntime
+from nanobot.agent.skill_runtime.table_registry import TableRegistry
 from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
@@ -97,6 +98,12 @@ def _build_registry(tmp_path: Path, spec_name: str, spec_yaml: str) -> SkillSpec
     registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=builtin)
     registry.load()
     return registry
+
+
+def _build_table_registry(tmp_path: Path, payload: str) -> TableRegistry:
+    path = tmp_path / "table_registry.yaml"
+    _write_yaml(path, payload)
+    return TableRegistry(workspace=tmp_path / "workspace", builtin_path=path)
 
 
 def test_matcher_prefers_explicit_then_regex_then_keywords(tmp_path: Path) -> None:
@@ -370,6 +377,125 @@ error: {}
 
 
 @pytest.mark.asyncio
+async def test_executor_resolves_table_alias_and_filter_field_alias(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_query",
+        """
+meta: {id: case_query, version: "0.1", description: 案件查询}
+params:
+  type: object
+  properties:
+    query: {type: string}
+action:
+  kind: query
+  table: {alias: case_registry}
+  filter_template:
+    field: title
+    op: contains
+    value: "{{ params.query }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    search = _FakeTool("bitable_search", {"records": []})
+    tools.register(search)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_registry:
+    app_token: app_case
+    table_id: tbl_case
+    field_aliases:
+      title: 案号
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_query 纳川旧四案"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert search.calls[0]["app_token"] == "app_case"
+    assert search.calls[0]["table_id"] == "tbl_case"
+    assert search.calls[0]["filters"]["conditions"][0]["field_name"] == "案号"
+
+
+@pytest.mark.asyncio
+async def test_executor_resolves_table_alias_for_write_fields(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "task_update",
+        """
+meta: {id: task_update, version: "0.1", description: 更新任务}
+params:
+  type: object
+  properties:
+    record_id: {type: string}
+    owner: {type: string}
+action:
+  kind: update
+  table: {alias: case_tasks}
+  args:
+    record_id: "{{ params.record_id }}"
+    fields:
+      owner: "{{ params.owner }}"
+response: {}
+error: {}
+""",
+    )
+    tools = ToolRegistry()
+    update_tool = _FakeTool("bitable_update", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tokA"})
+    tools.register(update_tool)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_tasks:
+    app_token: app_task
+    table_id: tbl_task
+    field_aliases:
+      owner: 主办律师
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(
+            channel="feishu",
+            sender_id="u1",
+            chat_id="chat",
+            content="/skill task_update record_id=r1 owner=刘达",
+        ),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    call = update_tool.calls[0]
+    assert call["app_token"] == "app_task"
+    assert call["table_id"] == "tbl_task"
+    assert call["fields"]["主办律师"] == "刘达"
+
+
+@pytest.mark.asyncio
 async def test_executor_cross_query_interpolates_previous_step(tmp_path: Path) -> None:
     registry = _build_registry(
         tmp_path,
@@ -435,6 +561,128 @@ error: {}
     assert second_filters["conditions"][0]["field_name"] == "case_id"
     assert second_filters["conditions"][0]["operator"] == "eq"
     assert second_filters["conditions"][0]["value"] == "C-001"
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_query_skips_step_when_dependency_has_no_rows(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_detail",
+        """
+meta: {id: case_detail, version: "0.1", description: 案件详情}
+params:
+  type: object
+  properties:
+    case_no: {type: string}
+action:
+  kind: query
+  cross_query:
+    steps:
+      - id: case_base
+        table: {app_token: app_case, table_id: tbl_case}
+        filter_template:
+          field: case_no
+          op: contains
+          value: "{{ params.case_no }}"
+      - id: related_tasks
+        depends_on: [case_base]
+        table: {app_token: app_task, table_id: tbl_task}
+        filter_template:
+          field: case_id
+          op: eq
+          value: "{{ steps.case_base.rows[0].fields.case_id }}"
+response: {}
+error: {}
+""",
+    )
+
+    class _CrossQueryTool(_FakeTool):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps({"records": []}, ensure_ascii=False)
+
+    tools = ToolRegistry()
+    search = _CrossQueryTool("bitable_search", {})
+    tools.register(search)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_detail case_no=CASE-1"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(search.calls) == 1
+    assert "依赖步骤无结果" in result.content
+
+
+@pytest.mark.asyncio
+async def test_executor_cross_query_skips_step_when_table_target_missing(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "case_detail",
+        """
+meta: {id: case_detail, version: "0.1", description: 案件详情}
+params:
+  type: object
+  properties:
+    case_no: {type: string}
+action:
+  kind: query
+  cross_query:
+    steps:
+      - id: case_base
+        table: {app_token: app_case, table_id: tbl_case}
+        filter_template:
+          field: case_no
+          op: contains
+          value: "{{ params.case_no }}"
+      - id: related_tasks
+        table: {alias: case_tasks}
+response: {}
+error: {}
+""",
+    )
+
+    class _CrossQueryTool(_FakeTool):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps({"records": [{"fields": {"case_id": "C-001"}}]}, ensure_ascii=False)
+
+    tools = ToolRegistry()
+    search = _CrossQueryTool("bitable_search", {})
+    tools.register(search)
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  case_tasks:
+    field_aliases:
+      case_id: 项目ID
+""",
+    )
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill case_detail case_no=CASE-1"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert len(search.calls) == 1
+    assert "数据表目标未配置" in result.content
 
 
 @pytest.mark.asyncio

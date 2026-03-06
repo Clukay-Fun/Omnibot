@@ -1,13 +1,22 @@
-"""Base LLM provider interface."""
+"""描述:
+主要功能:
+    - 定义模型提供方的统一响应结构与抽象接口。
+"""
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 
+#region 响应数据结构
+
 @dataclass
 class ToolCallRequest:
-    """A tool call request from the LLM."""
+    """用处，参数
+
+    功能:
+        - 表示模型返回的单次工具调用请求。
+    """
     id: str
     name: str
     arguments: dict[str, Any]
@@ -15,7 +24,11 @@ class ToolCallRequest:
 
 @dataclass
 class LLMResponse:
-    """Response from an LLM provider."""
+    """用处，参数
+
+    功能:
+        - 封装模型回复文本、工具调用和用量信息。
+    """
     content: str | None
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
@@ -25,28 +38,41 @@ class LLMResponse:
     
     @property
     def has_tool_calls(self) -> bool:
-        """Check if response contains tool calls."""
+        """用处，参数
+
+        功能:
+            - 判断响应中是否包含工具调用。
+        """
         return len(self.tool_calls) > 0
 
 
+#endregion
+
+#region 提供方抽象接口
+
+
 class LLMProvider(ABC):
-    """
-    Abstract base class for LLM providers.
-    
-    Implementations should handle the specifics of each provider's API
-    while maintaining a consistent interface.
+    """用处，参数
+
+    功能:
+        - 约束不同模型提供方的公共行为。
     """
     
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
+        """用处，参数
+
+        功能:
+            - 保存提供方鉴权与地址配置。
+        """
         self.api_key = api_key
         self.api_base = api_base
 
     @staticmethod
     def _sanitize_empty_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Replace empty text content that causes provider 400 errors.
+        """用处，参数
 
-        Empty content can appear when MCP tools return nothing. Most providers
-        reject empty-string content or empty text blocks in list content.
+        功能:
+            - 清洗空内容消息，避免部分提供方返回 400。
         """
         result: list[dict[str, Any]] = []
         for msg in messages:
@@ -93,24 +119,21 @@ class LLMProvider(ABC):
         on_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_name: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        """
-        Send a chat completion request.
-        
-        Args:
-            messages: List of message dicts with 'role' and 'content'.
-            tools: Optional list of tool definitions.
-            model: Model identifier (provider-specific).
-            max_tokens: Maximum tokens in response.
-            temperature: Sampling temperature.
-            on_delta: Optional callback for streamed answer text chunks.
-            on_tool_call_name: Optional callback when a streamed tool name is recognized.
-        
-        Returns:
-            LLMResponse with content and/or tool calls.
+        """用处，参数
+
+        功能:
+            - 发送对话请求并返回统一响应对象。
         """
         pass
     
     @abstractmethod
     def get_default_model(self) -> str:
-        """Get the default model for this provider."""
+        """用处，参数
+
+        功能:
+            - 返回当前提供方默认模型标识。
+        """
         pass
+
+
+#endregion

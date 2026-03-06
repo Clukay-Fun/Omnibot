@@ -1,4 +1,7 @@
-"""采用 Discord Gateway Websocket 实现的 Discord 通讯频道。"""
+"""描述:
+主要功能:
+    - 提供基于 Discord Gateway 的频道收发实现。
+"""
 
 import asyncio
 import json
@@ -20,10 +23,14 @@ MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
 MAX_MESSAGE_LEN = 2000  # Discord 单条消息的字符数限制
 
 
-# region [工具与辅助方法]
+#region 辅助方法
 
 def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
-    """将文本内容拆分为符合 max_len 长度限制的片段组，并优先在换行处断行。"""
+    """用处，参数
+
+    功能:
+        - 按长度上限拆分消息并优先在换行处断开。
+    """
     if not content:
         return []
     if len(content) <= max_len:
@@ -44,16 +51,25 @@ def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
     return chunks
 
 
-# endregion
+#endregion
 
-# region [Discord 频道核心类]
+#region Discord频道核心类
 
 class DiscordChannel(BaseChannel):
-    """基于 Gateway websocket 的 Discord 频道实现。"""
+    """用处，参数
+
+    功能:
+        - 维护 Gateway 连接并处理 Discord 消息收发。
+    """
 
     name = "discord"
 
     def __init__(self, config: DiscordConfig, bus: MessageBus):
+        """用处，参数
+
+        功能:
+            - 初始化连接状态、心跳任务与 HTTP 客户端句柄。
+        """
         super().__init__(config, bus)
         self.config: DiscordConfig = config
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -151,7 +167,11 @@ class DiscordChannel(BaseChannel):
         return False
 
     async def _gateway_loop(self) -> None:
-        """Gateway 中枢循环：负责 IDENTIFY 配置、下发 HEARTBEAT 维持探针信号以及事件拦截处理（Dispatch Events）。"""
+        """用处，参数
+
+        功能:
+            - 驱动网关循环并处理鉴权、心跳与事件分发。
+        """
         if not self._ws:
             return
 
@@ -306,4 +326,4 @@ class DiscordChannel(BaseChannel):
         if task:
             task.cancel()
 
-# endregion
+#endregion

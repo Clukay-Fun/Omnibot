@@ -1,4 +1,7 @@
-"""采用 Socket Mode 的 Slack 频道实现。"""
+"""描述:
+主要功能:
+    - 提供基于 Socket Mode 的 Slack 频道收发实现。
+"""
 
 import asyncio
 import re
@@ -18,10 +21,14 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import SlackConfig
 
 
-# region [Slack 频道核心类]
+#region Slack频道核心类
 
 class SlackChannel(BaseChannel):
-    """运行于 Socket Mode 下的 Slack 交互频道实现基类。"""
+    """用处，参数
+
+    功能:
+        - 处理 Slack 事件接入、过滤与消息发送。
+    """
 
     name = "slack"
 
@@ -202,6 +209,11 @@ class SlackChannel(BaseChannel):
             logger.exception("Error handling Slack message from {}", sender_id)
 
     def _is_allowed(self, sender_id: str, chat_id: str, channel_type: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 按 DM/群组策略判断是否允许处理消息。
+        """
         if channel_type == "im":
             if not self.config.dm.enabled:
                 return False
@@ -215,6 +227,11 @@ class SlackChannel(BaseChannel):
         return True
 
     def _should_respond_in_channel(self, event_type: str, text: str, chat_id: str) -> bool:
+        """用处，参数
+
+        功能:
+            - 根据群组策略判断是否应在频道中回应。
+        """
         if self.config.group_policy == "open":
             return True
         if self.config.group_policy == "mention":
@@ -226,6 +243,11 @@ class SlackChannel(BaseChannel):
         return False
 
     def _strip_bot_mention(self, text: str) -> str:
+        """用处，参数
+
+        功能:
+            - 移除消息中对机器人的提及标记。
+        """
         if not text or not self._bot_user_id:
             return text
         return re.sub(rf"<@{re.escape(self._bot_user_id)}>\s*", "", text).strip()
@@ -281,5 +303,4 @@ class SlackChannel(BaseChannel):
                 rows.append(" · ".join(parts))
         return "\n".join(rows)
 
-# endregion
-
+#endregion

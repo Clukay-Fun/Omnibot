@@ -27,8 +27,7 @@ action:
       - id: case_deadlines
         data_source: bitable
         table:
-          app_token: app_case_mgmt_001
-          table_id: tbl_case_registry_001
+          alias: case_registry
         select_fields:
           - case_id
           - case_no
@@ -49,8 +48,7 @@ action:
       - id: contract_deadlines
         data_source: bitable
         table:
-          app_token: app_contract_ops_001
-          table_id: tbl_contract_registry_001
+          alias: contract_registry
         select_fields:
           - contract_id
           - case_id

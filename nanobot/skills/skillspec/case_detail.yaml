@@ -31,7 +31,8 @@ action:
     steps:
       - id: case_base
         data_source: bitable
-        table: {}
+        table:
+          alias: case_registry
         select_fields:
           - case_id
           - case_no
@@ -49,7 +50,8 @@ action:
         depends_on:
           - case_base
         data_source: bitable
-        table: {}
+        table:
+          alias: case_tasks
         select_fields:
           - task_id
           - case_id
@@ -74,7 +76,8 @@ action:
         depends_on:
           - case_base
         data_source: bitable
-        table: {}
+        table:
+          alias: contract_registry
         select_fields:
           - contract_id
           - case_id

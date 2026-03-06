@@ -67,6 +67,7 @@ class AgentLoop:
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
+    _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
 
     # region [初始化与配置]
 
@@ -186,6 +187,8 @@ class AgentLoop:
         if not self.skillspec_config.enabled:
             return
 
+        from nanobot.agent.skill_runtime.table_registry import TableRegistry
+
         workspace_root = self.workspace / "skillspec"
         if not self.skillspec_config.workspace_override_enabled:
             workspace_root = self.workspace / "__skillspec_disabled__"
@@ -211,6 +214,7 @@ class AgentLoop:
             route_log_top_k=self.skillspec_config.route_log_top_k,
             reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
             runtime_text=self._runtime_text,
+            table_registry=TableRegistry(workspace=self.workspace),
         )
 
         if self.skillspec_config.startup_report_enabled:
@@ -934,7 +938,7 @@ class AgentLoop:
 
         if self.feishu_data_config and self.feishu_data_config.enabled:
             from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-            for tool in build_feishu_data_tools(self.feishu_data_config):
+            for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
                 self.tools.register(tool)
 
     # endregion
@@ -1067,6 +1071,13 @@ class AgentLoop:
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
         if not content:
+            return raw_content
+        if len(content) > self._SKILLSPEC_RENDER_MAX_INPUT_CHARS:
+            logger.info(
+                "Skillspec LLM render skipped for {} due to large payload ({} chars)",
+                msg.session_key,
+                len(content),
+            )
             return raw_content
 
         primary_prompt = (

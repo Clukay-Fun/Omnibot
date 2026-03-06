@@ -1,4 +1,7 @@
-"""Telegram channel implementation using python-telegram-bot."""
+"""描述:
+主要功能:
+    - 提供基于 python-telegram-bot 的 Telegram 频道实现。
+"""
 
 from __future__ import annotations
 
@@ -15,9 +18,13 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import TelegramConfig
 
 
+#region Telegram辅助方法
+
 def _markdown_to_telegram_html(text: str) -> str:
-    """
-    Convert markdown to Telegram-safe HTML.
+    """用处，参数
+
+    功能:
+        - 将 Markdown 转换为 Telegram 可接受的 HTML。
     """
     if not text:
         return ""
@@ -79,7 +86,11 @@ def _markdown_to_telegram_html(text: str) -> str:
 
 
 def _split_message(content: str, max_len: int = 4000) -> list[str]:
-    """Split content into chunks within max_len, preferring line breaks."""
+    """用处，参数
+
+    功能:
+        - 按长度限制拆分消息并优先在换行处分段。
+    """
     if len(content) <= max_len:
         return [content]
     chunks: list[str] = []
@@ -98,11 +109,15 @@ def _split_message(content: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
+#endregion
+
+#region Telegram频道核心类
+
 class TelegramChannel(BaseChannel):
-    """
-    Telegram channel using long polling.
-    
-    Simple and reliable - no webhook/public IP needed.
+    """用处，参数
+
+    功能:
+        - 使用长轮询模式处理 Telegram 消息收发。
     """
     
     name = "telegram"
@@ -131,7 +146,11 @@ class TelegramChannel(BaseChannel):
         self._media_group_tasks: dict[str, asyncio.Task] = {}
     
     async def start(self) -> None:
-        """Start the Telegram bot with long polling."""
+        """用处，参数
+
+        功能:
+            - 以长轮询模式启动 Telegram 机器人。
+        """
         if not self.config.token:
             logger.error("Telegram bot token not configured")
             return
@@ -187,7 +206,11 @@ class TelegramChannel(BaseChannel):
             await asyncio.sleep(1)
     
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
+        """用处，参数
+
+        功能:
+            - 停止机器人并清理任务状态。
+        """
         self._running = False
         
         # Cancel all typing indicators
@@ -208,7 +231,11 @@ class TelegramChannel(BaseChannel):
     
     @staticmethod
     def _get_media_type(path: str) -> str:
-        """Guess media type from file extension."""
+        """用处，参数
+
+        功能:
+            - 根据文件扩展名判断媒体类型。
+        """
         ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
         if ext in ("jpg", "jpeg", "png", "gif", "webp"):
             return "photo"
@@ -219,7 +246,11 @@ class TelegramChannel(BaseChannel):
         return "document"
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Telegram."""
+        """用处，参数
+
+        功能:
+            - 发送文本与媒体消息到 Telegram 聊天。
+        """
         if not self._app:
             logger.warning("Telegram bot not running")
             return
@@ -289,7 +320,11 @@ class TelegramChannel(BaseChannel):
                         logger.error("Error sending Telegram message: {}", e2)
     
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /start command."""
+        """用处，参数
+
+        功能:
+            - 处理 `/start` 命令并返回欢迎信息。
+        """
         if not update.message or not update.effective_user:
             return
 
@@ -301,7 +336,11 @@ class TelegramChannel(BaseChannel):
         )
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /help command, bypassing ACL so all users can access it."""
+        """用处，参数
+
+        功能:
+            - 处理 `/help` 命令并输出可用指令列表。
+        """
         if not update.message:
             return
         await update.message.reply_text(
@@ -313,12 +352,20 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     def _sender_id(user) -> str:
-        """Build sender_id with username for allowlist matching."""
+        """用处，参数
+
+        功能:
+            - 构建可用于白名单匹配的发送者标识。
+        """
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
 
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forward slash commands to the bus for unified handling in AgentLoop."""
+        """用处，参数
+
+        功能:
+            - 将斜杠命令转发到总线统一处理。
+        """
         if not update.message or not update.effective_user:
             return
         await self._handle_message(
@@ -328,7 +375,11 @@ class TelegramChannel(BaseChannel):
         )
     
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming messages (text, photos, voice, documents)."""
+        """用处，参数
+
+        功能:
+            - 处理文本与多媒体入站消息并转发总线。
+        """
         if not update.message or not update.effective_user:
             return
         
@@ -448,7 +499,11 @@ class TelegramChannel(BaseChannel):
         )
     
     async def _flush_media_group(self, key: str) -> None:
-        """Wait briefly, then forward buffered media-group as one turn."""
+        """用处，参数
+
+        功能:
+            - 短暂缓冲后合并转发同一媒体组消息。
+        """
         try:
             await asyncio.sleep(0.6)
             if not (buf := self._media_group_buffers.pop(key, None)):
@@ -463,19 +518,31 @@ class TelegramChannel(BaseChannel):
             self._media_group_tasks.pop(key, None)
 
     def _start_typing(self, chat_id: str) -> None:
-        """Start sending 'typing...' indicator for a chat."""
+        """用处，参数
+
+        功能:
+            - 启动指定聊天的输入中提示任务。
+        """
         # Cancel any existing typing task for this chat
         self._stop_typing(chat_id)
         self._typing_tasks[chat_id] = asyncio.create_task(self._typing_loop(chat_id))
     
     def _stop_typing(self, chat_id: str) -> None:
-        """Stop the typing indicator for a chat."""
+        """用处，参数
+
+        功能:
+            - 停止指定聊天的输入中提示任务。
+        """
         task = self._typing_tasks.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
     
     async def _typing_loop(self, chat_id: str) -> None:
-        """Repeatedly send 'typing' action until cancelled."""
+        """用处，参数
+
+        功能:
+            - 循环发送 typing 状态直到任务取消。
+        """
         try:
             while self._app:
                 await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
@@ -486,11 +553,19 @@ class TelegramChannel(BaseChannel):
             logger.debug("Typing indicator stopped for {}: {}", chat_id, e)
     
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log polling / handler errors instead of silently swallowing them."""
+        """用处，参数
+
+        功能:
+            - 记录轮询与处理回调中的异常信息。
+        """
         logger.error("Telegram error: {}", context.error)
 
     def _get_extension(self, media_type: str, mime_type: str | None) -> str:
-        """Get file extension based on media type."""
+        """用处，参数
+
+        功能:
+            - 根据媒体类型与 MIME 获取文件扩展名。
+        """
         if mime_type:
             ext_map = {
                 "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
@@ -501,3 +576,6 @@ class TelegramChannel(BaseChannel):
         
         type_map = {"image": ".jpg", "voice": ".ogg", "audio": ".mp3", "file": ""}
         return type_map.get(media_type, "")
+
+
+#endregion
