@@ -59,8 +59,15 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     for item in tpl.iterdir():
         if item.name.endswith(".md"):
             _write(item, workspace / item.name)
+    _write(tpl / "memory" / "MEMORY.md", workspace / "MEMORY.md")
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
+    try:
+        feishu_tpl = tpl / "feishu" / "bitable_rules.yaml"
+        if feishu_tpl.is_file():
+            _write(feishu_tpl, workspace / "feishu" / "bitable_rules.yaml")
+    except Exception:
+        pass
 
     try:
         extract_tpl = pkg_files("nanobot") / "skills" / "extract_templates"
@@ -92,7 +99,11 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     """Create runtime directories required by current features."""
     ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
+    ensure_dir(workspace / "memory" / "feishu" / "users")
+    ensure_dir(workspace / "memory" / "feishu" / "chats")
+    ensure_dir(workspace / "memory" / "feishu" / "threads")
     ensure_dir(workspace / "extract")
+    ensure_dir(workspace / "feishu")
     for legacy_dir in ("prompts", "routing", "templates"):
         target = workspace / legacy_dir
         if target.exists():

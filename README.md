@@ -1,171 +1,96 @@
-# nanobot
+# Omnibot
 
-Feishu single-card streaming configuration (Card 2.0 default)
+**Omnibot**（基于 [nanobot](https://github.com/HKUDS/nanobot)）是专为**飞书 (Feishu / Lark) 场景深度定制**的个人 AI 助理框架。
 
-Feishu channel reuses one Card 2.0 interactive card for progress updates (`metadata._progress == true`) and final response updates.
+它保留了 nanobot 轻量级、无状态、多模型接入的优秀底层架构，并在此基础上进行了大量的飞书原生能力增强与交互重构，让你能够在飞书中获得流畅、深入的智能助理体验。
 
-Add these fields under `channels.feishu`:
+## 🌟 核心定制特性
+
+- **深度集成的飞书流式卡片 (Card 2.0)**：独家实现单卡片平滑流式输出，支持结构化展现“思考过程”（可折叠）与最终回答，彻底告别消息刷屏。
+- **飞书多维表格 (Bitable) 原生直连**：内置完整的多维表格 CRUD 工具，通过自然语言即可直接检索、新增、修改、删除你的 Bitable 业务数据，支持两阶段防呆确认。
+- **智能化群聊与上下文管控**：
+  - 完美支持飞书话题（Thread）和话题群模式，自动维持话题内的独立上下文流。
+  - 支持飞书富文本帖子、图片、合并转发卡片的解析与理解。
+  - 细粒度的群聊唤醒门控（全开、仅@、关闭），并支持特定管理员指令强行穿透。
+- **SkillSpec 大模型前置路由系统**：
+  - 摒弃了僵化的关键字匹配，重构为基于大语言模型原生 Tool Calling 的意图识别路由机制。
+  - 将业务拆解为简单的声明式 YAML (`skillspec`)，即可低代码扩展专属于你的飞书业务数据查询与提醒技能。
+- **无感知的飞书新用户引导**：内置友好的 `/setup` 引导流程，以交互式卡片的形式一键完成团队与角色配置。
+
+---
+
+## ⚙️ 飞书通道配置 (channels.feishu)
+
+在 `~/.nanobot/config.json` 中配置飞书通道：
 
 ```yaml
 channels:
   feishu:
     enabled: true
-    app_id: "cli_xxx"
-    app_secret: "xxx"
-    react_enabled: false
-    reply_to_message: true
-    reply_in_thread: false
+    app_id: "cli_xxx"         # 飞书自建应用 App ID
+    app_secret: "xxx"         # 飞书自建应用 App Secret
+    react_enabled: false      # 是否自动回复表情反馈 (收到/处理中)
+    reply_to_message: true    # 是否使用引用回复
+    reply_in_thread: false    # 默认是否在 Thread 中回复（话题群会自动强制启用）
 
-    # Single-card streaming
+    # 🚀 流式互动卡片 (Card 2.0)
     stream_card_enabled: true
-    stream_card_min_update_ms: 120
-    stream_card_ttl_seconds: 600
-    stream_card_print_frequency_ms: 50
-    stream_card_print_step: 2
-    stream_card_print_strategy: fast
-    stream_card_summary: ""
-    stream_card_header_title: ""
-    stream_card_show_thinking: true
-    stream_answer_warmup_chars: 24
-    stream_answer_warmup_ms: 300
+    stream_card_min_update_ms: 120        # 卡片更新防抖间隔
+    stream_card_print_frequency_ms: 50    # 打字机效果步进间隔
+    stream_card_print_step: 2             # 打字机效果每次步进字符数
+    stream_card_show_thinking: true       # 是否在卡片中展示思考过程块
 
-    # Activation gate
-    activation_private_policy: always
-    activation_group_policy: mention
-    activation_topic_policy: always
-    activation_admin_open_ids: []
-    activation_admin_prefix_bypass: "/bot"
-
-    # Onboarding（新用户引导）
-    onboarding_enabled: true
-    onboarding_reentry_commands: ["/setup", "重新设置"]
-    onboarding_role_options: ["律师", "助理", "实习生"]
-    onboarding_team_options: ["诉讼组", "合同组", "招投标组", "综合组"]
+    # 🛡️ 群聊与权限门控
+    activation_private_policy: always     # 私聊响应策略
+    activation_group_policy: mention      # 群聊响应策略（推荐 mention 仅@回复）
+    activation_topic_policy: always       # 话题响应策略
+    activation_admin_open_ids: []         # 特权管理员的 Open ID 列表
+    activation_admin_prefix_bypass: "/bot" # 管理员强行越权响应的前缀
 ```
 
-Notes:
+> **流式最佳实践**：推荐配置 `stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120` 和 `stream_card_print_frequency_ms=50` 以获得最丝滑的视觉体验。
 
-- `stream_card_enabled`: master switch for single-card progress updates.
-- `react_enabled`: enable/disable emoji reaction on inbound user messages (default `false`).
-- `reply_to_message`: use `im.v1.message.reply` when source `message_id` is available.
-- `reply_in_thread`: default `reply_in_thread` behavior when using `im.v1.message.reply`.
-  Set to `false` for in-chat direct replies; thread messages and `/session new` can still force thread replies.
-- `stream_card_min_update_ms`: throttle interval between progress updates for the same interaction.
-- `stream_card_ttl_seconds`: TTL for stale stream states to avoid unbounded in-memory growth.
-- `stream_card_print_frequency_ms` / `stream_card_print_step` / `stream_card_print_strategy`: Card 2.0 streaming typing effect controls.
-- `stream_card_summary`: Card 2.0 summary shown in chat preview.
-- `stream_card_header_title`: Card 2.0 header title; empty string means no header title.
-- `stream_card_show_thinking`: show/hide thinking section in the streaming card.
-- `stream_answer_warmup_chars` / `stream_answer_warmup_ms`: first answer streaming trigger threshold (lower values start earlier, reducing first-screen large chunk).
-- `activation_private_policy` / `activation_group_policy` / `activation_topic_policy`: inbound activation policy (`always`, `mention`, `off`). Default policy is private always, group mention, topic always.
-- `activation_admin_open_ids` + `activation_admin_prefix_bypass`: optional bypass when group policy is `mention`; listed admins can trigger processing with a prefix such as `/bot`.
-- `onboarding_enabled`: 是否启用飞书新用户引导流程（2 张卡片 + 1 条引导消息）。
-- `onboarding_reentry_commands`: 重新触发引导的命令，默认支持 `/setup` 与 `重新设置`。
-- `onboarding_role_options` / `onboarding_team_options`: 引导卡片中的职位与团队选项。
-- 群聊 `mention` 门控下，`继续`/`展开` 会被视为上下文续传指令并放行。
-- 推荐平衡配置：`stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120`、`stream_card_print_frequency_ms=50`、`stream_card_print_step=2`。
-- Thinking section uses quoted markdown style for a lighter look; exact font-size values are controlled by Feishu client and are not configurable in this payload mode.
-- Runtime path is Card 2.0 first (`id_convert` + `card_element.content` update). The same card maintains a subtle quoted thinking block and an answer block.
-- Feishu Card 2.0 streaming payload does not accept custom `action` elements in this mode.
-- If `stream_card_show_thinking=false`, progress messages like “正在思考中” / “思考完成” are suppressed in Feishu cards.
-- For update failures, the channel falls back to `im.v1.message.update/patch`; if that also fails, it sends a new card to avoid losing output.
+## 🛠️ 内置指令 (Commands)
 
-## Built-in commands
+在聊天框发送以下指令控制 Omnibot：
 
 - `/help` 或 `/commands`：显示全部指令与简介。
-- `/new`：归档并清空当前会话。
-- `/stop`：停止当前会话中的进行中任务。
+- `/new`：归档并清空当前会话上下文（重新开始）。
+- `/stop`：紧急停止当前正在执行的耗时任务或长文本流式响应。
 - `/session`：查看会话子命令。
-- `/session new [标题]`：从当前消息创建飞书话题会话（thread），缺省标题为 `会话-YYYYMMDD-HHMM`。
-- `/session list`：列出当前聊天下的会话（主会话 + 话题会话）。
-- `/session del [id|main]`：删除当前或指定会话。
+  - `/session new [标题]`：从当前消息强制创建一个独立处理的飞书话题（Thread）。
+  - `/session list`：列出当前聊天下的所有活跃会话（主会话 + 独立话题）。
+  - `/session del [id|main]`：删除当前或指定会话。
 
-## Built-in skillspec assets
+## 🧩 声明式业务技能 (SkillSpec)
 
-- Built-in query skillspec files are stored in `nanobot/skills/skillspec/`.
-- The current built-in set includes case/task/contract query specs plus deadline overview.
-- Runtime loads skillspec files with this precedence (high to low):
-  - `workspace/skillspec/*.yaml`
-  - `workspace/skillspec/managed/*.yaml`
-  - `nanobot/skills/skillspec/*.yaml`
-- `workspace/skillspec/managed/` is intended for centrally managed specs that should override bundled defaults but still be overridable by local workspace specs.
-- Skillspec `response` supports deterministic rendering knobs for runtime safety:
-  - `template` + `field_mapping` for query output formatting.
-  - `sensitive: true` to mark group replies for private delivery to sender.
-  - `confirm_required` + `confirm_respect_preference` to control write confirmation flow (default remains manual confirm).
+Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将多维表格等业务查询组装为 AI 工具。
 
-## Document pipeline hardening
+- **多层级配置加载**：
+  1. `workspace/skillspec/*.yaml` (最高优先级，用户本地自定义)
+  2. `workspace/skillspec/managed/*.yaml` (次级，集中管理分发)
+  3. `nanobot/skills/skillspec/*.yaml` (内置保底默认规格)
+- **防脱敏抽象层设计**：通过 `table_registry.yaml` 配置真实 `table_id` 和复杂的原始表头别名映射，避免将生产环境真实的表格 ID 和底层中文字段名直接暴露给大模型造成混淆和泄露风险。
+- **混合智能路由**：引入了确定性规则优先（`explicit > regex > keyword`）与大模型自动编排相结合的调度逻辑，并可选开启 Embedding 向量化检索作为超大规模技能池场景下的路由兜底。
 
-- Document pipeline failures now use explicit error categories to improve triage:
-  - `[UNSUPPORTED_FORMAT]`
-  - `[FILE_NOT_FOUND]`
-  - `[LOW_QUALITY_EXTRACTION]`
-  - `[API_TIMEOUT]`
-  - `[API_ERROR]`
-- Extract template precedence is deterministic and override-safe:
-  - bundled defaults: `nanobot/skills/extract_templates/*.yaml`
-  - optional workspace managed layer: `workspace/skillspec/extract/*.yaml`
-  - workspace local override (highest priority): `workspace/extract/*.yaml`
-- Document skills can opt into write-confirm bridge via `action.write_bridge`, reusing existing `确认 <token> / 取消 <token>` pending-write flow.
+## 📅 协同与提醒系统 (Reminder MVP)
 
-## Skillspec embedding router (Phase D)
+提供基于本地状态机确权流转的协同任务机制：
+- 内置 `reminder_set`, `reminder_list`, `reminder_cancel`, `daily_summary` 等基础待办管理集。
+- 提醒数据原生固化持久存储于 `workspace/reminders.json` 以保证重启后依然保持本地精确调度。
+- 支持各种跨系统聚合桥接（Bridge）：
+  - **Record Bridge**: 同步写入进度与内容更新操作至特定 Bitable 归档记录。
+  - **Summary Cron Bridge**: 每日维护汇总统揽的摘要并推送调度更新。 
 
-Optional embedding-assisted ranking can be enabled for skillspec routing fallback. Deterministic rules should still run first.
+## 🛡️ 文档处理引擎加固
 
-Routing priority is fixed and deterministic: `explicit > regex > keyword > embedding`.
+针对飞书文件解析场景，提供了严格的质量控制和错误溯源分类拦截机制：
+- `[UNSUPPORTED_FORMAT]` 不支持的识别格式
+- `[FILE_NOT_FOUND]` 解析请求资源丢失
+- `[LOW_QUALITY_EXTRACTION]` 源文件质量极差或识别内容无有效信息退回
+- `[API_TIMEOUT] / [API_ERROR]` 飞书平台开放接口拥堵和超限报警
 
-```yaml
-agents:
-  skillspec:
-    embedding_enabled: false
-    embedding_top_k: 3
-    embedding_model: "text-embedding-3-small"
-    embedding_timeout_seconds: 10
-    embedding_cache_ttl_seconds: 600
-    embedding_min_score: 0.15
-    route_log_enabled: false
-    route_log_top_k: 3
-providers:
-  siliconflow:
-    api_key: "${SILICONFLOW_API_KEY}"
-    api_base: "https://api.siliconflow.cn/v1" # optional
-```
+## 🚀 部署与发版 (CI & Release)
 
-Notes:
-
-- `embedding_enabled=false` keeps lexical-only behavior (runtime-compatible default).
-- `embedding_min_score` gates low-confidence embedding routes; low-score candidates fall back to the normal LLM loop.
-- If SiliconFlow embedding config is missing or provider calls fail, router falls back to lexical scoring.
-- `embedding_cache_ttl_seconds` applies to both skill index vectors and recent query vectors.
-- `route_log_enabled=true` adds lightweight route diagnostics (`skillspec_route`, optional top-k candidates) to message metadata and debug logs without exposing chain-of-thought to users.
-
-## Reminder MVP
-
-- Built-in reminder skillspec assets:
-  - `reminder_set`
-  - `reminder_list`
-  - `reminder_cancel`
-  - `daily_summary`
-- Reminder data is persisted in `workspace/reminders.json` for deterministic local runtime behavior.
-- Reminder bridges are best-effort and never roll back the persisted reminder record:
-  - `record_bridge` writes reminder snapshots to a record table (prefer `bitable_create`)
-  - `calendar_bridge` optionally creates calendar events when configured and callable
-  - `summary_cron_bridge` can maintain a daily summary cron job (MVP includes add path + simple dedupe)
-- Failure/status signaling:
-  - primary reminder write always lands first in local store
-  - bridge failures/unavailable states are returned under `bridges.*.status`
-  - legacy `calendar` status from reminder runtime remains backward compatible
-
-## Feishu table aliases and schema audit
-
-- Built-in SkillSpec table aliases are defined in `nanobot/skills/table_registry.yaml`.
-- Runtime override location is `~/.nanobot/workspace/skills/table_registry.yaml` (same alias keys, workspace value wins).
-- This avoids hardcoding app/table IDs directly in skillspec files and makes table migration safer.
-- Use `bitable_sync_schema` to fetch current tables + fields and persist a snapshot to `~/.nanobot/workspace/skills/table_schema_snapshot.json` for review.
-- Use `bitable_list_fields` to inspect one table quickly before adjusting field aliases.
-
-## CI and release gates
-
-- GitHub Actions CI is defined in `.github/workflows/ci.yml` and runs lint, tests, and packaging checks.
-- Tag-based release automation is defined in `.github/workflows/release.yml` (build + `twine check` + GitHub Release; optional PyPI publish when `PYPI_API_TOKEN` is configured).
-- Use `RELEASE_CHECKLIST.md` before tagging/publishing to keep release flow consistent.
+- **持续集成**：默认采用 GitHub Actions 建立专门服务于飞书 SDK 交互兼容的 `.github/workflows/ci.yml` 验证环境体系，并启用 Ruff 强制代码风格审查（超过 300+ pytest 并发跑通认证）。
+- **流程规范**：标准化打包分发流经由 `.github/workflows/release.yml` 处理释放流程并投递到 GitHub Release 或 PyPI 以供版本追踪与回退；需严格遵循 `RELEASE_CHECKLIST.md` 内容清单控制发行质量。

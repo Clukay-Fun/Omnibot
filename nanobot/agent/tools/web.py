@@ -51,7 +51,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 class WebSearchTool(Tool):
     """使用 Brave Search API 搜索网络。"""
-    
+
     name = "web_search"
     description = "搜索网络。返回网页标题、URL 及内容片段。"
     parameters = {
@@ -62,7 +62,7 @@ class WebSearchTool(Tool):
         },
         "required": ["query"]
     }
-    
+
     def __init__(self, api_key: str | None = None, max_results: int = 5):
         self._init_api_key = api_key
         self.max_results = max_results
@@ -79,7 +79,7 @@ class WebSearchTool(Tool):
                 "Set it in ~/.nanobot/config.json under tools.web.search.apiKey "
                 "(or export BRAVE_API_KEY), then restart the gateway."
             )
-        
+
         try:
             n = min(max(count or self.max_results, 1), 10)
             async with httpx.AsyncClient() as client:
@@ -90,11 +90,11 @@ class WebSearchTool(Tool):
                     timeout=10.0
                 )
                 r.raise_for_status()
-            
+
             results = r.json().get("web", {}).get("results", [])
             if not results:
                 return f"No results for: {query}"
-            
+
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results[:n], 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
@@ -111,7 +111,7 @@ class WebSearchTool(Tool):
 
 class WebFetchTool(Tool):
     """获取页面并通过 Readability 提取核心内容。"""
-    
+
     name = "web_fetch"
     description = "获取 URL 的可读内容并提取（HTML → Markdown/文本）。"
     parameters = {
@@ -123,14 +123,15 @@ class WebFetchTool(Tool):
         },
         "required": ["url"]
     }
-    
+
     def __init__(self, max_chars: int = 50000):
         self.max_chars = max_chars
-    
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+
+    async def execute(self, url: str, **kwargs: Any) -> str:
         from readability import Document
 
-        max_chars = maxChars or self.max_chars
+        extract_mode: str = kwargs.get("extractMode", "markdown")  # type: ignore[assignment]
+        max_chars: int = kwargs.get("maxChars") or self.max_chars  # type: ignore[assignment]
 
         # 在获取内容前验证 URL
         is_valid, error_msg = _validate_url(url)
@@ -145,30 +146,30 @@ class WebFetchTool(Tool):
             ) as client:
                 r = await client.get(url, headers={"User-Agent": USER_AGENT})
                 r.raise_for_status()
-            
+
             ctype = r.headers.get("content-type", "")
-            
+
             # JSON
             if "application/json" in ctype:
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             # HTML
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
+                content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
                 text = f"# {doc.title()}\n\n{content}" if doc.title() else content
                 extractor = "readability"
             else:
                 text, extractor = r.text, "raw"
-            
+
             truncated = len(text) > max_chars
             if truncated:
                 text = text[:max_chars]
-            
+
             return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
                               "extractor": extractor, "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
-    
+
     def _to_markdown(self, html: str) -> str:
         """将 HTML 转换为 Markdown。"""
         # 在剥除标签之前转换链接、标题和列表

@@ -68,6 +68,61 @@ class FeishuConfig(Base):
     onboarding_team_options: list[str] = Field(default_factory=lambda: ["诉讼组", "合同组", "招投标组", "综合组"])
 
 
+class FeishuSharedAuthConfig(Base):
+    """Shared Feishu auth settings used across channels and tools."""
+
+    app_id: str = ""
+    app_secret: str = ""
+    encrypt_key: str = ""
+    verification_token: str = ""
+
+
+class FeishuSharedAPIConfig(Base):
+    """Shared Feishu API base settings."""
+
+    api_base: str = "https://open.feishu.cn/open-apis"
+
+
+class FeishuSharedBitableConfig(Base):
+    """Shared default bitable settings."""
+
+    domain: str = ""
+    default_app_token: str = ""
+    default_table_id: str = ""
+    default_view_id: str | None = None
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+
+
+class FeishuOAuthConfig(Base):
+    """Server-side Feishu OAuth callback and token lifecycle configuration."""
+
+    enabled: bool = False
+    public_base_url: str = ""
+    callback_path: str = "/oauth/feishu/callback"
+    bind_host: str = ""
+    bind_port: int = 0
+    scopes: list[str] = Field(default_factory=list)
+    state_ttl_seconds: int = 600
+    refresh_ahead_seconds: int = 300
+    success_html_title: str = "Feishu Authorization Completed"
+    failure_html_title: str = "Feishu Authorization Failed"
+
+
+class FeishuIntegrationConfig(Base):
+    """Shared Feishu integration settings."""
+
+    auth: FeishuSharedAuthConfig = Field(default_factory=FeishuSharedAuthConfig)
+    api: FeishuSharedAPIConfig = Field(default_factory=FeishuSharedAPIConfig)
+    bitable: FeishuSharedBitableConfig = Field(default_factory=FeishuSharedBitableConfig)
+    oauth: FeishuOAuthConfig = Field(default_factory=FeishuOAuthConfig)
+
+
+class IntegrationsConfig(Base):
+    """Shared third-party integration settings."""
+
+    feishu: FeishuIntegrationConfig = Field(default_factory=FeishuIntegrationConfig)
+
+
 class DingTalkConfig(Base):
     """DingTalk channel configuration using Stream mode."""
 
@@ -450,9 +505,91 @@ class Config(BaseSettings):
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    def resolve_feishu_auth(self) -> FeishuSharedAuthConfig:
+        """Resolve Feishu auth from shared config first, then legacy locations."""
+        shared = self.integrations.feishu.auth
+        channel = self.channels.feishu
+        tool = self.tools.feishu_data
+        return FeishuSharedAuthConfig(
+            app_id=shared.app_id or channel.app_id or tool.app_id,
+            app_secret=shared.app_secret or channel.app_secret or tool.app_secret,
+            encrypt_key=shared.encrypt_key or channel.encrypt_key,
+            verification_token=shared.verification_token or channel.verification_token,
+        )
+
+    def resolve_feishu_api_base(self) -> str:
+        """Resolve Feishu API base from shared config first, then legacy tools config."""
+        shared = self.integrations.feishu.api.api_base
+        return shared or self.tools.feishu_data.api_base
+
+    def resolve_feishu_bitable(self) -> FeishuSharedBitableConfig:
+        """Resolve Feishu bitable defaults from shared config first, then legacy tools config."""
+        shared = self.integrations.feishu.bitable
+        legacy = self.tools.feishu_data.bitable
+        return FeishuSharedBitableConfig(
+            domain=shared.domain or legacy.domain,
+            default_app_token=shared.default_app_token or legacy.default_app_token,
+            default_table_id=shared.default_table_id or legacy.default_table_id,
+            default_view_id=shared.default_view_id if shared.default_view_id is not None else legacy.default_view_id,
+            field_mapping=shared.field_mapping or legacy.field_mapping,
+        )
+
+    def apply_shared_integration_defaults(self) -> "Config":
+        """Materialize shared Feishu settings onto legacy access points for runtime compatibility."""
+        auth = self.resolve_feishu_auth()
+        api_base = self.resolve_feishu_api_base()
+        bitable = self.resolve_feishu_bitable()
+
+        self.channels.feishu.app_id = auth.app_id
+        self.channels.feishu.app_secret = auth.app_secret
+        self.channels.feishu.encrypt_key = auth.encrypt_key
+        self.channels.feishu.verification_token = auth.verification_token
+
+        self.tools.feishu_data.app_id = auth.app_id
+        self.tools.feishu_data.app_secret = auth.app_secret
+        self.tools.feishu_data.api_base = api_base
+        self.tools.feishu_data.bitable.domain = bitable.domain
+        self.tools.feishu_data.bitable.default_app_token = bitable.default_app_token
+        self.tools.feishu_data.bitable.default_table_id = bitable.default_table_id
+        self.tools.feishu_data.bitable.default_view_id = bitable.default_view_id
+        self.tools.feishu_data.bitable.field_mapping = dict(bitable.field_mapping)
+        return self
+
+    def to_persisted_dict(self) -> dict:
+        """Dump a minimal config while avoiding duplicated shared Feishu credentials."""
+        clone = self.model_copy(deep=True)
+        shared_auth = clone.integrations.feishu.auth
+        shared_api = clone.integrations.feishu.api
+        shared_bitable = clone.integrations.feishu.bitable
+
+        if shared_auth.app_id:
+            clone.channels.feishu.app_id = ""
+            clone.channels.feishu.app_secret = ""
+            clone.tools.feishu_data.app_id = ""
+            clone.tools.feishu_data.app_secret = ""
+        if shared_auth.encrypt_key:
+            clone.channels.feishu.encrypt_key = ""
+        if shared_auth.verification_token:
+            clone.channels.feishu.verification_token = ""
+        if shared_api.api_base and shared_api.api_base != FeishuSharedAPIConfig().api_base:
+            clone.tools.feishu_data.api_base = FeishuDataConfig().api_base
+        if shared_bitable.domain:
+            clone.tools.feishu_data.bitable.domain = ""
+        if shared_bitable.default_app_token:
+            clone.tools.feishu_data.bitable.default_app_token = ""
+        if shared_bitable.default_table_id:
+            clone.tools.feishu_data.bitable.default_table_id = ""
+        if shared_bitable.default_view_id is not None:
+            clone.tools.feishu_data.bitable.default_view_id = None
+        if shared_bitable.field_mapping:
+            clone.tools.feishu_data.bitable.field_mapping = {}
+
+        return clone.model_dump(by_alias=True, exclude_defaults=True, exclude_none=True)
 
     @property
     def workspace_path(self) -> Path:

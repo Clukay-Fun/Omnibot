@@ -9,31 +9,41 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.skills import SkillsLoader
 
 
 class ContextBuilder:
     """构建智能体的上下文（系统提示词 + 消息历史记录）。"""
-    
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
+
+    COMMON_FILES = ["AGENTS.md", "TOOLS.md", "IDENTITY.md"]
+    PRIVATE_CHAT_FILES = ["SOUL.md", "USER.md"]
+    GROUP_CHAT_FILES = ["SOUL.md"]
+    BOOTSTRAP_FILES = ["BOOTSTRAP.md"]
+    HEARTBEAT_FILES = ["HEARTBEAT.md"]
 
     # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> str:
         """从身份设定、引导文件、记忆和技能中构建系统提示词。"""
+        runtime = runtime or PromptContext()
         parts = [self._get_identity()]
 
-        bootstrap = self._load_bootstrap_files()
+        bootstrap = self._load_bootstrap_files(runtime)
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
+        memory = self.memory.get_memory_context(runtime)
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
@@ -53,13 +63,13 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
-    
+
     def _get_identity(self) -> str:
         """获取核心身份设定部分。"""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
+
         return f"""# nanobot 🐈
 
 You are nanobot, a helpful AI assistant.
@@ -69,8 +79,13 @@ You are nanobot, a helpful AI assistant.
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
+- Main-session long-term memory: {workspace_path}/MEMORY.md (write important facts here)
+- Legacy memory compatibility path: {workspace_path}/memory/MEMORY.md
+- Feishu user memory: {workspace_path}/memory/feishu/users/<open_id>/MEMORY.md
+- Feishu group memory: {workspace_path}/memory/feishu/chats/<chat_id>/MEMORY.md
+- Feishu thread memory: {workspace_path}/memory/feishu/threads/<chat_id>__<thread_id>/MEMORY.md
+- Feishu user profiles (compat): {workspace_path}/memory/feishu/users/*.json
+- Feishu group context (compat): {workspace_path}/memory/feishu/chats/*.json
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 ## nanobot Guidelines
@@ -95,19 +110,31 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
-    
-    def _load_bootstrap_files(self) -> str:
+
+    def _resolve_workspace_files(self, runtime: PromptContext) -> list[str]:
+        files = list(self.COMMON_FILES)
+        if runtime.purpose == "bootstrap":
+            files.extend(self.BOOTSTRAP_FILES)
+        elif runtime.purpose == "heartbeat":
+            files.extend(self.HEARTBEAT_FILES)
+        elif runtime.is_feishu and runtime.is_group:
+            files.extend(self.GROUP_CHAT_FILES)
+        else:
+            files.extend(self.PRIVATE_CHAT_FILES)
+        return files
+
+    def _load_bootstrap_files(self, runtime: PromptContext) -> str:
         """从工作区加载所有引导文件（bootstrap files）。"""
         parts = []
-        
-        for filename in self.BOOTSTRAP_FILES:
+
+        for filename in self._resolve_workspace_files(runtime):
             file_path = self.workspace / filename
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
-        
+
         return "\n\n".join(parts) if parts else ""
-    
+
     # endregion
 
     # region [消息列表构建]
@@ -120,20 +147,28 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
+        runtime: PromptContext | None = None,
     ) -> list[dict[str, Any]]:
         """构建用于大语言模型调用的完整消息列表。"""
-        return [
-            {"role": "system", "content": self.build_system_prompt(skill_names)},
+        runtime = runtime or PromptContext(channel=channel, chat_id=chat_id)
+        messages = [
+            {"role": "system", "content": self.build_system_prompt(skill_names, runtime=runtime)},
             *history,
             {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
-            {"role": "user", "content": self._build_user_content(current_message, media)},
         ]
+        if runtime.quoted_bot_summary:
+            messages.append({
+                "role": "user",
+                "content": f"[Referenced Bot Message]\n{runtime.quoted_bot_summary}",
+            })
+        messages.append({"role": "user", "content": self._build_user_content(current_message, media)})
+        return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
         """构建包含可选 Base64 编码图片的用户消息内容。"""
         if not media:
             return text
-        
+
         images = []
         for path in media:
             p = Path(path)
@@ -142,11 +177,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
+
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
-    
+
     # endregion
 
     # region [消息追加与辅助方法]
@@ -158,7 +193,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """将工具调用结果追加到消息列表中。"""
         messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
         return messages
-    
+
     def add_assistant_message(
         self, messages: list[dict[str, Any]],
         content: str | None,

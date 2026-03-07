@@ -13,7 +13,6 @@ from yaml import YAMLError
 
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 
-
 #region 统计与登记模型定义
 
 @dataclass(slots=True)

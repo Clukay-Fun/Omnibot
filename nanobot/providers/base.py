@@ -7,7 +7,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-
 #region 响应数据结构
 
 @dataclass
@@ -35,7 +34,7 @@ class LLMResponse:
     usage: dict[str, int] = field(default_factory=dict)
     reasoning_content: str | None = None  # Kimi, DeepSeek-R1 etc.
     thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
-    
+
     @property
     def has_tool_calls(self) -> bool:
         """用处，参数
@@ -57,7 +56,7 @@ class LLMProvider(ABC):
     功能:
         - 约束不同模型提供方的公共行为。
     """
-    
+
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
         """用处，参数
 
@@ -106,7 +105,7 @@ class LLMProvider(ABC):
 
             result.append(msg)
         return result
-    
+
     @abstractmethod
     async def chat(
         self,
@@ -125,7 +124,7 @@ class LLMProvider(ABC):
             - 发送对话请求并返回统一响应对象。
         """
         pass
-    
+
     @abstractmethod
     def get_default_model(self) -> str:
         """用处，参数

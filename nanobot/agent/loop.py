@@ -16,6 +16,8 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
+from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
     EmbeddingSkillRouter,
@@ -37,6 +39,8 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
+from nanobot.storage.audit import AuditSink
+from nanobot.storage.sqlite_store import SQLiteStore
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -48,6 +52,7 @@ if TYPE_CHECKING:
         SkillSpecConfig,
     )
     from nanobot.cron.service import CronService
+    from nanobot.oauth.feishu import FeishuOAuthService
 
 
 class AgentLoop:
@@ -68,6 +73,14 @@ class AgentLoop:
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
+    _MEMORY_WRITE_TURN_THRESHOLD = 3
+    _MEMORY_TOPIC_END_KEYWORDS = (
+        "先这样",
+        "结束",
+        "结论",
+        "收尾",
+        "done",
+    )
 
     # region [初始化与配置]
 
@@ -97,6 +110,7 @@ class AgentLoop:
         stage_heartbeat_seconds: float = 15.0,
         skillspec_render_primary_timeout_seconds: float = 12.0,
         skillspec_render_retry_timeout_seconds: float = 6.0,
+        feishu_oauth_service: "FeishuOAuthService | None" = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -136,8 +150,40 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        audit_cleanup_interval_seconds = AuditSink.DEFAULT_CLEANUP_INTERVAL_SECONDS
+        audit_event_retention_days = AuditSink.DEFAULT_EVENT_AUDIT_RETENTION_DAYS
+        audit_message_index_retention_days = AuditSink.DEFAULT_FEISHU_MESSAGE_INDEX_RETENTION_DAYS
+        if self.channels_config is not None:
+            feishu_cfg = getattr(self.channels_config, "feishu", None)
+            if feishu_cfg is not None:
+                audit_cleanup_interval_seconds = float(
+                    getattr(feishu_cfg, "audit_cleanup_interval_seconds", audit_cleanup_interval_seconds)
+                )
+                audit_event_retention_days = int(
+                    getattr(feishu_cfg, "audit_event_retention_days", audit_event_retention_days)
+                )
+                audit_message_index_retention_days = int(
+                    getattr(
+                        feishu_cfg,
+                        "audit_message_index_retention_days",
+                        audit_message_index_retention_days,
+                    )
+                )
+        self._audit_sink = AuditSink(
+            self._sqlite,
+            cleanup_interval_seconds=audit_cleanup_interval_seconds,
+            event_audit_retention_days=audit_event_retention_days,
+            feishu_message_index_retention_days=audit_message_index_retention_days,
+        )
+        self._memory_worker = MemoryWriteWorker(
+            self.workspace,
+            flush_threshold=self._MEMORY_WRITE_TURN_THRESHOLD,
+        )
+        self._workers_started = False
         self.tools = ToolRegistry()
         self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._feishu_oauth_service = feishu_oauth_service
         self._answer_placeholder_text = self._runtime_text.prompt_text(
             "progress", "answer_placeholder", "🐈努力回答中..."
         )
@@ -234,6 +280,20 @@ class AgentLoop:
     @staticmethod
     def _now_iso() -> str:
         return datetime.now().isoformat()
+
+    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+        purpose = "chat"
+        source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
+        if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
+            purpose = "bootstrap"
+        return PromptContext(
+            purpose=purpose,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            session_key=session_key or msg.session_key,
+            metadata=dict(msg.metadata or {}),
+        )
 
     def _feishu_onboarding_config(self) -> Any | None:
         if not self.channels_config:
@@ -714,6 +774,15 @@ class AgentLoop:
         is_reentry = lower_command in reentry_commands
 
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
+        if msg.channel == "feishu" and str((msg.metadata or {}).get("source_event_type") or "") == "p2p_chat_create":
+            identity = cast(dict[str, Any], profile["identity"])
+            preferences = cast(dict[str, Any], profile["preferences"])
+            dynamic = cast(dict[str, Any], profile["dynamic"])
+            dynamic.setdefault("channel", "feishu")
+            dynamic.setdefault("first_source", "p2p_chat_create")
+            dynamic.setdefault("first_chat_id", msg.chat_id)
+            identity.setdefault("open_id", msg.sender_id)
+            preferences.setdefault("preferred_name", identity.get("name") or "")
         onboarding = profile["onboarding"]
         status = str(onboarding.get("status") or "").lower()
 
@@ -971,12 +1040,26 @@ class AgentLoop:
 
     # region [工具与执行辅助方法]
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """为所有需要路由信息的工具更新上下文。"""
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                setter = getattr(tool, "set_context", None)
+                if callable(setter):
+                    setter(channel, chat_id, *([message_id] if name == "message" else []))
+        for tool_name in self.tools.tool_names:
+            tool = self.tools.get(tool_name)
+            if tool is not None:
+                runtime_setter = getattr(tool, "set_runtime_context", None)
+                if callable(runtime_setter):
+                    runtime_setter(channel, chat_id, sender_id, metadata)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1436,6 +1519,7 @@ class AgentLoop:
     async def run(self) -> None:
         """运行智能体循环，将消息分发为任务，以保持对 /stop 命令的响应能力。"""
         self._running = True
+        await self._ensure_background_workers_started()
         await self._connect_mcp()
         logger.info("Agent loop started")
 
@@ -1478,6 +1562,19 @@ class AgentLoop:
     async def _dispatch(self, msg: InboundMessage) -> None:
         """在会话级锁下处理一条消息。"""
         lock = self._get_session_lock(msg.session_key)
+        request_id = str((msg.metadata or {}).get("message_id") or f"{msg.session_key}:{time.time_ns()}")
+        await self._audit_sink.log_event(
+            "agent_request_started",
+            event_id=request_id,
+            chat_id=msg.chat_id,
+            message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+            payload={
+                "channel": msg.channel,
+                "session_key": msg.session_key,
+                "sender_id": msg.sender_id,
+                "content_preview": (msg.content or "")[:240],
+            },
+        )
         async with lock:
             try:
                 response = await self._process_message(msg)
@@ -1488,11 +1585,33 @@ class AgentLoop:
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="", metadata=msg.metadata or {},
                     ))
+                await self._audit_sink.log_event(
+                    "agent_request_finished",
+                    event_id=request_id,
+                    chat_id=msg.chat_id,
+                    message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+                    payload={
+                        "channel": msg.channel,
+                        "session_key": msg.session_key,
+                        "has_response": response is not None,
+                    },
+                )
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error processing message for session {}", msg.session_key)
+                await self._audit_sink.log_event(
+                    "agent_request_error",
+                    event_id=request_id,
+                    chat_id=msg.chat_id,
+                    message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+                    payload={
+                        "channel": msg.channel,
+                        "session_key": msg.session_key,
+                        "error": str(exc),
+                    },
+                )
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
@@ -1500,6 +1619,7 @@ class AgentLoop:
 
     async def close_mcp(self) -> None:
         """关闭 MCP 连接。"""
+        await self._stop_background_workers()
         if self._mcp_stack:
             try:
                 await self._mcp_stack.aclose()
@@ -1515,6 +1635,21 @@ class AgentLoop:
     # endregion
 
     # region [消息处理核心逻辑]
+
+    async def _ensure_background_workers_started(self) -> None:
+        if self._workers_started:
+            return
+        await self._audit_sink.start()
+        await self._memory_worker.start()
+        self._workers_started = True
+
+    async def _stop_background_workers(self) -> None:
+        if not self._workers_started:
+            return
+        self._workers_started = False
+        await self._audit_sink.stop()
+        await self._memory_worker.stop()
+        self._sqlite.close()
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
@@ -1553,18 +1688,75 @@ class AgentLoop:
             "pending": "进行中",
         }.get(onboarding_status, "未设置")
 
+        oauth_label = "未启用"
+        if msg.channel == "feishu" and self._feishu_oauth_service is not None:
+            token_status = self._feishu_oauth_service.get_user_token_status(msg.sender_id)
+            oauth_label = {
+                "active": "已连接",
+                "refresh_failed": "连接异常（可临时使用）",
+                "reauth_required": "需要重新授权",
+                "revoked": "已失效",
+                "not_connected": "未连接",
+            }.get(token_status, token_status)
+
         return (
             "📌 当前设置\n\n"
             f"怎么称呼您：{display_name}\n"
             f"回复风格：{style_label}\n"
             f"录入数据时：{confirm_label}\n"
             f"查案件时默认范围：{scope_label}\n"
-            f"引导状态：{status_label}\n\n"
+            f"引导状态：{status_label}\n"
+            f"飞书授权：{oauth_label}\n\n"
             "可用快捷调整：\n"
             "- 叫我XX\n"
             "- 以后简洁点 / 以后详细点\n"
             "- 不用确认直接录入\n"
-            "- /setup"
+            "- /setup\n"
+            "- /connect"
+        )
+
+    def _handle_connect_command(self, msg: InboundMessage) -> OutboundMessage:
+        if msg.channel != "feishu":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="/connect 目前仅支持飞书频道。",
+            )
+        if self._feishu_oauth_service is None:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="当前环境未启用飞书 OAuth 回调服务，请联系管理员开启。",
+            )
+
+        metadata = msg.metadata or {}
+        thread_id = str(metadata.get("thread_id") or metadata.get("root_id") or "").strip() or None
+        try:
+            auth_url = self._feishu_oauth_service.create_authorization_url(
+                actor_open_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception("Failed to create Feishu OAuth authorization URL")
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="授权链接生成失败，请稍后再试。",
+            )
+
+        token_status = self._feishu_oauth_service.get_user_token_status(msg.sender_id)
+        status_hint = ""
+        if token_status == "active":
+            status_hint = "\n\n当前检测到你已授权过，重新授权会覆盖旧令牌。"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                "请点击以下链接完成飞书授权（浏览器打开）：\n"
+                f"{auth_url}"
+                f"{status_hint}"
+            ),
         )
 
     def _list_chat_session_keys(self, channel: str, chat_id: str, current_key: str) -> list[str]:
@@ -1719,6 +1911,7 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """处理单条传入消息并返回响应。"""
+        await self._ensure_background_workers_started()
         # 系统消息：从 chat_id 中解析来源 ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -1726,11 +1919,19 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(
+                channel,
+                chat_id,
+                msg.metadata.get("message_id"),
+                sender_id=msg.sender_id,
+                metadata=msg.metadata,
+            )
             history = session.get_history(max_messages=self.memory_window)
+            prompt_context = PromptContext(purpose="chat", channel=channel, chat_id=chat_id, metadata=dict(msg.metadata or {}))
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                runtime=prompt_context,
             )
             turn_started = time.perf_counter()
             final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key)
@@ -1780,6 +1981,8 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd in {"/connect", "/oauth"}:
+            return self._handle_connect_command(msg)
         if cmd.startswith("/session"):
             return self._handle_session_command(msg, key, raw_cmd)
         if cmd == "/new":
@@ -1866,17 +2069,25 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            sender_id=msg.sender_id,
+            metadata=msg.metadata,
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+        prompt_context = self._prompt_context_for_message(msg, session_key=key)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            runtime=prompt_context,
         )
 
         async def _bus_progress(content: str, *, phase: str = "answer") -> None:
@@ -1911,6 +2122,7 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+        await self._enqueue_memory_write(msg, final_text)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -1959,6 +2171,57 @@ class AgentLoop:
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    async def _enqueue_memory_write(self, msg: InboundMessage, final_text: str) -> None:
+        if msg.channel != "feishu":
+            return
+        metadata = msg.metadata or {}
+        chat_type = str(metadata.get("chat_type") or "")
+        is_group = chat_type == "group"
+        thread_id = str(metadata.get("thread_id") or metadata.get("root_id") or "").strip() or None
+
+        scopes: list[MemoryScope] = []
+        if is_group:
+            scopes.append("chat")
+            if thread_id:
+                scopes.append("thread")
+        else:
+            scopes.append("user")
+
+        if not scopes:
+            return
+
+        force_flush = self._should_force_memory_flush(msg.content, thread_id)
+
+        task = MemoryTurnTask(
+            channel=msg.channel,
+            user_id=msg.sender_id,
+            chat_id=msg.chat_id,
+            thread_id=thread_id,
+            user_text=msg.content,
+            assistant_text=final_text,
+            message_id=str(metadata.get("message_id") or "") or None,
+            scopes=tuple(scopes),
+            force_flush=force_flush,
+        )
+        await self._memory_worker.enqueue(task)
+
+    @classmethod
+    def _should_force_memory_flush(cls, content: str, thread_id: str | None) -> bool:
+        if not thread_id:
+            return False
+        text = " ".join(content.lower().split())
+        if not text:
+            return False
+        for keyword in cls._MEMORY_TOPIC_END_KEYWORDS:
+            token = keyword.lower()
+            if token == "done":
+                if re.search(r"\bdone\b", text):
+                    return True
+                continue
+            if token in text:
+                return True
+        return False
 
     # endregion
 

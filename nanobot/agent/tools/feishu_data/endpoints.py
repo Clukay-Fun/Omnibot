@@ -40,5 +40,69 @@ class FeishuEndpoints:
         """创建记录或批量列出记录的端点。"""
         return f"/bitable/v1/apps/{app_token}/tables/{table_id}/records"
 
-# endregion
+    @staticmethod
+    def bitable_apps() -> str:
+        """创建或列出多维表格 App 的端点。"""
+        return "/bitable/v1/apps"
 
+    @staticmethod
+    def bitable_views(app_token: str, table_id: str) -> str:
+        """创建或列出数据表视图（View）的端点。"""
+        return f"/bitable/v1/apps/{app_token}/tables/{table_id}/views"
+
+    @staticmethod
+    def calendar_list() -> str:
+        """列出用户日历的端点。"""
+        return "/calendar/v4/calendars"
+
+    @staticmethod
+    def calendar_detail(calendar_id: str) -> str:
+        """读取、更新、删除单个日历的端点。"""
+        return f"/calendar/v4/calendars/{calendar_id}"
+
+    @staticmethod
+    def calendar_freebusy() -> str:
+        """查询忙闲信息的端点。"""
+        return "/calendar/v4/freebusy"
+
+    @staticmethod
+    def calendar_event_attendees(calendar_id: str, event_id: str) -> str:
+        """管理日程参会人集合的端点。"""
+        return f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees"
+
+    @staticmethod
+    def calendar_event_attendee(calendar_id: str, event_id: str, attendee_id: str) -> str:
+        """更新或删除单个参会人的端点。"""
+        return f"/calendar/v4/calendars/{calendar_id}/events/{event_id}/attendees/{attendee_id}"
+
+    @staticmethod
+    def task_v2_tasks() -> str:
+        """创建任务或按条件查询任务列表的端点。"""
+        return "/task/v2/tasks"
+
+    @staticmethod
+    def task_v2_task(task_id: str) -> str:
+        """读取、更新、删除单个任务的端点。"""
+        return f"/task/v2/tasks/{task_id}"
+
+    @staticmethod
+    def task_v2_tasklists() -> str:
+        """查询任务清单（TaskList）的端点。"""
+        return "/task/v2/tasklists"
+
+    @staticmethod
+    def task_v2_subtasks(task_id: str) -> str:
+        """创建子任务的端点。"""
+        return f"/task/v2/tasks/{task_id}/subtasks"
+
+    @staticmethod
+    def task_v2_comments(task_id: str) -> str:
+        """新增任务评论的端点。"""
+        return f"/task/v2/tasks/{task_id}/comments"
+
+    @staticmethod
+    def im_message_list() -> str:
+        """拉取会话消息历史列表的端点。"""
+        return "/im/v1/messages"
+
+# endregion

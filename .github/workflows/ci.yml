@@ -27,8 +27,7 @@ jobs:
           pip install -e ".[dev]"
           pip install build
 
-      - name: Lint (advisory)
-        continue-on-error: true
+      - name: Lint
         run: ruff check .
 
       - name: Test

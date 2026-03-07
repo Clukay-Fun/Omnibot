@@ -10,6 +10,8 @@ from pathlib import Path
 import datetime as datetime_module
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.memory import MemoryStore
+from nanobot.agent.prompt_context import PromptContext
 
 
 #region 测试辅助
@@ -98,6 +100,51 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
 
     assert messages[-1]["role"] == "user"
     assert messages[-1]["content"] == "Return exactly: OK"
+
+
+def test_feishu_memory_scope_isolated_by_runtime(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "MEMORY.md").write_text("global-memory", encoding="utf-8")
+
+    memory = MemoryStore(workspace)
+    user_memory = memory.feishu_user_memory_path("ou_user")
+    user_memory.parent.mkdir(parents=True, exist_ok=True)
+    user_memory.write_text("private-user-memory", encoding="utf-8")
+
+    chat_memory = memory.feishu_chat_memory_path("oc_group")
+    chat_memory.parent.mkdir(parents=True, exist_ok=True)
+    chat_memory.write_text("group-memory", encoding="utf-8")
+
+    thread_memory = memory.feishu_thread_memory_path("oc_group", "omt_topic")
+    thread_memory.parent.mkdir(parents=True, exist_ok=True)
+    thread_memory.write_text("thread-memory", encoding="utf-8")
+
+    builder = ContextBuilder(workspace)
+    private_prompt = builder.build_system_prompt(
+        runtime=PromptContext(channel="feishu", chat_id="ou_user", sender_id="ou_user", metadata={"chat_type": "p2p"})
+    )
+    group_prompt = builder.build_system_prompt(
+        runtime=PromptContext(channel="feishu", chat_id="oc_group", sender_id="ou_user", metadata={"chat_type": "group"})
+    )
+    topic_prompt = builder.build_system_prompt(
+        runtime=PromptContext(
+            channel="feishu",
+            chat_id="oc_group",
+            sender_id="ou_user",
+            metadata={"chat_type": "group", "thread_id": "omt_topic"},
+        )
+    )
+
+    assert "global-memory" in private_prompt
+    assert "private-user-memory" in private_prompt
+
+    assert "global-memory" in group_prompt
+    assert "group-memory" in group_prompt
+    assert "private-user-memory" not in group_prompt
+
+    assert "group-memory" in topic_prompt
+    assert "thread-memory" in topic_prompt
+    assert "global-memory" not in topic_prompt
 
 
 #endregion

@@ -11,7 +11,6 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
-
 #region 频道基类
 
 class BaseChannel(ABC):
@@ -20,9 +19,9 @@ class BaseChannel(ABC):
     功能:
         - 约束各频道的启动、停止、发送与入站处理行为。
     """
-    
+
     name: str = "base"
-    
+
     def __init__(self, config: Any, bus: MessageBus):
         """用处，参数
 
@@ -32,7 +31,7 @@ class BaseChannel(ABC):
         self.config = config
         self.bus = bus
         self._running = False
-    
+
     @abstractmethod
     async def start(self) -> None:
         """用处，参数
@@ -41,7 +40,7 @@ class BaseChannel(ABC):
             - 启动频道连接并进入消息监听循环。
         """
         pass
-    
+
     @abstractmethod
     async def stop(self) -> None:
         """用处，参数
@@ -50,7 +49,7 @@ class BaseChannel(ABC):
             - 停止频道并释放连接资源。
         """
         pass
-    
+
     @abstractmethod
     async def send(self, msg: OutboundMessage) -> None:
         """用处，参数
@@ -59,7 +58,7 @@ class BaseChannel(ABC):
             - 将外发消息投递到具体平台。
         """
         pass
-    
+
     def is_allowed(self, sender_id: str) -> bool:
         """用处，参数
 
@@ -67,11 +66,11 @@ class BaseChannel(ABC):
             - 根据 allow_list 规则判断发送者是否可用。
         """
         allow_list = getattr(self.config, "allow_from", [])
-        
+
         # 如果没有配置 allow_list，默认允许所有人
         if not allow_list:
             return True
-        
+
         sender_str = str(sender_id)
         if sender_str in allow_list:
             return True
@@ -80,7 +79,7 @@ class BaseChannel(ABC):
                 if part and part in allow_list:
                     return True
         return False
-    
+
     async def _handle_message(
         self,
         sender_id: str,
@@ -102,7 +101,7 @@ class BaseChannel(ABC):
                 sender_id, self.name,
             )
             return
-        
+
         msg = InboundMessage(
             channel=self.name,
             sender_id=str(sender_id),
@@ -112,9 +111,9 @@ class BaseChannel(ABC):
             metadata=metadata or {},
             session_key_override=session_key,
         )
-        
+
         await self.bus.publish_inbound(msg)
-    
+
     @property
     def is_running(self) -> bool:
         """用处，参数

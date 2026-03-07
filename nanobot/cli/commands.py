@@ -5,7 +5,10 @@ import os
 import select
 import signal
 import sys
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import typer
 from prompt_toolkit import PromptSession
@@ -221,7 +224,7 @@ def _make_provider(config: Config):
         )
 
     from nanobot.providers.registry import find_by_name
-    spec = find_by_name(provider_name)
+    spec = find_by_name(str(provider_name)) if provider_name else None
     if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
@@ -233,6 +236,80 @@ def _make_provider(config: Config):
         default_model=model,
         extra_headers=p.extra_headers if p else None,
         provider_name=provider_name,
+    )
+
+
+@dataclass
+class _FeishuOAuthStack:
+    store: Any
+    oauth_service: Any
+    token_manager: Any
+    callback_service: Any
+
+
+def _build_feishu_oauth_stack(config: Config) -> _FeishuOAuthStack | None:
+    oauth_cfg = config.integrations.feishu.oauth
+    if not oauth_cfg.enabled:
+        return None
+
+    auth = config.resolve_feishu_auth()
+    api_base = config.resolve_feishu_api_base()
+
+    if not auth.app_id or not auth.app_secret:
+        console.print("[yellow]Warning: Feishu OAuth enabled but app_id/app_secret missing, OAuth callback disabled.[/yellow]")
+        return None
+
+    public_base_url = str(oauth_cfg.public_base_url or "").strip().rstrip("/")
+    callback_path = str(oauth_cfg.callback_path or "/oauth/feishu/callback").strip() or "/oauth/feishu/callback"
+    if not callback_path.startswith("/"):
+        callback_path = f"/{callback_path}"
+    if not public_base_url:
+        console.print("[yellow]Warning: Feishu OAuth enabled but public_base_url missing, OAuth callback disabled.[/yellow]")
+        return None
+
+    redirect_uri = f"{public_base_url}{callback_path}"
+    bind_host = str(oauth_cfg.bind_host or config.gateway.host or "0.0.0.0").strip() or "0.0.0.0"
+    bind_port = int(oauth_cfg.bind_port or config.gateway.port)
+
+    from nanobot.oauth import (
+        FeishuOAuthClient,
+        FeishuOAuthService,
+        FeishuUserTokenManager,
+        OAuthCallbackService,
+    )
+    from nanobot.storage import SQLiteStore
+
+    store = SQLiteStore(config.workspace_path / "memory" / "feishu" / "state.sqlite3")
+    client = FeishuOAuthClient(
+        api_base=api_base,
+        app_id=auth.app_id,
+        app_secret=auth.app_secret,
+    )
+    oauth_service = FeishuOAuthService(
+        store=store,
+        client=client,
+        redirect_uri=redirect_uri,
+        scopes=list(oauth_cfg.scopes or []),
+        state_ttl_seconds=int(oauth_cfg.state_ttl_seconds),
+    )
+    token_manager = FeishuUserTokenManager(
+        store=store,
+        client=client,
+        refresh_ahead_seconds=int(oauth_cfg.refresh_ahead_seconds),
+    )
+    callback_service = OAuthCallbackService(
+        host=bind_host,
+        port=bind_port,
+        callback_path=callback_path,
+        feishu_service=oauth_service,
+        success_title=str(oauth_cfg.success_html_title or "Feishu Authorization Completed"),
+        failure_title=str(oauth_cfg.failure_html_title or "Feishu Authorization Failed"),
+    )
+    return _FeishuOAuthStack(
+        store=store,
+        oauth_service=oauth_service,
+        token_manager=token_manager,
+        callback_service=callback_service,
     )
 
 
@@ -263,10 +340,14 @@ def gateway(
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
 
     config = load_config()
+    config.gateway.port = int(port)
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+    oauth_stack = _build_feishu_oauth_stack(config)
+    if oauth_stack is not None:
+        oauth_stack.store.cleanup_expired_oauth_states(now_iso=datetime.now().isoformat())
 
     # 首先创建 Cron 服务（将会在 agent 创建后设置回调）
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
@@ -298,6 +379,7 @@ def gateway(
         response_template_config=config.agents.response_templates,
         skillspec_config=config.agents.skillspec,
         skillspec_embedding_provider_config=config.providers.siliconflow,
+        feishu_oauth_service=oauth_stack.oauth_service if oauth_stack else None,
     )
 
     # 设置 Cron 任务的回调（需要依赖 agent）
@@ -383,9 +465,22 @@ def gateway(
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
+    if oauth_stack is not None:
+        oauth_cfg = config.integrations.feishu.oauth
+        callback_path = str(oauth_cfg.callback_path or "/oauth/feishu/callback")
+        if not callback_path.startswith("/"):
+            callback_path = f"/{callback_path}"
+        bind_host = str(oauth_cfg.bind_host or config.gateway.host or "0.0.0.0")
+        bind_port = int(oauth_cfg.bind_port or config.gateway.port)
+        public_base_url = str(oauth_cfg.public_base_url or "").strip().rstrip("/")
+        console.print(f"[green]✓[/green] Feishu OAuth callback ingress: {bind_host}:{bind_port}{callback_path}")
+        if public_base_url:
+            console.print(f"[green]✓[/green] Feishu OAuth redirect_uri: {public_base_url}{callback_path}")
 
     async def run():
         try:
+            if oauth_stack is not None:
+                oauth_stack.callback_service.start()
             await cron.start()
             await heartbeat.start()
             await asyncio.gather(
@@ -400,6 +495,9 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
+            if oauth_stack is not None:
+                oauth_stack.callback_service.stop()
+                oauth_stack.store.close()
 
     asyncio.run(run())
 

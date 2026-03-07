@@ -31,7 +31,6 @@ from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.events import InboundMessage
 
-
 #region 执行器结果模型
 
 @dataclass(slots=True)

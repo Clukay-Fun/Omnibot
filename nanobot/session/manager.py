@@ -9,6 +9,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.storage.sqlite_store import SQLiteStore
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -20,7 +21,7 @@ class Session:
     Stores messages in JSONL format for easy reading and persistence.
 
     Important: Messages are append-only for LLM cache efficiency.
-    The consolidation process writes summaries to MEMORY.md/HISTORY.md
+    The consolidation process may update MEMORY.md
     but does NOT modify the messages list or get_history() output.
     """
 
@@ -81,6 +82,7 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
+        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -131,6 +133,7 @@ class SessionManager:
             messages = []
             metadata = {}
             created_at = None
+            updated_at = None
             last_consolidated = 0
 
             with open(path, encoding="utf-8") as f:
@@ -144,14 +147,29 @@ class SessionManager:
                     if data.get("_type") == "metadata":
                         metadata = data.get("metadata", {})
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
+                        updated_at = datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else None
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
                         messages.append(data)
+
+            sql_state = self._sqlite.get_session_state(key)
+            if sql_state:
+                sql_metadata = sql_state.get("metadata")
+                if isinstance(sql_metadata, dict):
+                    metadata = sql_metadata
+                sql_created_at = str(sql_state.get("created_at") or "")
+                sql_updated_at = str(sql_state.get("updated_at") or "")
+                if sql_created_at:
+                    created_at = datetime.fromisoformat(sql_created_at)
+                if sql_updated_at:
+                    updated_at = datetime.fromisoformat(sql_updated_at)
+                last_consolidated = int(sql_state.get("last_consolidated") or 0)
 
             return Session(
                 key=key,
                 messages=messages,
                 created_at=created_at or datetime.now(),
+                updated_at=updated_at or datetime.now(),
                 metadata=metadata,
                 last_consolidated=last_consolidated
             )
@@ -176,6 +194,14 @@ class SessionManager:
             for msg in session.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
+        self._sqlite.upsert_session_state(
+            session.key,
+            metadata=dict(session.metadata or {}),
+            created_at=session.created_at.isoformat(),
+            updated_at=session.updated_at.isoformat(),
+            last_consolidated=session.last_consolidated,
+        )
+
         self._cache[session.key] = session
 
     def invalidate(self, key: str) -> None:
@@ -194,6 +220,7 @@ class SessionManager:
                 path.unlink()
             if legacy_path.exists():
                 legacy_path.unlink()
+            self._sqlite.delete_session_state(key)
             return exists
         except Exception as e:
             logger.warning("Failed to delete session {}: {}", key, e)
@@ -207,6 +234,7 @@ class SessionManager:
             List of session info dicts.
         """
         sessions = []
+        sql_map = {item["session_key"]: item for item in self._sqlite.list_session_state()}
 
         for path in self.sessions_dir.glob("*.jsonl"):
             try:
@@ -217,10 +245,15 @@ class SessionManager:
                         data = json.loads(first_line)
                         if data.get("_type") == "metadata":
                             key = data.get("key") or path.stem.replace("_", ":", 1)
+                            sql_state = sql_map.get(key)
                             sessions.append({
                                 "key": key,
-                                "created_at": data.get("created_at"),
-                                "updated_at": data.get("updated_at"),
+                                "created_at": (
+                                    sql_state.get("created_at") if sql_state else data.get("created_at")
+                                ),
+                                "updated_at": (
+                                    sql_state.get("updated_at") if sql_state else data.get("updated_at")
+                                ),
                                 "path": str(path)
                             })
             except Exception:

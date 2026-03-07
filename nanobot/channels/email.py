@@ -24,7 +24,6 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import EmailConfig
 
-
 #region Email频道核心类
 
 class EmailChannel(BaseChannel):

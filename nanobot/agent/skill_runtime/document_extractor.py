@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-
 #region 抽取异常体系
 
 class ExtractionError(RuntimeError):

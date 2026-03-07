@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,99 @@ from nanobot.config.schema import FeishuConfig
 
 def _build_channel() -> FeishuChannel:
     return FeishuChannel(config=FeishuConfig(), bus=MessageBus())
+
+
+def test_welcome_state_uses_sqlite_store(tmp_path) -> None:
+    channel = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+
+    assert channel._mark_welcome_sent("feishu:ou_a") is True
+    assert channel._mark_welcome_sent("feishu:ou_a") is False
+
+    assert channel._group_welcome_allowed("oc_group") is True
+    assert channel._group_welcome_allowed("oc_group") is False
+
+    conn = sqlite3.connect(str(tmp_path / "memory" / "feishu" / "state.sqlite3"))
+    rows = conn.execute(
+        "SELECT chat_id, state_key FROM feishu_chat_state"
+    ).fetchall()
+    conn.close()
+
+    assert ("__global__", "welcomed:feishu:ou_a") in rows
+    assert ("oc_group", "group_welcome_last_sent") in rows
+
+
+def test_message_index_legacy_json_migrates_into_sqlite(tmp_path) -> None:
+    feishu_dir = tmp_path / "memory" / "feishu"
+    feishu_dir.mkdir(parents=True, exist_ok=True)
+    (feishu_dir / "message_index.json").write_text(
+        json.dumps(
+            {
+                "om_legacy": {
+                    "content": "legacy quote",
+                    "chat_id": "oc_group",
+                    "source_message_id": "im_1",
+                    "created_at": "2026-01-01T00:00:00",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    channel = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+    summary = channel._resolve_quoted_bot_summary({"upper_message_id": "om_legacy", "chat_id": "oc_group"})
+
+    assert summary == "legacy quote"
+
+    _ = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+
+    conn = sqlite3.connect(str(tmp_path / "memory" / "feishu" / "state.sqlite3"))
+    count = conn.execute("SELECT COUNT(*) FROM feishu_message_index").fetchone()[0]
+    conn.close()
+    assert count == 1
+
+
+def test_channel_state_legacy_json_migrates_into_sqlite(tmp_path) -> None:
+    feishu_dir = tmp_path / "memory" / "feishu"
+    feishu_dir.mkdir(parents=True, exist_ok=True)
+    (feishu_dir / "channel_state.json").write_text(
+        json.dumps(
+            {
+                "welcomed": {"feishu:ou_legacy": "2026-01-01T00:00:00"},
+                "group_welcomes": {"oc_group": 4102444800},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    channel = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+    assert channel._mark_welcome_sent("feishu:ou_legacy") is False
+    assert channel._group_welcome_allowed("oc_group") is False
+
+    _ = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+    conn = sqlite3.connect(str(tmp_path / "memory" / "feishu" / "state.sqlite3"))
+    count = conn.execute("SELECT COUNT(*) FROM feishu_chat_state").fetchone()[0]
+    conn.close()
+    assert count == 2
+
+
+def test_sqlite_tables_initialized_on_channel_startup(tmp_path) -> None:
+    _ = FeishuChannel(config=FeishuConfig(), bus=MessageBus(), workspace=tmp_path)
+
+    conn = sqlite3.connect(str(tmp_path / "memory" / "feishu" / "state.sqlite3"))
+    tables = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    conn.close()
+
+    assert "oauth_states" in tables
+    assert "feishu_user_tokens" in tables
+    assert "feishu_chat_state" in tables
+    assert "feishu_message_index" in tables
+    assert "reminder_state" in tables
+    assert "event_audit" in tables
 
 
 def _build_text_event(

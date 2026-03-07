@@ -23,11 +23,14 @@ class FeishuDataClient:
         self,
         config: FeishuDataConfig,
         token_manager: TenantAccessTokenManager | None = None,
-        http_client_factory: Callable[..., httpx.AsyncClient] | None = None
+        http_client_factory: Callable[..., httpx.AsyncClient] | None = None,
     ):
         self.config = config
         self.http_client_factory = http_client_factory or httpx.AsyncClient
-        self.token_manager = token_manager or TenantAccessTokenManager(config, self.http_client_factory)
+        self.token_manager = token_manager or TenantAccessTokenManager(
+            config=config,
+            http_client_factory=self.http_client_factory,
+        )
 
     async def request(
         self,
@@ -35,14 +38,22 @@ class FeishuDataClient:
         path: str,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None
+        headers: dict[str, str] | None = None,
+        *,
+        bearer_token: str | None = None,
+        auth_mode: str = "app",
     ) -> dict[str, Any]:
         """
         发送携带认证信息的 HTTP 请求到飞书 API。
         自动附加 Bearer Token，并在遇到网络或限流等错误时执行重试策略，
         同时将飞书特有的业务错误包装为 `FeishuDataAPIError` 抛出。
         """
-        token = await self.token_manager.get_token()
+        token = bearer_token
+        if not token:
+            if auth_mode == "app":
+                token = await self.token_manager.get_token()
+            else:
+                raise FeishuDataAPIError(-1, f"Missing bearer token for auth_mode={auth_mode}")
 
         req_headers = {
             "Authorization": f"Bearer {token}",
@@ -102,4 +113,3 @@ class FeishuDataClient:
         raise FeishuDataAPIError(-1, "重试耗尽后的网络错误 (Network error after retries)", str(last_error))
 
 # endregion
-

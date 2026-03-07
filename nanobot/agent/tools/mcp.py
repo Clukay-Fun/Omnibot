@@ -10,7 +10,6 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 
-
 # region [MCP 工具包装器]
 
 class MCPToolWrapper(Tool):
