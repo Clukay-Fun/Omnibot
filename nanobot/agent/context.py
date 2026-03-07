@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.skills import SkillsLoader
 
 
@@ -24,12 +24,12 @@ class ContextBuilder:
 
     # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
-    
+
     def build_system_prompt(
         self,
         skill_names: list[str] | None = None,
@@ -63,13 +63,13 @@ Skills with available="false" need dependencies installed first - you can try in
 {skills_summary}""")
 
         return "\n\n---\n\n".join(parts)
-    
+
     def _get_identity(self) -> str:
         """获取核心身份设定部分。"""
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
-        
+
         return f"""# nanobot 🐈
 
 You are nanobot, a helpful AI assistant.
@@ -108,7 +108,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
-    
+
     def _resolve_workspace_files(self, runtime: PromptContext) -> list[str]:
         files = list(self.COMMON_FILES)
         if runtime.purpose == "bootstrap":
@@ -130,9 +130,9 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
-        
+
         return "\n\n".join(parts) if parts else ""
-    
+
     # endregion
 
     # region [消息列表构建]
@@ -166,7 +166,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """构建包含可选 Base64 编码图片的用户消息内容。"""
         if not media:
             return text
-        
+
         images = []
         for path in media:
             p = Path(path)
@@ -175,11 +175,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 continue
             b64 = base64.b64encode(p.read_bytes()).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
-        
+
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
-    
+
     # endregion
 
     # region [消息追加与辅助方法]
@@ -191,7 +191,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """将工具调用结果追加到消息列表中。"""
         messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
         return messages
-    
+
     def add_assistant_message(
         self, messages: list[dict[str, Any]],
         content: str | None,

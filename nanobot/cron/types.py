@@ -6,7 +6,6 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 #region 定时任务类型
 
 @dataclass

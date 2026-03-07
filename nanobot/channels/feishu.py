@@ -19,10 +19,10 @@ from uuid import uuid4
 from loguru import logger
 
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import BitableReminderRuleEngine, ReminderRuntime
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService

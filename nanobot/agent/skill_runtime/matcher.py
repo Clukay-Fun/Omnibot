@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from nanobot.agent.skill_runtime.embedding_router import EmbeddingSkillRouter
 from nanobot.agent.skill_runtime.spec_schema import SkillSpec
 
-
 #region 匹配模型层
 
 @dataclass(slots=True)

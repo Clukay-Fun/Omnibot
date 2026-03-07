@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from loguru import logger
 import httpx
+from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -22,11 +22,11 @@ from nanobot.config.schema import DingTalkConfig
 
 try:
     from dingtalk_stream import (
-        DingTalkStreamClient,
-        Credential,
+        AckMessage,
         CallbackHandler,
         CallbackMessage,
-        AckMessage,
+        Credential,
+        DingTalkStreamClient,
     )
     from dingtalk_stream.chatbot import ChatbotMessage
 
@@ -220,9 +220,12 @@ class DingTalkChannel(BaseChannel):
             - 根据扩展名推断钉钉上传类型。
         """
         ext = Path(urlparse(media_ref).path).suffix.lower()
-        if ext in self._IMAGE_EXTS: return "image"
-        if ext in self._AUDIO_EXTS: return "voice"
-        if ext in self._VIDEO_EXTS: return "video"
+        if ext in self._IMAGE_EXTS:
+            return "image"
+        if ext in self._AUDIO_EXTS:
+            return "voice"
+        if ext in self._VIDEO_EXTS:
+            return "video"
         return "file"
 
     def _guess_filename(self, media_ref: str, upload_type: str) -> str:
@@ -347,8 +350,10 @@ class DingTalkChannel(BaseChannel):
             if resp.status_code != 200:
                 logger.error("DingTalk send failed msgKey={} status={} body={}", msg_key, resp.status_code, body[:500])
                 return False
-            try: result = resp.json()
-            except Exception: result = {}
+            try:
+                result = resp.json()
+            except Exception:
+                result = {}
             errcode = result.get("errcode")
             if errcode not in (None, 0):
                 logger.error("DingTalk send api error msgKey={} errcode={} body={}", msg_key, errcode, body[:500])

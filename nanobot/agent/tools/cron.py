@@ -6,30 +6,29 @@ from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 
-
 # region [定时任务工具实现]
 
 class CronTool(Tool):
     """用于调度提醒和重复性任务的工具。"""
-    
+
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
         self._channel = ""
         self._chat_id = ""
-    
+
     def set_context(self, channel: str, chat_id: str) -> None:
         """设置当前会话上下文用于消息投递。"""
         self._channel = channel
         self._chat_id = chat_id
-    
+
     @property
     def name(self) -> str:
         return "cron"
-    
+
     @property
     def description(self) -> str:
         return "Schedule reminders and recurring tasks. Actions: add, list, remove."
-    
+
     @property
     def parameters(self) -> dict[str, Any]:
         return {
@@ -67,7 +66,7 @@ class CronTool(Tool):
             },
             "required": ["action"]
         }
-    
+
     async def execute(
         self,
         action: str,
@@ -86,7 +85,7 @@ class CronTool(Tool):
         elif action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
-    
+
     # endregion
 
     # region [核心执行逻辑]
@@ -111,7 +110,7 @@ class CronTool(Tool):
                 ZoneInfo(tz)
             except (KeyError, Exception):
                 return f"Error: unknown timezone '{tz}'"
-        
+
         # 构建调度计划
         delete_after = False
         if every_seconds:
@@ -126,7 +125,7 @@ class CronTool(Tool):
             delete_after = True
         else:
             return "Error: either every_seconds, cron_expr, or at is required"
-        
+
         job = self._cron.add_job(
             name=message[:30],
             schedule=schedule,
@@ -137,14 +136,14 @@ class CronTool(Tool):
             delete_after_run=delete_after,
         )
         return f"Created job '{job.name}' (id: {job.id})"
-    
+
     def _list_jobs(self) -> str:
         jobs = self._cron.list_jobs()
         if not jobs:
             return "No scheduled jobs."
         lines = [f"- {j.name} (id: {j.id}, {j.schedule.kind})" for j in jobs]
         return "Scheduled jobs:\n" + "\n".join(lines)
-    
+
     def _remove_job(self, job_id: str | None) -> str:
         if not job_id:
             return "Error: job_id is required for remove"

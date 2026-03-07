@@ -8,7 +8,6 @@ from typing import Any, Awaitable, Callable
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
 
-
 #region 消息发送工具
 
 class MessageTool(Tool):

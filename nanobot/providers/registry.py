@@ -8,7 +8,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-
 #region 提供方元数据
 
 @dataclass(frozen=True)

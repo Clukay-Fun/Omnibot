@@ -8,7 +8,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-
 #region 文档分类定义
 
 @dataclass(slots=True)

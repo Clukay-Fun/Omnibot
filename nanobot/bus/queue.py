@@ -7,7 +7,6 @@ import asyncio
 
 from nanobot.bus.events import InboundMessage, OutboundMessage
 
-
 #region 消息总线
 
 class MessageBus:

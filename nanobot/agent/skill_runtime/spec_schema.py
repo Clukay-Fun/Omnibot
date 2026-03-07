@@ -9,7 +9,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 #region 基础模型定义
 
 class _SpecBase(BaseModel):
