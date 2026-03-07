@@ -11,6 +11,9 @@ This runbook captures P0 production setup, smoke checks, rollout/rollback, and m
 - Secrets via environment variables
   - Inject `app_id/app_secret/encrypt_key/verification_token` via env vars.
   - Do not commit real credentials to `config.json`.
+  - Template files:
+    - Production: `ops/env/feishu-production.env.example`
+    - Local test: `ops/env/feishu-local.env.example`
 - Feishu OAuth scope minimization
   - Start with minimum scopes used by enabled tools only.
   - Recommended split:
@@ -64,6 +67,22 @@ SQLite backup can be scheduled with cron (example every 24h):
 0 3 * * * /usr/bin/python3.11 /path/to/repo/scripts/ops/sqlite_backup_rotate.py
 ```
 
+Install the cron job automatically:
+
+```bash
+PYTHON_BIN=/usr/bin/python3.11 SCHEDULE="0 3 * * *" ./scripts/ops/install_sqlite_backup_cron.sh
+```
+
+Or install with systemd:
+
+```bash
+sudo cp ops/systemd/nanobot-sqlite-backup.service /etc/systemd/system/
+sudo cp ops/systemd/nanobot-sqlite-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nanobot-sqlite-backup.timer
+systemctl list-timers | grep nanobot-sqlite-backup
+```
+
 ## 3) Rollout and Rollback (P0)
 
 ### Three-phase rollout
@@ -107,6 +126,7 @@ SQLite backup can be scheduled with cron (example every 24h):
 ## 4) Monitoring and Alerts (P0/P1)
 
 Reference threshold template: `ops/alerts/feishu-alert-thresholds.yaml`.
+Prometheus rule template: `ops/monitoring/prometheus/feishu-alert-rules.yaml`.
 
 - Ingress
   - Event receive success rate
@@ -136,3 +156,10 @@ Reference threshold template: `ops/alerts/feishu-alert-thresholds.yaml`.
   - Derived sync success rate
   - Duplicate reminder ratio
   - Cross-user data contamination alerts
+
+Prometheus integration steps:
+
+1. Copy `ops/monitoring/prometheus/feishu-alert-rules.yaml` into your Prometheus rules directory.
+2. Replace placeholder metric names with your actual exported metric names.
+3. Reload Prometheus and verify active alerts.
+4. Route alerts to oncall in Alertmanager.

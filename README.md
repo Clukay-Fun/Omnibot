@@ -148,3 +148,4 @@ Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将
 
 - 生产配置、联调脚本、灰度/回滚、监控告警详见 `OPERATIONS_FEISHU.md`。
 - 生产环境变量模板详见 `ops/env/feishu-production.env.example`。
+- 本地联调环境变量模板详见 `ops/env/feishu-local.env.example`。
