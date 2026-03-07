@@ -26,6 +26,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService
+from nanobot.storage.audit import AuditSink
 from nanobot.storage.sqlite_store import SQLiteStore
 
 try:
@@ -490,6 +491,7 @@ class FeishuChannel(BaseChannel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
         self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._audit_sink = AuditSink(self._sqlite)
         self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []
@@ -684,6 +686,7 @@ class FeishuChannel(BaseChannel):
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+        await self._audit_sink.start()
         await self._cron_service.start()
 
         # Create Lark client for sending messages
@@ -776,6 +779,7 @@ class FeishuChannel(BaseChannel):
         参考: https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py#L86
         """
         self._running = False
+        await self._audit_sink.stop()
         self._cron_service.stop()
         logger.info("Feishu bot stopped")
 
@@ -2078,6 +2082,12 @@ class FeishuChannel(BaseChannel):
         event = _to_plain_data(_safe_get(data, "event", None))
         if not isinstance(event, dict):
             return
+        await self._audit_sink.log_event(
+            "feishu_bitable_field_changed",
+            event_id=str(_safe_dig(data, "header", "event_id") or "") or None,
+            chat_id=str(event.get("chat_id") or "") or None,
+            payload={"event": event},
+        )
         logger.info("Feishu bitable field change event: {}", _safe_json_dumps(event))
         await self._bitable_engine.handle_field_changed(event)
 
@@ -2088,6 +2098,12 @@ class FeishuChannel(BaseChannel):
         event = _to_plain_data(_safe_get(data, "event", None))
         if not isinstance(event, dict):
             return
+        await self._audit_sink.log_event(
+            "feishu_bitable_record_changed",
+            event_id=str(_safe_dig(data, "header", "event_id") or "") or None,
+            chat_id=str(event.get("chat_id") or "") or None,
+            payload={"event": event},
+        )
         logger.info("Feishu bitable record event: {}", _safe_json_dumps(event))
         await self._bitable_engine.handle_record_changed(event)
 
@@ -2142,6 +2158,18 @@ class FeishuChannel(BaseChannel):
                 _safe_dig(data, "header", "event_type")
                 or _safe_dig(event, "event_type")
                 or "card.action.trigger"
+            )
+            await self._audit_sink.log_event(
+                "feishu_card_action_received",
+                event_id=str(_safe_dig(data, "header", "event_id") or "") or None,
+                chat_id=str(open_chat_id),
+                message_id=str(open_message_id or "") or None,
+                payload={
+                    "event_type": str(event_type),
+                    "sender_id": sender_id,
+                    "action_key": action_key,
+                    "action_tag": action_tag,
+                },
             )
 
             metadata = {

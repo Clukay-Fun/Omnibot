@@ -2,13 +2,16 @@
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Callable
 
 import httpx
+from loguru import logger
 
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
 from nanobot.config.schema import FeishuDataConfig
+from nanobot.storage.sqlite_store import SQLiteStore
 
 # region [令牌管理器]
 
@@ -18,12 +21,22 @@ class TenantAccessTokenManager:
     提供内存级别的令牌缓存，利用 asyncio.Lock 避免并发请求重叠，并支持接近过期时提前刷新。
     """
 
-    def __init__(self, config: FeishuDataConfig, http_client_factory: Callable[..., httpx.AsyncClient] | None = None):
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        http_client_factory: Callable[..., httpx.AsyncClient] | None = None,
+        sqlite_store: SQLiteStore | None = None,
+    ):
         self.config = config
         self.http_client_factory = http_client_factory or httpx.AsyncClient
+        self.sqlite_store = sqlite_store
         self._token: str | None = None
         self._expire_time: float = 0.0
         self._lock = asyncio.Lock()
+
+    @property
+    def _sqlite_open_id_key(self) -> str:
+        return f"__tenant__:{self.config.app_id}"
 
     async def get_token(self) -> str:
         """
@@ -36,15 +49,28 @@ class TenantAccessTokenManager:
         if self._token and now < (self._expire_time - self.config.token.refresh_ahead_seconds):
             return self._token
 
+        token_from_store = self._load_valid_sqlite_token(now)
+        if token_from_store is not None:
+            self._token = token_from_store[0]
+            self._expire_time = token_from_store[1]
+            return self._token
+
         async with self._lock:
             # Double check inside lock
             now = time.time()
             if self._token and now < (self._expire_time - self.config.token.refresh_ahead_seconds):
                 return self._token
 
+            token_from_store = self._load_valid_sqlite_token(now)
+            if token_from_store is not None:
+                self._token = token_from_store[0]
+                self._expire_time = token_from_store[1]
+                return self._token
+
             token, expire_in = await self._fetch_token()
             self._token = token
             self._expire_time = now + expire_in
+            self._persist_sqlite_token(token=self._token, expire_time=self._expire_time)
             return self._token
 
     async def cache_snapshot(self) -> dict[str, int | bool]:
@@ -76,5 +102,55 @@ class TenantAccessTokenManager:
 
         return data["tenant_access_token"], data["expire"]
 
-# endregion
+    def _load_valid_sqlite_token(self, now: float) -> tuple[str, float] | None:
+        if self.sqlite_store is None:
+            return None
 
+        try:
+            row = self.sqlite_store.get_feishu_user_token(self._sqlite_open_id_key)
+        except Exception as exc:
+            logger.warning(f"Feishu tenant token sqlite read failed, fallback to memory mode: {exc}")
+            self.sqlite_store = None
+            return None
+
+        if row is None:
+            return None
+
+        token = str(row.get("access_token") or "").strip()
+        expires_at_raw = str(row.get("expires_at") or "").strip()
+        if not token or not expires_at_raw:
+            return None
+
+        try:
+            expire_time = datetime.fromisoformat(expires_at_raw).timestamp()
+        except ValueError:
+            return None
+
+        if now < (expire_time - self.config.token.refresh_ahead_seconds):
+            return token, expire_time
+        return None
+
+    def _persist_sqlite_token(self, *, token: str, expire_time: float) -> None:
+        if self.sqlite_store is None:
+            return
+
+        try:
+            self.sqlite_store.upsert_feishu_user_token(
+                self._sqlite_open_id_key,
+                app_id=self.config.app_id,
+                access_token=token,
+                refresh_token="",
+                token_type="Bearer",
+                scope="",
+                expires_at=datetime.fromtimestamp(expire_time).isoformat(),
+                refresh_expires_at=None,
+                status="active",
+                last_refreshed_at=datetime.now().isoformat(),
+                last_error=None,
+                payload={"kind": "tenant_access_token"},
+            )
+        except Exception as exc:
+            logger.warning(f"Feishu tenant token sqlite write failed, fallback to memory mode: {exc}")
+            self.sqlite_store = None
+
+# endregion

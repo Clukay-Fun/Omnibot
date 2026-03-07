@@ -8,6 +8,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from shutil import copy2
 from typing import Any, Iterator
 
 
@@ -146,10 +147,66 @@ class SQLiteStore:
                 """
             )
             cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_jobs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    schedule_json TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    delete_after_run INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id TEXT PRIMARY KEY,
+                    external_key TEXT,
+                    user_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    channel TEXT,
+                    text TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT,
+                    cancelled_at TEXT,
+                    calendar_event_id TEXT
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_state (
+                    session_key TEXT PRIMARY KEY,
+                    metadata TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_consolidated INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_feishu_message_index_created_at ON feishu_message_index(created_at)"
             )
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_audit_event_type ON event_audit(event_type, created_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_session_state_updated_at ON session_state(updated_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled_next_run ON cron_jobs(enabled, updated_at_ms)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_user_due ON reminders(user_id, due_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_reminders_external_key ON reminders(external_key)"
             )
 
         self._ensure_column("oauth_states", "provider", "provider TEXT NOT NULL DEFAULT 'feishu'")
@@ -191,6 +248,318 @@ class SQLiteStore:
             return None
         return {key: row[key] for key in row.keys()}
 
+    @staticmethod
+    def _bool_to_int(value: Any) -> int:
+        return 1 if bool(value) else 0
+
+    def maybe_backup_file(self, path: Path) -> Path | None:
+        """Create a one-time .bak backup when source exists."""
+        if not path.exists():
+            return None
+        backup_path = path.with_name(f"{path.name}.bak")
+        if backup_path.exists():
+            return backup_path
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        copy2(path, backup_path)
+        return backup_path
+
+    def list_cron_jobs(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                enabled,
+                schedule_json,
+                payload_json,
+                state_json,
+                created_at_ms,
+                updated_at_ms,
+                delete_after_run
+            FROM cron_jobs
+            ORDER BY created_at_ms ASC, id ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "name": str(row["name"]),
+                "enabled": bool(row["enabled"]),
+                "schedule": self._decode(str(row["schedule_json"]), default={}),
+                "payload": self._decode(str(row["payload_json"]), default={}),
+                "state": self._decode(str(row["state_json"]), default={}),
+                "created_at_ms": int(row["created_at_ms"]),
+                "updated_at_ms": int(row["updated_at_ms"]),
+                "delete_after_run": bool(row["delete_after_run"]),
+            }
+            for row in rows
+        ]
+
+    def upsert_cron_job(self, job: dict[str, Any]) -> None:
+        with self.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO cron_jobs(
+                    id,
+                    name,
+                    enabled,
+                    schedule_json,
+                    payload_json,
+                    state_json,
+                    created_at_ms,
+                    updated_at_ms,
+                    delete_after_run
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id)
+                DO UPDATE SET
+                    name=excluded.name,
+                    enabled=excluded.enabled,
+                    schedule_json=excluded.schedule_json,
+                    payload_json=excluded.payload_json,
+                    state_json=excluded.state_json,
+                    created_at_ms=excluded.created_at_ms,
+                    updated_at_ms=excluded.updated_at_ms,
+                    delete_after_run=excluded.delete_after_run
+                """,
+                (
+                    str(job.get("id") or ""),
+                    str(job.get("name") or ""),
+                    self._bool_to_int(job.get("enabled", True)),
+                    self._encode(job.get("schedule") or {}),
+                    self._encode(job.get("payload") or {}),
+                    self._encode(job.get("state") or {}),
+                    int(job.get("created_at_ms") or 0),
+                    int(job.get("updated_at_ms") or 0),
+                    self._bool_to_int(job.get("delete_after_run", False)),
+                ),
+            )
+
+    def save_cron_jobs(self, jobs: list[dict[str, Any]]) -> None:
+        keep_ids = [str(item.get("id") or "") for item in jobs if str(item.get("id") or "")]
+        with self.transaction() as cur:
+            if keep_ids:
+                placeholders = ", ".join("?" for _ in keep_ids)
+                cur.execute(f"DELETE FROM cron_jobs WHERE id NOT IN ({placeholders})", keep_ids)
+            else:
+                cur.execute("DELETE FROM cron_jobs")
+
+            for job in jobs:
+                cur.execute(
+                    """
+                    INSERT INTO cron_jobs(
+                        id,
+                        name,
+                        enabled,
+                        schedule_json,
+                        payload_json,
+                        state_json,
+                        created_at_ms,
+                        updated_at_ms,
+                        delete_after_run
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id)
+                    DO UPDATE SET
+                        name=excluded.name,
+                        enabled=excluded.enabled,
+                        schedule_json=excluded.schedule_json,
+                        payload_json=excluded.payload_json,
+                        state_json=excluded.state_json,
+                        created_at_ms=excluded.created_at_ms,
+                        updated_at_ms=excluded.updated_at_ms,
+                        delete_after_run=excluded.delete_after_run
+                    """,
+                    (
+                        str(job.get("id") or ""),
+                        str(job.get("name") or ""),
+                        self._bool_to_int(job.get("enabled", True)),
+                        self._encode(job.get("schedule") or {}),
+                        self._encode(job.get("payload") or {}),
+                        self._encode(job.get("state") or {}),
+                        int(job.get("created_at_ms") or 0),
+                        int(job.get("updated_at_ms") or 0),
+                        self._bool_to_int(job.get("delete_after_run", False)),
+                    ),
+                )
+
+    def delete_cron_job(self, job_id: str) -> None:
+        with self.transaction() as cur:
+            cur.execute("DELETE FROM cron_jobs WHERE id=?", (job_id,))
+
+    def list_reminders(
+        self,
+        *,
+        user_id: str | None = None,
+        external_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT id, external_key, user_id, chat_id, channel, text, due_at, status, created_at, "
+            "updated_at, cancelled_at, calendar_event_id FROM reminders"
+        )
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id is not None:
+            clauses.append("user_id=?")
+            params.append(user_id)
+        if external_key is not None:
+            clauses.append("external_key=?")
+            params.append(external_key)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY due_at ASC, id ASC"
+        rows = self._conn.execute(query, tuple(params)).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = {
+                "id": str(row["id"]),
+                "user_id": str(row["user_id"]),
+                "chat_id": str(row["chat_id"]),
+                "channel": row["channel"],
+                "text": str(row["text"]),
+                "due_at": str(row["due_at"]),
+                "status": str(row["status"]),
+                "created_at": str(row["created_at"]),
+            }
+            if row["external_key"] is not None:
+                item["external_key"] = str(row["external_key"])
+            if row["updated_at"] is not None:
+                item["updated_at"] = str(row["updated_at"])
+            if row["cancelled_at"] is not None:
+                item["cancelled_at"] = str(row["cancelled_at"])
+            if row["calendar_event_id"] is not None:
+                item["calendar_event_id"] = str(row["calendar_event_id"])
+            result.append(item)
+        return result
+
+    def upsert_reminder(self, reminder: dict[str, Any]) -> None:
+        with self.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO reminders(
+                    id,
+                    external_key,
+                    user_id,
+                    chat_id,
+                    channel,
+                    text,
+                    due_at,
+                    status,
+                    created_at,
+                    updated_at,
+                    cancelled_at,
+                    calendar_event_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id)
+                DO UPDATE SET
+                    external_key=excluded.external_key,
+                    user_id=excluded.user_id,
+                    chat_id=excluded.chat_id,
+                    channel=excluded.channel,
+                    text=excluded.text,
+                    due_at=excluded.due_at,
+                    status=excluded.status,
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at,
+                    cancelled_at=excluded.cancelled_at,
+                    calendar_event_id=excluded.calendar_event_id
+                """,
+                (
+                    str(reminder.get("id") or ""),
+                    reminder.get("external_key"),
+                    str(reminder.get("user_id") or ""),
+                    str(reminder.get("chat_id") or ""),
+                    reminder.get("channel"),
+                    str(reminder.get("text") or ""),
+                    str(reminder.get("due_at") or ""),
+                    str(reminder.get("status") or "active"),
+                    str(reminder.get("created_at") or datetime.now().isoformat()),
+                    reminder.get("updated_at"),
+                    reminder.get("cancelled_at"),
+                    reminder.get("calendar_event_id"),
+                ),
+            )
+
+    def save_reminders(self, reminders: list[dict[str, Any]]) -> None:
+        keep_ids = [str(item.get("id") or "") for item in reminders if str(item.get("id") or "")]
+        with self.transaction() as cur:
+            if keep_ids:
+                placeholders = ", ".join("?" for _ in keep_ids)
+                cur.execute(f"DELETE FROM reminders WHERE id NOT IN ({placeholders})", keep_ids)
+            else:
+                cur.execute("DELETE FROM reminders")
+
+            for reminder in reminders:
+                cur.execute(
+                    """
+                    INSERT INTO reminders(
+                        id,
+                        external_key,
+                        user_id,
+                        chat_id,
+                        channel,
+                        text,
+                        due_at,
+                        status,
+                        created_at,
+                        updated_at,
+                        cancelled_at,
+                        calendar_event_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id)
+                    DO UPDATE SET
+                        external_key=excluded.external_key,
+                        user_id=excluded.user_id,
+                        chat_id=excluded.chat_id,
+                        channel=excluded.channel,
+                        text=excluded.text,
+                        due_at=excluded.due_at,
+                        status=excluded.status,
+                        created_at=excluded.created_at,
+                        updated_at=excluded.updated_at,
+                        cancelled_at=excluded.cancelled_at,
+                        calendar_event_id=excluded.calendar_event_id
+                    """,
+                    (
+                        str(reminder.get("id") or ""),
+                        reminder.get("external_key"),
+                        str(reminder.get("user_id") or ""),
+                        str(reminder.get("chat_id") or ""),
+                        reminder.get("channel"),
+                        str(reminder.get("text") or ""),
+                        str(reminder.get("due_at") or ""),
+                        str(reminder.get("status") or "active"),
+                        str(reminder.get("created_at") or datetime.now().isoformat()),
+                        reminder.get("updated_at"),
+                        reminder.get("cancelled_at"),
+                        reminder.get("calendar_event_id"),
+                    ),
+                )
+
+    def update_reminder(self, reminder_id: str, *, updates: dict[str, Any]) -> dict[str, Any] | None:
+        current = self.get_reminder(reminder_id)
+        if current is None:
+            return None
+        current.update(updates)
+        self.upsert_reminder(current)
+        return current
+
+    def cancel_reminder(self, reminder_id: str, *, cancelled_at: str) -> dict[str, Any] | None:
+        return self.update_reminder(reminder_id, updates={"status": "cancelled", "cancelled_at": cancelled_at})
+
+    def get_reminder(self, reminder_id: str) -> dict[str, Any] | None:
+        rows = self.list_reminders()
+        for item in rows:
+            if item.get("id") == reminder_id:
+                return item
+        return None
+
+    def get_reminder_by_external_key(self, external_key: str) -> dict[str, Any] | None:
+        rows = self.list_reminders(external_key=external_key)
+        return rows[0] if rows else None
+
     def record_event_audit(
         self,
         event_type: str,
@@ -200,21 +569,116 @@ class SQLiteStore:
         message_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> None:
+        self.record_event_audit_batch(
+            [
+                {
+                    "event_type": event_type,
+                    "event_id": event_id,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "payload": payload or {},
+                }
+            ]
+        )
+
+    def record_event_audit_batch(self, events: list[dict[str, Any]]) -> None:
+        if not events:
+            return
+        now_iso = datetime.now().isoformat()
         with self.transaction() as cur:
-            cur.execute(
+            rows = [
+                (
+                    str(item.get("event_type") or ""),
+                    str(item.get("event_id") or "") or None,
+                    str(item.get("chat_id") or "") or None,
+                    str(item.get("message_id") or "") or None,
+                    self._encode(item.get("payload") or {}),
+                    str(item.get("created_at") or now_iso),
+                )
+                for item in events
+            ]
+            cur.executemany(
                 """
                 INSERT INTO event_audit(event_type, event_id, chat_id, message_id, payload, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
+                rows,
+            )
+
+    def upsert_session_state(
+        self,
+        session_key: str,
+        *,
+        metadata: dict[str, Any],
+        created_at: str,
+        updated_at: str,
+        last_consolidated: int,
+    ) -> None:
+        with self.transaction() as cur:
+            cur.execute(
+                """
+                INSERT INTO session_state(session_key, metadata, created_at, updated_at, last_consolidated)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_key)
+                DO UPDATE SET
+                    metadata=excluded.metadata,
+                    created_at=excluded.created_at,
+                    updated_at=excluded.updated_at,
+                    last_consolidated=excluded.last_consolidated
+                """,
                 (
-                    event_type,
-                    event_id,
-                    chat_id,
-                    message_id,
-                    self._encode(payload or {}),
-                    datetime.now().isoformat(),
+                    session_key,
+                    self._encode(metadata),
+                    created_at,
+                    updated_at,
+                    int(last_consolidated),
                 ),
             )
+
+    def get_session_state(self, session_key: str) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            """
+            SELECT session_key, metadata, created_at, updated_at, last_consolidated
+            FROM session_state
+            WHERE session_key=?
+            """,
+            (session_key,),
+        ).fetchone()
+        data = self._row_to_dict(row)
+        if data is None:
+            return None
+        return {
+            "session_key": str(data.get("session_key") or session_key),
+            "metadata": self._decode(data.get("metadata"), default={}),
+            "created_at": str(data.get("created_at") or ""),
+            "updated_at": str(data.get("updated_at") or ""),
+            "last_consolidated": int(data.get("last_consolidated") or 0),
+        }
+
+    def list_session_state(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            """
+            SELECT session_key, metadata, created_at, updated_at, last_consolidated
+            FROM session_state
+            ORDER BY updated_at DESC
+            """
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "session_key": str(row["session_key"]),
+                    "metadata": self._decode(str(row["metadata"]), default={}),
+                    "created_at": str(row["created_at"]),
+                    "updated_at": str(row["updated_at"]),
+                    "last_consolidated": int(row["last_consolidated"]),
+                }
+            )
+        return result
+
+    def delete_session_state(self, session_key: str) -> None:
+        with self.transaction() as cur:
+            cur.execute("DELETE FROM session_state WHERE session_key=?", (session_key,))
 
     def upsert_oauth_state(
         self,

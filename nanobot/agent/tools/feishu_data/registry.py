@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Iterable
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.bitable import (
     BitableGetTool,
@@ -20,7 +22,9 @@ from nanobot.agent.tools.feishu_data.bitable_write import (
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.doc_search import DocSearchTool
+from nanobot.agent.tools.feishu_data.token_manager import TenantAccessTokenManager
 from nanobot.config.schema import FeishuDataConfig
+from nanobot.storage.sqlite_store import SQLiteStore
 
 # region [注册工厂]
 
@@ -33,7 +37,17 @@ def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None 
     if not config.enabled:
         return []
 
-    client = FeishuDataClient(config)
+    token_manager: TenantAccessTokenManager
+    sqlite_store: SQLiteStore | None = None
+    if workspace is not None:
+        sqlite_path = workspace / "memory" / "feishu" / "state.sqlite3"
+        try:
+            sqlite_store = SQLiteStore(sqlite_path)
+        except Exception as exc:
+            logger.warning(f"Failed to initialize Feishu token sqlite store, fallback to memory mode: {exc}")
+
+    token_manager = TenantAccessTokenManager(config=config, sqlite_store=sqlite_store)
+    client = FeishuDataClient(config, token_manager=token_manager)
     confirm_store = ConfirmTokenStore(ttl_seconds=config.confirm_token_ttl_seconds)
 
     tools: list[Tool] = [

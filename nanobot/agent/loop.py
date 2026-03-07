@@ -16,6 +16,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
 from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
@@ -38,6 +39,8 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
+from nanobot.storage.audit import AuditSink
+from nanobot.storage.sqlite_store import SQLiteStore
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -139,6 +142,10 @@ class AgentLoop:
 
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
+        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._audit_sink = AuditSink(self._sqlite)
+        self._memory_worker = MemoryWriteWorker(self.workspace)
+        self._workers_started = False
         self.tools = ToolRegistry()
         self._runtime_text = RuntimeTextCatalog.load(workspace)
         self._feishu_oauth_service = feishu_oauth_service
@@ -1463,6 +1470,7 @@ class AgentLoop:
     async def run(self) -> None:
         """运行智能体循环，将消息分发为任务，以保持对 /stop 命令的响应能力。"""
         self._running = True
+        await self._ensure_background_workers_started()
         await self._connect_mcp()
         logger.info("Agent loop started")
 
@@ -1505,6 +1513,19 @@ class AgentLoop:
     async def _dispatch(self, msg: InboundMessage) -> None:
         """在会话级锁下处理一条消息。"""
         lock = self._get_session_lock(msg.session_key)
+        request_id = str((msg.metadata or {}).get("message_id") or f"{msg.session_key}:{time.time_ns()}")
+        await self._audit_sink.log_event(
+            "agent_request_started",
+            event_id=request_id,
+            chat_id=msg.chat_id,
+            message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+            payload={
+                "channel": msg.channel,
+                "session_key": msg.session_key,
+                "sender_id": msg.sender_id,
+                "content_preview": (msg.content or "")[:240],
+            },
+        )
         async with lock:
             try:
                 response = await self._process_message(msg)
@@ -1515,11 +1536,33 @@ class AgentLoop:
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="", metadata=msg.metadata or {},
                     ))
+                await self._audit_sink.log_event(
+                    "agent_request_finished",
+                    event_id=request_id,
+                    chat_id=msg.chat_id,
+                    message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+                    payload={
+                        "channel": msg.channel,
+                        "session_key": msg.session_key,
+                        "has_response": response is not None,
+                    },
+                )
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error processing message for session {}", msg.session_key)
+                await self._audit_sink.log_event(
+                    "agent_request_error",
+                    event_id=request_id,
+                    chat_id=msg.chat_id,
+                    message_id=str((msg.metadata or {}).get("message_id") or "") or None,
+                    payload={
+                        "channel": msg.channel,
+                        "session_key": msg.session_key,
+                        "error": str(exc),
+                    },
+                )
                 await self.bus.publish_outbound(OutboundMessage(
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
@@ -1527,6 +1570,7 @@ class AgentLoop:
 
     async def close_mcp(self) -> None:
         """关闭 MCP 连接。"""
+        await self._stop_background_workers()
         if self._mcp_stack:
             try:
                 await self._mcp_stack.aclose()
@@ -1542,6 +1586,21 @@ class AgentLoop:
     # endregion
 
     # region [消息处理核心逻辑]
+
+    async def _ensure_background_workers_started(self) -> None:
+        if self._workers_started:
+            return
+        await self._audit_sink.start()
+        await self._memory_worker.start()
+        self._workers_started = True
+
+    async def _stop_background_workers(self) -> None:
+        if not self._workers_started:
+            return
+        self._workers_started = False
+        await self._audit_sink.stop()
+        await self._memory_worker.stop()
+        self._sqlite.close()
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
@@ -1803,6 +1862,7 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """处理单条传入消息并返回响应。"""
+        await self._ensure_background_workers_started()
         # 系统消息：从 chat_id 中解析来源 ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -2001,6 +2061,7 @@ class AgentLoop:
 
         self._save_turn(session, all_msgs, 1 + len(history))
         self.sessions.save(session)
+        await self._enqueue_memory_write(msg, final_text)
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
@@ -2049,6 +2110,37 @@ class AgentLoop:
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
+
+    async def _enqueue_memory_write(self, msg: InboundMessage, final_text: str) -> None:
+        if msg.channel != "feishu":
+            return
+        metadata = msg.metadata or {}
+        chat_type = str(metadata.get("chat_type") or "")
+        is_group = chat_type == "group"
+        thread_id = str(metadata.get("thread_id") or metadata.get("root_id") or "").strip() or None
+
+        scopes: list[MemoryScope] = []
+        if is_group:
+            scopes.append("chat")
+            if thread_id:
+                scopes.append("thread")
+        else:
+            scopes.append("user")
+
+        if not scopes:
+            return
+
+        task = MemoryTurnTask(
+            channel=msg.channel,
+            user_id=msg.sender_id,
+            chat_id=msg.chat_id,
+            thread_id=thread_id,
+            user_text=msg.content,
+            assistant_text=final_text,
+            message_id=str(metadata.get("message_id") or "") or None,
+            scopes=tuple(scopes),
+        )
+        await self._memory_worker.enqueue(task)
 
     # endregion
 

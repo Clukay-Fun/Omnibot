@@ -23,11 +23,14 @@ class FeishuDataClient:
         self,
         config: FeishuDataConfig,
         token_manager: TenantAccessTokenManager | None = None,
-        http_client_factory: Callable[..., httpx.AsyncClient] | None = None
+        http_client_factory: Callable[..., httpx.AsyncClient] | None = None,
     ):
         self.config = config
         self.http_client_factory = http_client_factory or httpx.AsyncClient
-        self.token_manager = token_manager or TenantAccessTokenManager(config, self.http_client_factory)
+        self.token_manager = token_manager or TenantAccessTokenManager(
+            config=config,
+            http_client_factory=self.http_client_factory,
+        )
 
     async def request(
         self,
@@ -102,4 +105,3 @@ class FeishuDataClient:
         raise FeishuDataAPIError(-1, "重试耗尽后的网络错误 (Network error after retries)", str(last_error))
 
 # endregion
-

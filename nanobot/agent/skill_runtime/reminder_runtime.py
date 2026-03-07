@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from nanobot.storage.sqlite_store import SQLiteStore
+
 CalendarHook = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
 
@@ -39,6 +41,48 @@ class ReminderRuntime:
         self._store_path = store_path
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
         self._calendar_hook = calendar_hook
+        self._sqlite = SQLiteStore(self._store_path.with_suffix(".sqlite3"))
+
+    def _migrate_legacy_json_if_needed(self) -> None:
+        if not self._store_path.exists():
+            return
+
+        marker_path = self._store_path.with_name(f"{self._store_path.name}.migrated")
+        if marker_path.exists():
+            return
+
+        try:
+            payload = json.loads(self._store_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if not isinstance(payload, list):
+            return
+
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            reminder_id = str(item.get("id") or "")
+            if not reminder_id:
+                continue
+            self._sqlite.upsert_reminder(
+                {
+                    "id": reminder_id,
+                    "external_key": item.get("external_key"),
+                    "user_id": str(item.get("user_id") or ""),
+                    "chat_id": str(item.get("chat_id") or ""),
+                    "channel": item.get("channel"),
+                    "text": str(item.get("text") or ""),
+                    "due_at": str(item.get("due_at") or ""),
+                    "status": str(item.get("status") or "active"),
+                    "created_at": str(item.get("created_at") or self._now_fn().isoformat()),
+                    "updated_at": item.get("updated_at"),
+                    "cancelled_at": item.get("cancelled_at"),
+                    "calendar_event_id": item.get("calendar_event_id"),
+                }
+            )
+
+        self._sqlite.maybe_backup_file(self._store_path)
+        marker_path.write_text(self._now_fn().isoformat(), encoding="utf-8")
 
     async def create_reminder(
         self,
@@ -202,15 +246,8 @@ class ReminderRuntime:
         功能:
             - 防暴解析，对断链或受损文段主动抹平返回安全序列。
         """
-        if not self._store_path.exists():
-            return []
-        try:
-            payload = json.loads(self._store_path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return []
-        if not isinstance(payload, list):
-            return []
-        return [dict(item) for item in payload if isinstance(item, dict)]
+        self._migrate_legacy_json_if_needed()
+        return self._sqlite.list_reminders()
 
     def _save_all(self, reminders: list[dict[str, Any]]) -> None:
         """
@@ -219,9 +256,8 @@ class ReminderRuntime:
         功能:
             - 针对 ID 特征对散乱的数据施加稳定排布再回灌写入。
         """
-        self._store_path.parent.mkdir(parents=True, exist_ok=True)
         normalized = sorted(reminders, key=lambda item: str(item.get("id") or ""))
-        self._store_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._sqlite.save_reminders(normalized)
 
     @staticmethod
     def _next_id(reminders: list[dict[str, Any]]) -> str:
