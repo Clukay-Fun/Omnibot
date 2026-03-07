@@ -95,6 +95,7 @@ def _migrate_config(data: dict) -> dict:
     auth = _get_or_create(feishu, "auth")
     api = _get_or_create(feishu, "api")
     bitable = _get_or_create(feishu, "bitable")
+    storage = _get_or_create(feishu, "storage")
 
     channels = _get_or_create(data, "channels")
     feishu_channel = _get_or_create(channels, "feishu")
@@ -112,6 +113,18 @@ def _migrate_config(data: dict) -> dict:
         _prefer_new_value(auth, mapped_key, feishu_tool.get(key), warnings, f"tools.feishuData.{key}")
 
     _prefer_new_value(api, "apiBase", feishu_tool.get("apiBase"), warnings, "tools.feishuData.apiBase")
+
+    for key in (
+        "stateDbPath",
+        "sqliteJournalMode",
+        "sqliteSynchronous",
+        "sqliteBusyTimeoutMs",
+        "sqliteBackupDir",
+        "sqliteBackupIntervalHours",
+        "sqliteBackupRetentionDays",
+    ):
+        _prefer_new_value(storage, key, feishu_channel.get(key), warnings, f"channels.feishu.{key}")
+        _prefer_new_value(storage, key, feishu_tool.get(key), warnings, f"tools.feishuData.{key}")
 
     for key in ("domain", "defaultAppToken", "defaultTableId", "defaultViewId", "fieldMapping"):
         _prefer_new_value(bitable, key, legacy_bitable.get(key), warnings, f"tools.feishuData.bitable.{key}")

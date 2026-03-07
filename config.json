@@ -21,8 +21,17 @@
   "integrations": {
     "feishu": {
       "auth": {
-        "appId": "cli_xxx",
-        "appSecret": "xxx"
+        "appId": "",
+        "appSecret": ""
+      },
+      "storage": {
+        "stateDbPath": "",
+        "sqliteJournalMode": "WAL",
+        "sqliteSynchronous": "NORMAL",
+        "sqliteBusyTimeoutMs": 5000,
+        "sqliteBackupDir": "",
+        "sqliteBackupIntervalHours": 24,
+        "sqliteBackupRetentionDays": 7
       },
       "api": {
         "apiBase": "https://open.feishu.cn"
@@ -36,6 +45,10 @@
         "scopes": [],
         "stateTtlSeconds": 600,
         "refreshAheadSeconds": 300,
+        "enforceHttpsPublicBaseUrl": true,
+        "allowedRedirectDomains": [
+          "your-domain.example.com"
+        ],
         "successHtmlTitle": "Feishu Authorization Completed",
         "failureHtmlTitle": "Feishu Authorization Failed"
       }

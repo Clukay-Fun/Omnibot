@@ -27,7 +27,7 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService
 from nanobot.storage.audit import AuditSink
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
 
 try:
     import lark_oapi as lark
@@ -451,6 +451,8 @@ class FeishuChannel(BaseChannel):
         bus: MessageBus,
         workspace: Path | None = None,
         feishu_data_config: FeishuDataConfig | None = None,
+        state_db_path: Path | None = None,
+        sqlite_options: SQLiteConnectionOptions | None = None,
     ):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
@@ -490,7 +492,10 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
-        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._sqlite = SQLiteStore(
+            state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3"),
+            options=sqlite_options,
+        )
         self._audit_sink = AuditSink(
             self._sqlite,
             cleanup_interval_seconds=float(

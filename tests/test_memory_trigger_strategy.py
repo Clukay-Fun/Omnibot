@@ -3,6 +3,7 @@ import pytest
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import Config
 from nanobot.providers.base import LLMResponse
 
 
@@ -83,3 +84,76 @@ async def test_memory_trigger_does_not_force_flush_without_thread_context(tmp_pa
     assert len(capture.tasks) == 1
     assert capture.tasks[0].force_flush is False
     assert capture.tasks[0].scopes == ("chat",)
+
+
+@pytest.mark.asyncio
+async def test_memory_trigger_uses_group_flush_threshold_from_config(tmp_path) -> None:
+    config = Config.model_validate(
+        {
+            "channels": {
+                "feishu": {
+                    "memoryFlushThresholdPrivate": 2,
+                    "memoryFlushThresholdGroup": 7,
+                    "memoryForceFlushOnTopicEnd": False,
+                }
+            }
+        }
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_DummyProvider(),
+        workspace=tmp_path,
+        channels_config=config.channels,
+    )
+    capture = _CaptureMemoryWorker()
+    loop._memory_worker = capture
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="oc_group_1",
+        content="done",
+        metadata={"chat_type": "group", "thread_id": "omt_topic_1", "message_id": "om_4"},
+    )
+
+    await loop._enqueue_memory_write(msg, "收到")
+
+    assert len(capture.tasks) == 1
+    assert capture.tasks[0].flush_threshold == 7
+    assert capture.tasks[0].force_flush is False
+
+
+@pytest.mark.asyncio
+async def test_memory_trigger_uses_private_flush_threshold_from_config(tmp_path) -> None:
+    config = Config.model_validate(
+        {
+            "channels": {
+                "feishu": {
+                    "memoryFlushThresholdPrivate": 2,
+                    "memoryFlushThresholdGroup": 7,
+                }
+            }
+        }
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_DummyProvider(),
+        workspace=tmp_path,
+        channels_config=config.channels,
+    )
+    capture = _CaptureMemoryWorker()
+    loop._memory_worker = capture
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="ou_user_1",
+        content="继续",
+        metadata={"chat_type": "p2p", "message_id": "om_5"},
+    )
+
+    await loop._enqueue_memory_write(msg, "收到")
+
+    assert len(capture.tasks) == 1
+    assert capture.tasks[0].scopes == ("user",)
+    assert capture.tasks[0].flush_threshold == 2

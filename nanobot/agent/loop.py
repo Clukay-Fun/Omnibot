@@ -40,7 +40,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 from nanobot.storage.audit import AuditSink
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -111,6 +111,8 @@ class AgentLoop:
         skillspec_render_primary_timeout_seconds: float = 12.0,
         skillspec_render_retry_timeout_seconds: float = 6.0,
         feishu_oauth_service: "FeishuOAuthService | None" = None,
+        state_db_path: Path | None = None,
+        sqlite_options: SQLiteConnectionOptions | None = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -149,11 +151,21 @@ class AgentLoop:
         )
 
         self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
-        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._state_db_path = state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._sqlite_options = sqlite_options
+        self.sessions = session_manager or SessionManager(
+            workspace,
+            state_db_path=self._state_db_path,
+            sqlite_options=self._sqlite_options,
+        )
+        self._sqlite = SQLiteStore(self._state_db_path, options=self._sqlite_options)
         audit_cleanup_interval_seconds = AuditSink.DEFAULT_CLEANUP_INTERVAL_SECONDS
         audit_event_retention_days = AuditSink.DEFAULT_EVENT_AUDIT_RETENTION_DAYS
         audit_message_index_retention_days = AuditSink.DEFAULT_FEISHU_MESSAGE_INDEX_RETENTION_DAYS
+        self._memory_flush_threshold_private = self._MEMORY_WRITE_TURN_THRESHOLD
+        self._memory_flush_threshold_group = self._MEMORY_WRITE_TURN_THRESHOLD
+        self._memory_force_flush_on_topic_end = True
+        self._memory_topic_end_keywords = tuple(self._MEMORY_TOPIC_END_KEYWORDS)
         if self.channels_config is not None:
             feishu_cfg = getattr(self.channels_config, "feishu", None)
             if feishu_cfg is not None:
@@ -170,15 +182,55 @@ class AgentLoop:
                         audit_message_index_retention_days,
                     )
                 )
+                self._memory_flush_threshold_private = max(
+                    1,
+                    int(
+                        getattr(
+                            feishu_cfg,
+                            "memory_flush_threshold_private",
+                            self._memory_flush_threshold_private,
+                        )
+                    ),
+                )
+                self._memory_flush_threshold_group = max(
+                    1,
+                    int(
+                        getattr(
+                            feishu_cfg,
+                            "memory_flush_threshold_group",
+                            self._memory_flush_threshold_group,
+                        )
+                    ),
+                )
+                self._memory_force_flush_on_topic_end = bool(
+                    getattr(
+                        feishu_cfg,
+                        "memory_force_flush_on_topic_end",
+                        self._memory_force_flush_on_topic_end,
+                    )
+                )
+                configured_keywords = getattr(feishu_cfg, "memory_topic_end_keywords", None)
+                if isinstance(configured_keywords, list):
+                    cleaned_keywords = tuple(
+                        item.strip()
+                        for item in configured_keywords
+                        if isinstance(item, str) and item.strip()
+                    )
+                    if cleaned_keywords:
+                        self._memory_topic_end_keywords = cleaned_keywords
         self._audit_sink = AuditSink(
             self._sqlite,
             cleanup_interval_seconds=audit_cleanup_interval_seconds,
             event_audit_retention_days=audit_event_retention_days,
             feishu_message_index_retention_days=audit_message_index_retention_days,
         )
+        memory_base_threshold = min(
+            self._memory_flush_threshold_private,
+            self._memory_flush_threshold_group,
+        )
         self._memory_worker = MemoryWriteWorker(
             self.workspace,
-            flush_threshold=self._MEMORY_WRITE_TURN_THRESHOLD,
+            flush_threshold=memory_base_threshold,
         )
         self._workers_started = False
         self.tools = ToolRegistry()
@@ -200,6 +252,8 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             feishu_data_config=feishu_data_config,
+            state_db_path=self._state_db_path,
+            sqlite_options=self._sqlite_options,
         )
 
         self._running = False
@@ -1007,7 +1061,12 @@ class AgentLoop:
 
         if self.feishu_data_config and self.feishu_data_config.enabled:
             from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-            for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
+            for tool in build_feishu_data_tools(
+                self.feishu_data_config,
+                workspace=self.workspace,
+                state_db_path=self._state_db_path,
+                sqlite_options=self._sqlite_options,
+            ):
                 self.tools.register(tool)
 
     # endregion
@@ -2185,8 +2244,10 @@ class AgentLoop:
             scopes.append("chat")
             if thread_id:
                 scopes.append("thread")
+            flush_threshold = self._memory_flush_threshold_group
         else:
             scopes.append("user")
+            flush_threshold = self._memory_flush_threshold_private
 
         if not scopes:
             return
@@ -2203,17 +2264,19 @@ class AgentLoop:
             message_id=str(metadata.get("message_id") or "") or None,
             scopes=tuple(scopes),
             force_flush=force_flush,
+            flush_threshold=flush_threshold,
         )
         await self._memory_worker.enqueue(task)
 
-    @classmethod
-    def _should_force_memory_flush(cls, content: str, thread_id: str | None) -> bool:
+    def _should_force_memory_flush(self, content: str, thread_id: str | None) -> bool:
+        if not self._memory_force_flush_on_topic_end:
+            return False
         if not thread_id:
             return False
         text = " ".join(content.lower().split())
         if not text:
             return False
-        for keyword in cls._MEMORY_TOPIC_END_KEYWORDS:
+        for keyword in self._memory_topic_end_keywords:
             token = keyword.lower()
             if token == "done":
                 if re.search(r"\bdone\b", text):

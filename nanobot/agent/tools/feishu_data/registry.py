@@ -19,17 +19,17 @@ from nanobot.agent.tools.feishu_data.bitable_admin_tools import (
     BitableTableCreateTool,
     BitableViewCreateTool,
 )
+from nanobot.agent.tools.feishu_data.bitable_write import (
+    BitableCreateTool,
+    BitableDeleteTool,
+    BitableUpdateTool,
+)
 from nanobot.agent.tools.feishu_data.calendar_tools import (
     CalendarCreateTool,
     CalendarDeleteTool,
     CalendarFreebusyTool,
     CalendarListTool,
     CalendarUpdateTool,
-)
-from nanobot.agent.tools.feishu_data.bitable_write import (
-    BitableCreateTool,
-    BitableDeleteTool,
-    BitableUpdateTool,
 )
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
@@ -41,19 +41,25 @@ from nanobot.agent.tools.feishu_data.task_tools import (
     TaskCreateTool,
     TaskDeleteTool,
     TaskGetTool,
+    TasklistListTool,
     TaskListTool,
     TaskUpdateTool,
-    TasklistListTool,
 )
 from nanobot.agent.tools.feishu_data.token_manager import TenantAccessTokenManager
 from nanobot.config.schema import FeishuDataConfig
 from nanobot.oauth import FeishuOAuthClient, FeishuUserTokenManager
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
 
 # region [注册工厂]
 
 
-def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None = None) -> Iterable[Tool]:
+def build_feishu_data_tools(
+    config: FeishuDataConfig,
+    *,
+    workspace: Path | None = None,
+    state_db_path: Path | None = None,
+    sqlite_options: SQLiteConnectionOptions | None = None,
+) -> Iterable[Tool]:
     """
     组装并返回所有已启用的飞书数据操作工具。
     在循环引擎或子代理工具初始化时被调用。
@@ -64,10 +70,12 @@ def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None 
     token_manager: TenantAccessTokenManager
     sqlite_store: SQLiteStore | None = None
     user_token_manager: FeishuUserTokenManager | None = None
-    if workspace is not None:
+    sqlite_path = state_db_path
+    if sqlite_path is None and workspace is not None:
         sqlite_path = workspace / "memory" / "feishu" / "state.sqlite3"
+    if sqlite_path is not None:
         try:
-            sqlite_store = SQLiteStore(sqlite_path)
+            sqlite_store = SQLiteStore(sqlite_path, options=sqlite_options)
         except Exception as exc:
             logger.warning(f"Failed to initialize Feishu token sqlite store, fallback to memory mode: {exc}")
 
@@ -90,6 +98,7 @@ def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None 
     client = FeishuDataClient(config, token_manager=token_manager)
     confirm_store = ConfirmTokenStore(ttl_seconds=config.confirm_token_ttl_seconds)
 
+    flags = config.feature_flags
     tools: list[Tool] = [
         # 只读工具
         BitableSearchTool(config, client),
@@ -103,28 +112,41 @@ def build_feishu_data_tools(config: FeishuDataConfig, *, workspace: Path | None 
         BitableCreateTool(config, client, confirm_store),
         BitableUpdateTool(config, client, confirm_store),
         BitableDeleteTool(config, client, confirm_store),
-        # Bitable 管理工具
-        BitableAppCreateTool(config, client),
-        BitableTableCreateTool(config, client),
-        BitableViewCreateTool(config, client),
-        # Calendar 工具
-        CalendarListTool(config, client),
-        CalendarCreateTool(config, client),
-        CalendarUpdateTool(config, client),
-        CalendarDeleteTool(config, client),
-        CalendarFreebusyTool(config, client),
-        # Task v2 工具
-        TaskCreateTool(config, client),
-        TaskGetTool(config, client),
-        TaskUpdateTool(config, client),
-        TaskDeleteTool(config, client),
-        TaskListTool(config, client),
-        TasklistListTool(config, client),
-        SubtaskCreateTool(config, client),
-        TaskCommentAddTool(config, client),
-        # IM 历史
-        MessageHistoryListTool(config, client, user_token_manager=user_token_manager),
     ]
+
+    if flags.bitable_admin_enabled:
+        tools.extend(
+            [
+                BitableAppCreateTool(config, client),
+                BitableTableCreateTool(config, client),
+                BitableViewCreateTool(config, client),
+            ]
+        )
+    if flags.calendar_enabled:
+        tools.extend(
+            [
+                CalendarListTool(config, client),
+                CalendarCreateTool(config, client),
+                CalendarUpdateTool(config, client),
+                CalendarDeleteTool(config, client),
+                CalendarFreebusyTool(config, client),
+            ]
+        )
+    if flags.task_enabled:
+        tools.extend(
+            [
+                TaskCreateTool(config, client),
+                TaskGetTool(config, client),
+                TaskUpdateTool(config, client),
+                TaskDeleteTool(config, client),
+                TaskListTool(config, client),
+                TasklistListTool(config, client),
+                SubtaskCreateTool(config, client),
+                TaskCommentAddTool(config, client),
+            ]
+        )
+    if flags.message_history_enabled:
+        tools.append(MessageHistoryListTool(config, client, user_token_manager=user_token_manager))
 
     return tools
 

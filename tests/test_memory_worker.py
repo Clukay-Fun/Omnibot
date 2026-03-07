@@ -139,3 +139,45 @@ async def test_memory_worker_deduplicates_same_turn(tmp_path) -> None:
 
     assert content.count("<!-- turn:") == 1
     assert content.count("记录一下今天进展") == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_worker_respects_task_level_flush_threshold(tmp_path) -> None:
+    worker = MemoryWriteWorker(tmp_path, flush_threshold=10)
+    await worker.start()
+
+    await worker.enqueue(
+        MemoryTurnTask(
+            channel="feishu",
+            user_id="ou_user_1",
+            chat_id="oc_chat_1",
+            thread_id=None,
+            user_text="第一条",
+            assistant_text="收到",
+            message_id="om_t1",
+            scopes=("chat",),
+            flush_threshold=2,
+        )
+    )
+    await worker.enqueue(
+        MemoryTurnTask(
+            channel="feishu",
+            user_id="ou_user_1",
+            chat_id="oc_chat_1",
+            thread_id=None,
+            user_text="第二条",
+            assistant_text="继续",
+            message_id="om_t2",
+            scopes=("chat",),
+            flush_threshold=2,
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    path = tmp_path / "memory" / "feishu" / "chats" / "oc_chat_1" / "MEMORY.md"
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "第一条" in content
+    assert "第二条" in content
+
+    await worker.stop()

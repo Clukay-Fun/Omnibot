@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import typer
 from prompt_toolkit import PromptSession
@@ -267,6 +268,32 @@ def _build_feishu_oauth_stack(config: Config) -> _FeishuOAuthStack | None:
         console.print("[yellow]Warning: Feishu OAuth enabled but public_base_url missing, OAuth callback disabled.[/yellow]")
         return None
 
+    parsed_public = urlparse(public_base_url)
+    public_scheme = str(parsed_public.scheme or "").lower()
+    public_host = str(parsed_public.hostname or "").lower().strip()
+    if oauth_cfg.enforce_https_public_base_url and public_scheme != "https":
+        console.print(
+            "[yellow]Warning: Feishu OAuth requires HTTPS public_base_url in production, OAuth callback disabled.[/yellow]"
+        )
+        return None
+
+    allowlist = [
+        str(item).strip().lower().lstrip(".")
+        for item in (oauth_cfg.allowed_redirect_domains or [])
+        if str(item).strip()
+    ]
+    if allowlist:
+        allowed = False
+        for domain in allowlist:
+            if public_host == domain or public_host.endswith(f".{domain}"):
+                allowed = True
+                break
+        if not allowed:
+            console.print(
+                "[yellow]Warning: Feishu OAuth public_base_url host not in allowed_redirect_domains, OAuth callback disabled.[/yellow]"
+            )
+            return None
+
     redirect_uri = f"{public_base_url}{callback_path}"
     bind_host = str(oauth_cfg.bind_host or config.gateway.host or "0.0.0.0").strip() or "0.0.0.0"
     bind_port = int(oauth_cfg.bind_port or config.gateway.port)
@@ -279,7 +306,10 @@ def _build_feishu_oauth_stack(config: Config) -> _FeishuOAuthStack | None:
     )
     from nanobot.storage import SQLiteStore
 
-    store = SQLiteStore(config.workspace_path / "memory" / "feishu" / "state.sqlite3")
+    store = SQLiteStore(
+        config.resolve_feishu_state_db_path(),
+        options=config.resolve_feishu_sqlite_options(),
+    )
     client = FeishuOAuthClient(
         api_base=api_base,
         app_id=auth.app_id,
@@ -344,7 +374,13 @@ def gateway(
     sync_workspace_templates(config.workspace_path)
     bus = MessageBus()
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    feishu_state_db_path = config.resolve_feishu_state_db_path()
+    feishu_sqlite_options = config.resolve_feishu_sqlite_options()
+    session_manager = SessionManager(
+        config.workspace_path,
+        state_db_path=feishu_state_db_path,
+        sqlite_options=feishu_sqlite_options,
+    )
     oauth_stack = _build_feishu_oauth_stack(config)
     if oauth_stack is not None:
         oauth_stack.store.cleanup_expired_oauth_states(now_iso=datetime.now().isoformat())
@@ -380,6 +416,8 @@ def gateway(
         skillspec_config=config.agents.skillspec,
         skillspec_embedding_provider_config=config.providers.siliconflow,
         feishu_oauth_service=oauth_stack.oauth_service if oauth_stack else None,
+        state_db_path=feishu_state_db_path,
+        sqlite_options=feishu_sqlite_options,
     )
 
     # 设置 Cron 任务的回调（需要依赖 agent）
@@ -526,6 +564,8 @@ def agent(
 
     config = load_config()
     sync_workspace_templates(config.workspace_path)
+    feishu_state_db_path = config.resolve_feishu_state_db_path()
+    feishu_sqlite_options = config.resolve_feishu_sqlite_options()
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -563,6 +603,8 @@ def agent(
         response_template_config=config.agents.response_templates,
         skillspec_config=config.agents.skillspec,
         skillspec_embedding_provider_config=config.providers.siliconflow,
+        state_db_path=feishu_state_db_path,
+        sqlite_options=feishu_sqlite_options,
     )
 
     # 当日志关闭时显示加载动画（避免错过输出）；日志开启时则跳过

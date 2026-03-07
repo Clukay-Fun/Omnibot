@@ -6,10 +6,20 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from shutil import copy2
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
+
+
+@dataclass(frozen=True, slots=True)
+class SQLiteConnectionOptions:
+    """Connection-level sqlite pragma settings."""
+
+    journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"] = "WAL"
+    synchronous: Literal["OFF", "NORMAL", "FULL", "EXTRA"] = "NORMAL"
+    busy_timeout_ms: int = 5000
 
 
 class SQLiteStore:
@@ -17,9 +27,10 @@ class SQLiteStore:
 
     GLOBAL_CHAT_ID = "__global__"
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, *, options: SQLiteConnectionOptions | None = None):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._options = options or SQLiteConnectionOptions()
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
@@ -32,10 +43,29 @@ class SQLiteStore:
 
     def _configure_connection(self) -> None:
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
+            journal_mode = self._normalize_journal_mode(self._options.journal_mode)
+            synchronous = self._normalize_synchronous(self._options.synchronous)
+            busy_timeout_ms = max(0, int(self._options.busy_timeout_ms))
+
+            self._conn.execute(f"PRAGMA journal_mode={journal_mode}")
+            self._conn.execute(f"PRAGMA synchronous={synchronous}")
+            self._conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.commit()
+
+    @staticmethod
+    def _normalize_journal_mode(raw: str) -> str:
+        mode = str(raw or "WAL").upper()
+        if mode in {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
+            return mode
+        return "WAL"
+
+    @staticmethod
+    def _normalize_synchronous(raw: str) -> str:
+        mode = str(raw or "NORMAL").upper()
+        if mode in {"OFF", "NORMAL", "FULL", "EXTRA"}:
+            return mode
+        return "NORMAL"
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Cursor]:

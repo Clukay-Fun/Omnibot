@@ -9,7 +9,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -77,12 +77,19 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        state_db_path: Path | None = None,
+        sqlite_options: SQLiteConnectionOptions | None = None,
+    ):
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
-        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        db_path = state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._sqlite = SQLiteStore(db_path, options=sqlite_options)
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
