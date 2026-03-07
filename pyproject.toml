@@ -1,13 +1,14 @@
 [project]
 name = "nanobot-ai"
 version = "0.1.5"
-description = "A lightweight personal AI assistant framework"
+description = "Omnibot — nanobot fork optimized for Feishu/Lark: streaming cards, Bitable CRUD, SkillSpec LLM routing, multi-channel AI gateway"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
+    {name = "Omnibot contributors"},
     {name = "nanobot contributors"}
 ]
-keywords = ["ai", "agent", "chatbot"]
+keywords = ["ai", "agent", "chatbot", "feishu", "lark", "bitable", "omnibot", "nanobot"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
