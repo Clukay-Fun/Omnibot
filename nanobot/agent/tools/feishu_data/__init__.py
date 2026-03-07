@@ -16,6 +16,7 @@ from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.doc_search import DocSearchTool
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
+from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver
 from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
 from nanobot.agent.tools.feishu_data.token_manager import TenantAccessTokenManager
 
@@ -25,6 +26,7 @@ __all__ = [
     "FeishuEndpoints",
     "TenantAccessTokenManager",
     "FeishuDataClient",
+    "BitablePersonResolver",
     "ConfirmTokenStore",
     # 只读工具
     "BitableSearchTool",

@@ -1,0 +1,41 @@
+version: 2
+directory:
+  app_token: ""
+  table_id: ""
+  lookup_fields:
+    - 姓名
+    - 邮箱
+  open_id_field: OpenID
+tables:
+  - id: default-followup
+    enabled: true
+    app_token: ""
+    table_id: ""
+    triggers:
+      on_create: true
+      on_update: true
+    time_fields:
+      - 提醒时间
+      - 截止时间
+    recipient_fields:
+      - 负责人
+      - 跟进人
+    title_fields:
+      - 标题
+      - 事项
+    content_fields:
+      - 备注
+      - 描述
+    conditions:
+      status_in: []
+      field_equals: {}
+    when:
+      changed_fields_any: []
+      changed_fields_all: []
+    schedule:
+      reminders: [30]
+    dedupe_policy: update
+    overwrite_existing: true
+    cancel_on:
+      status_in: []
+      deleted: true

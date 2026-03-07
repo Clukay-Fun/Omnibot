@@ -88,6 +88,7 @@ class ChannelManager:
                     self.config.channels.feishu,
                     self.bus,
                     workspace=self.config.workspace_path,
+                    feishu_data_config=self.config.tools.feishu_data,
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:

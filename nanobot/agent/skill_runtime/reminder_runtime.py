@@ -99,6 +99,52 @@ class ReminderRuntime:
         reminders.sort(key=lambda item: (str(item.get("due_at") or ""), str(item.get("id") or "")))
         return {"reminders": reminders}
 
+    def upsert_reminder(
+        self,
+        *,
+        external_key: str,
+        user_id: str,
+        chat_id: str,
+        text: str,
+        due_at: str,
+        channel: str,
+        overwrite: bool = True,
+    ) -> dict[str, Any]:
+        """Create or update a reminder bound to an external integration key."""
+        reminders = self._load_all()
+        existing = next((item for item in reminders if item.get("external_key") == external_key), None)
+        now = self._now_fn().isoformat()
+        if existing is not None:
+            if overwrite:
+                existing.update({
+                    "user_id": user_id,
+                    "chat_id": chat_id,
+                    "channel": channel,
+                    "text": text,
+                    "due_at": due_at,
+                    "status": "active",
+                    "updated_at": now,
+                })
+                self._save_all(reminders)
+                return {"created": False, "reminder": existing}
+            return {"created": False, "reminder": existing}
+
+        reminder = {
+            "id": self._next_id(reminders),
+            "external_key": external_key,
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "channel": channel,
+            "text": text,
+            "due_at": due_at,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+        reminders.append(reminder)
+        self._save_all(reminders)
+        return {"created": True, "reminder": reminder}
+
     def cancel_reminder(self, *, user_id: str, reminder_id: str) -> dict[str, Any]:
         """
         用处: 根据指示定点打断或停用一项现存备忘安排。参数 reminder_id: 操作的单一指针键。
@@ -117,6 +163,20 @@ class ReminderRuntime:
             self._save_all(reminders)
             return {"cancelled": True, "reminder": item}
         return {"cancelled": False, "reason": "not_found", "reminder_id": reminder_id}
+
+    def cancel_by_external_key(self, *, external_key: str) -> dict[str, Any]:
+        """Cancel a reminder via its external integration key."""
+        reminders = self._load_all()
+        for item in reminders:
+            if item.get("external_key") != external_key:
+                continue
+            if item.get("status") != "active":
+                return {"cancelled": False, "reason": "already_inactive", "reminder": item}
+            item["status"] = "cancelled"
+            item["cancelled_at"] = self._now_fn().isoformat()
+            self._save_all(reminders)
+            return {"cancelled": True, "reminder": item}
+        return {"cancelled": False, "reason": "not_found", "external_key": external_key}
 
     def build_daily_summary(self, *, user_id: str, date: str) -> dict[str, Any]:
         """

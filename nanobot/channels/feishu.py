@@ -11,17 +11,21 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from loguru import logger
 
+from nanobot.agent.memory import MemoryStore
+from nanobot.agent.skill_runtime import BitableReminderRuleEngine, ReminderRuntime
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.channels.base import BaseChannel
-from nanobot.config.schema import FeishuConfig
+from nanobot.config.schema import FeishuConfig, FeishuDataConfig
+from nanobot.cron.service import CronService
 
 try:
     import lark_oapi as lark
@@ -439,10 +443,19 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
 
-    def __init__(self, config: FeishuConfig, bus: MessageBus, workspace: Path | None = None):
+    def __init__(
+        self,
+        config: FeishuConfig,
+        bus: MessageBus,
+        workspace: Path | None = None,
+        feishu_data_config: FeishuDataConfig | None = None,
+    ):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
-        self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self.workspace = workspace or Path.home() / ".nanobot" / "workspace"
+        self.feishu_data_config = feishu_data_config or FeishuDataConfig()
+        self._runtime_text = RuntimeTextCatalog.load(self.workspace)
+        self._memory = MemoryStore(self.workspace)
         self._continuation_commands = {
             cmd.strip()
             for cmd in self._runtime_text.routing_list(
@@ -475,6 +488,123 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
+        self._message_index_path = self.workspace / "memory" / "feishu" / "message_index.json"
+        self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._event_registration_report: list[dict[str, Any]] = []
+        self._state_path = self.workspace / "memory" / "feishu" / "channel_state.json"
+        self._cron_service = CronService(self.workspace / "cron_jobs.json")
+        self._reminder_runtime = ReminderRuntime(self.workspace / "reminders.json")
+        self._bitable_engine = BitableReminderRuleEngine(
+            self.workspace,
+            reminder_runtime=self._reminder_runtime,
+            cron_service=self._cron_service,
+            feishu_data_config=self.feishu_data_config,
+        )
+        self._load_message_index()
+
+    def _read_state(self) -> dict[str, Any]:
+        if not self._state_path.exists():
+            return {}
+        try:
+            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_state(self, payload: dict[str, Any]) -> None:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_message_index(self) -> None:
+        if not self._message_index_path.exists():
+            self._message_index = OrderedDict()
+            return
+        try:
+            payload = json.loads(self._message_index_path.read_text(encoding="utf-8"))
+        except Exception:
+            self._message_index = OrderedDict()
+            return
+        if not isinstance(payload, dict):
+            self._message_index = OrderedDict()
+            return
+        self._message_index = OrderedDict((str(key), dict(value)) for key, value in payload.items() if isinstance(value, dict))
+        self._trim_message_index()
+
+    def _trim_message_index(self) -> None:
+        while len(self._message_index) > 1000:
+            self._message_index.popitem(last=False)
+
+    def _persist_message_index(self) -> None:
+        self._message_index_path.parent.mkdir(parents=True, exist_ok=True)
+        self._message_index_path.write_text(
+            json.dumps(dict(self._message_index), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _persist_event_registration_report(self) -> None:
+        state = self._read_state()
+        state["event_registration_report"] = self._event_registration_report
+        self._write_state(state)
+
+    def _mark_welcome_sent(self, key: str) -> bool:
+        state = self._read_state()
+        welcomed = state.get("welcomed") if isinstance(state.get("welcomed"), dict) else {}
+        if key in welcomed:
+            return False
+        welcomed[key] = datetime.now().isoformat()
+        state["welcomed"] = welcomed
+        self._write_state(state)
+        return True
+
+    def _group_welcome_allowed(self, chat_id: str) -> bool:
+        state = self._read_state()
+        group_welcomes = state.get("group_welcomes") if isinstance(state.get("group_welcomes"), dict) else {}
+        last_sent = group_welcomes.get(chat_id)
+        now = time.time()
+        if isinstance(last_sent, (int, float)) and now - float(last_sent) < 24 * 60 * 60:
+            return False
+        group_welcomes[chat_id] = now
+        state["group_welcomes"] = group_welcomes
+        self._write_state(state)
+        return True
+
+    @staticmethod
+    def _summarize_message_text(content: str) -> str:
+        text = re.sub(r"\s+", " ", str(content or "")).strip()
+        if len(text) <= 240:
+            return text
+        return text[:237] + "..."
+
+    def _remember_bot_message(self, message_id: str | None, *, content: str, chat_id: str, source_message_id: str | None = None) -> None:
+        if not message_id:
+            return
+        self._message_index[str(message_id)] = {
+            "content": self._summarize_message_text(content),
+            "chat_id": chat_id,
+            "source_message_id": source_message_id,
+            "created_at": datetime.now().isoformat(),
+        }
+        self._trim_message_index()
+        self._persist_message_index()
+
+    def _resolve_quoted_bot_summary(self, metadata: dict[str, Any]) -> str:
+        current_chat_id = str(metadata.get("chat_id") or "").strip()
+        for key in ("upper_message_id", "parent_id", "root_id"):
+            message_id = str(metadata.get(key) or "").strip()
+            if not message_id:
+                continue
+            if message_id not in self._message_index:
+                self._load_message_index()
+            entry = self._message_index.get(message_id)
+            if not entry:
+                continue
+            entry_chat_id = str(entry.get("chat_id") or "").strip()
+            if current_chat_id and entry_chat_id and current_chat_id != entry_chat_id:
+                continue
+            content = str(entry.get("content") or "").strip()
+            if content:
+                return content
+        return ""
 
     def _resolve_activation_policy(self, *, chat_type: str, is_topic: bool) -> str:
         if chat_type != "group":
@@ -528,6 +658,7 @@ class FeishuChannel(BaseChannel):
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+        await self._cron_service.start()
 
         # Create Lark client for sending messages
         self._client = lark.Client.builder() \
@@ -544,21 +675,41 @@ class FeishuChannel(BaseChannel):
             self._on_message_sync
         )
 
-        register_chat_entered = getattr(
+        event_handler_builder = self._register_optional_event(
             event_handler_builder,
-            "register_p2_im_chat_access_event_bot_p2p_chat_entered_v1",
-            None,
+            ["register_p2_im_chat_access_event_bot_p2p_chat_entered_v1"],
+            lambda _event: None,
         )
-        if callable(register_chat_entered):
-            event_handler_builder = register_chat_entered(lambda _event: None)
-
-        register_card_action = getattr(
+        event_handler_builder = self._register_optional_event(
             event_handler_builder,
-            "register_p2_card_action_trigger",
-            None,
+            ["register_p2_card_action_trigger"],
+            self._on_card_action_sync,
         )
-        if callable(register_card_action):
-            event_handler_builder = register_card_action(self._on_card_action_sync)
+        event_handler_builder = self._register_optional_event(
+            event_handler_builder,
+            ["register_p2_im_message_read_v1"],
+            self._on_message_read_sync,
+        )
+        event_handler_builder = self._register_optional_event(
+            event_handler_builder,
+            ["register_p2_im_chat_member_user_added_v1"],
+            self._on_chat_member_added_sync,
+        )
+        event_handler_builder = self._register_optional_event(
+            event_handler_builder,
+            ["register_p2_im_chat_create_v1", "register_p2_im_p2p_chat_create_v1"],
+            self._on_p2p_chat_create_sync,
+        )
+        event_handler_builder = self._register_optional_event(
+            event_handler_builder,
+            ["register_p2_drive_file_bitable_field_changed_v1"],
+            self._on_bitable_field_changed_sync,
+        )
+        event_handler_builder = self._register_optional_event(
+            event_handler_builder,
+            ["register_p2_drive_file_bitable_record_changed_v1", "register_p2_drive_file_bitable_record_change_v1"],
+            self._on_bitable_record_changed_sync,
+        )
 
         event_handler = event_handler_builder.build()
 
@@ -599,7 +750,29 @@ class FeishuChannel(BaseChannel):
         参考: https://github.com/larksuite/oapi-sdk-python/blob/v2_main/lark_oapi/ws/client.py#L86
         """
         self._running = False
+        self._cron_service.stop()
         logger.info("Feishu bot stopped")
+
+    def _register_optional_event(self, builder: Any, names: list[str], handler: Any) -> Any:
+        for name in names:
+            register = getattr(builder, name, None)
+            if callable(register):
+                logger.info("Feishu optional event registered: {}", name)
+                self._event_registration_report.append({
+                    "requested": names,
+                    "method": name,
+                    "status": "registered",
+                })
+                self._persist_event_registration_report()
+                return register(handler)
+        logger.debug("Feishu optional event not available: {}", "/".join(names))
+        self._event_registration_report.append({
+            "requested": names,
+            "method": None,
+            "status": "skipped",
+        })
+        self._persist_event_registration_report()
+        return builder
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """用于添加表情回应（运行在线程池中）的同步辅助方法。"""
@@ -1412,6 +1585,7 @@ class FeishuChannel(BaseChannel):
         await self._try_enable_cardkit_for_state(loop, state)
 
         self._stream_states[source_message_id] = state
+        self._remember_bot_message(bot_message_id, content=answer_text or thinking_text, chat_id=chat_id, source_message_id=source_message_id)
         return state
 
     async def _update_stream_card(
@@ -1592,6 +1766,7 @@ class FeishuChannel(BaseChannel):
                 now = time.monotonic()
                 state.last_update_at = now
                 state.updated_at = now
+                self._remember_bot_message(state.bot_message_id, content=state.answer_text or state.thinking_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
                 return True
 
             fallback_payload = self._build_streaming_initial_card_content(
@@ -1633,6 +1808,7 @@ class FeishuChannel(BaseChannel):
                 state.sequence = 0
                 state.card_id = None
                 await self._try_enable_cardkit_for_state(loop, state)
+                self._remember_bot_message(fallback_message_id, content=state.answer_text or state.thinking_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
             return True
 
         state = self._stream_states.get(source_message_id)
@@ -1663,6 +1839,7 @@ class FeishuChannel(BaseChannel):
             now = time.monotonic()
             state.last_update_at = now
             state.updated_at = now
+            self._remember_bot_message(state.bot_message_id, content=state.answer_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
             return True
 
         fallback_payload = self._build_streaming_initial_card_content(
@@ -1704,6 +1881,7 @@ class FeishuChannel(BaseChannel):
             state.sequence = 0
             state.card_id = None
             await self._try_enable_cardkit_for_state(loop, state)
+            self._remember_bot_message(fallback_message_id, content=state.answer_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
         return True
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -1762,6 +1940,7 @@ class FeishuChannel(BaseChannel):
                             fallback_payload,
                         )
                         if updated:
+                            self._remember_bot_message(update_message_id, content=msg.content, chat_id=msg.chat_id, source_message_id=str(metadata.get("message_id") or "") or None)
                             return
 
                     replied = False
@@ -1769,7 +1948,7 @@ class FeishuChannel(BaseChannel):
                     reply_in_thread = self._resolve_reply_in_thread(metadata)
                     disable_reply_to_message = bool(metadata.get("_disable_reply_to_message"))
                     if self.config.reply_to_message and source_message_id and not disable_reply_to_message:
-                        ok, _ = await loop.run_in_executor(
+                        ok, replied_message_id = await loop.run_in_executor(
                             None,
                             self._reply_message_detail_sync,
                             source_message_id,
@@ -1778,19 +1957,113 @@ class FeishuChannel(BaseChannel):
                             reply_in_thread,
                         )
                         replied = ok
+                        if ok:
+                            self._remember_bot_message(replied_message_id, content=msg.content, chat_id=msg.chat_id, source_message_id=source_message_id)
 
                     if not replied:
-                        await loop.run_in_executor(
+                        ok, sent_message_id = await loop.run_in_executor(
                             None,
-                            self._send_message_sync,
+                            self._send_message_detail_sync,
                             receive_id_type,
                             msg.chat_id,
                             "interactive",
                             fallback_payload,
                         )
+                        if ok:
+                            self._remember_bot_message(sent_message_id, content=msg.content, chat_id=msg.chat_id, source_message_id=str(source_message_id or "") or None)
 
         except Exception as e:
             logger.error("Error sending Feishu message: {}", e)
+
+    def _schedule_background(self, coro: Any) -> None:
+        if self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def _on_p2p_chat_create_sync(self, data: Any) -> None:
+        self._schedule_background(self._on_p2p_chat_create(data))
+
+    async def _on_p2p_chat_create(self, data: Any) -> None:
+        event = _safe_get(data, "event", None)
+        chat_id = str(_safe_dig(event, "chat_id") or _safe_dig(event, "open_chat_id") or "")
+        user_open_id = str(_safe_dig(event, "operator_id", "open_id") or _safe_dig(event, "user_id", "open_id") or "")
+        if not chat_id or not user_open_id:
+            return
+        welcome_key = f"p2p:{chat_id}:{user_open_id}"
+        if not self._mark_welcome_sent(welcome_key):
+            return
+        self._memory.upsert_feishu_user_profile(
+            user_open_id,
+            {
+                "preferred_name": _safe_dig(event, "user_name") or "",
+                "channel": "feishu",
+                "first_source": "p2p_chat_create",
+                "chat_id": chat_id,
+            },
+        )
+        if self.config.onboarding_enabled:
+            await self._handle_message(
+                sender_id=user_open_id,
+                chat_id=user_open_id,
+                content="/setup",
+                metadata={"source_event_type": "p2p_chat_create", "_bootstrap": True},
+            )
+            return
+        await self.send(OutboundMessage(
+            channel=self.name,
+            chat_id=user_open_id,
+            content="你好，我已经连接好了。可以先用 `/setup` 完成设置，或发 `/help` 查看命令。",
+            metadata={"_disable_reply_to_message": True},
+        ))
+
+    def _on_message_read_sync(self, data: Any) -> None:
+        self._schedule_background(self._on_message_read(data))
+
+    async def _on_message_read(self, data: Any) -> None:
+        event = _safe_get(data, "event", None)
+        message_id = str(_safe_dig(event, "message_id") or _safe_dig(event, "open_message_id") or "")
+        if not message_id:
+            return
+        logger.info("Feishu read event received for message {}", message_id)
+
+    def _on_chat_member_added_sync(self, data: Any) -> None:
+        self._schedule_background(self._on_chat_member_added(data))
+
+    async def _on_chat_member_added(self, data: Any) -> None:
+        event = _safe_get(data, "event", None)
+        chat_id = str(_safe_dig(event, "chat_id") or "")
+        user_open_id = str(_safe_dig(event, "user_id", "open_id") or _safe_dig(event, "operator_id", "open_id") or "")
+        if not chat_id or not user_open_id:
+            return
+        if not self._group_welcome_allowed(chat_id):
+            logger.info("Skip group welcome due to rate limit for {}", chat_id)
+            return
+        self._memory.upsert_feishu_chat_context(chat_id, {"last_joined_open_id": user_open_id, "channel": "feishu"})
+        await self.send(OutboundMessage(
+            channel=self.name,
+            chat_id=chat_id,
+            content="欢迎加入，可以 @ 我提问，常用命令有 `/help`、`/status`、`/session new`。",
+            metadata={"_disable_reply_to_message": True, "_reply_in_thread": False},
+        ))
+
+    def _on_bitable_field_changed_sync(self, data: Any) -> None:
+        self._schedule_background(self._on_bitable_field_changed(data))
+
+    async def _on_bitable_field_changed(self, data: Any) -> None:
+        event = _to_plain_data(_safe_get(data, "event", None))
+        if not isinstance(event, dict):
+            return
+        logger.info("Feishu bitable field change event: {}", _safe_json_dumps(event))
+        await self._bitable_engine.handle_field_changed(event)
+
+    def _on_bitable_record_changed_sync(self, data: Any) -> None:
+        self._schedule_background(self._on_bitable_record_changed(data))
+
+    async def _on_bitable_record_changed(self, data: Any) -> None:
+        event = _to_plain_data(_safe_get(data, "event", None))
+        if not isinstance(event, dict):
+            return
+        logger.info("Feishu bitable record event: {}", _safe_json_dumps(event))
+        await self._bitable_engine.handle_record_changed(event)
 
     def _on_card_action_sync(self, data: Any) -> None:
         """处理卡片动作回调的同步封装（由 WebSocket 线程触发）。"""
@@ -2010,6 +2283,7 @@ class FeishuChannel(BaseChannel):
 
             metadata = {
                 "message_id": message_id,
+                "chat_id": reply_to,
                 "chat_type": chat_type,
                 "msg_type": msg_type,
             }
@@ -2017,6 +2291,20 @@ class FeishuChannel(BaseChannel):
                 value = getattr(message, key, None)
                 if value:
                     metadata[key] = value
+            quoted_bot_summary = self._resolve_quoted_bot_summary(metadata)
+            if quoted_bot_summary:
+                metadata["quoted_bot_summary"] = quoted_bot_summary
+
+            self._memory.upsert_feishu_user_profile(
+                sender_id,
+                {
+                    "channel": "feishu",
+                    "last_chat_id": reply_to,
+                    "last_message_type": msg_type,
+                },
+            )
+            if chat_type == "group":
+                self._memory.upsert_feishu_chat_context(reply_to, {"chat_type": chat_type, "last_sender_open_id": sender_id})
 
             session_key = None
             thread_id = metadata.get("thread_id")

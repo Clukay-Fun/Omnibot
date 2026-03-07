@@ -16,6 +16,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
     EmbeddingSkillRouter,
@@ -234,6 +235,20 @@ class AgentLoop:
     @staticmethod
     def _now_iso() -> str:
         return datetime.now().isoformat()
+
+    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+        purpose = "chat"
+        source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
+        if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
+            purpose = "bootstrap"
+        return PromptContext(
+            purpose=purpose,
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            sender_id=msg.sender_id,
+            session_key=session_key or msg.session_key,
+            metadata=dict(msg.metadata or {}),
+        )
 
     def _feishu_onboarding_config(self) -> Any | None:
         if not self.channels_config:
@@ -714,6 +729,15 @@ class AgentLoop:
         is_reentry = lower_command in reentry_commands
 
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
+        if msg.channel == "feishu" and str((msg.metadata or {}).get("source_event_type") or "") == "p2p_chat_create":
+            identity = cast(dict[str, Any], profile["identity"])
+            preferences = cast(dict[str, Any], profile["preferences"])
+            dynamic = cast(dict[str, Any], profile["dynamic"])
+            dynamic.setdefault("channel", "feishu")
+            dynamic.setdefault("first_source", "p2p_chat_create")
+            dynamic.setdefault("first_chat_id", msg.chat_id)
+            identity.setdefault("open_id", msg.sender_id)
+            preferences.setdefault("preferred_name", identity.get("name") or "")
         onboarding = profile["onboarding"]
         status = str(onboarding.get("status") or "").lower()
 
@@ -1728,9 +1752,11 @@ class AgentLoop:
             session = self.sessions.get_or_create(key)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
+            prompt_context = PromptContext(purpose="chat", channel=channel, chat_id=chat_id, metadata=dict(msg.metadata or {}))
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
+                runtime=prompt_context,
             )
             turn_started = time.perf_counter()
             final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key)
@@ -1872,11 +1898,13 @@ class AgentLoop:
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
+        prompt_context = self._prompt_context_for_message(msg, session_key=key)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
+            runtime=prompt_context,
         )
 
         async def _bus_progress(content: str, *, phase: str = "answer") -> None:
