@@ -73,6 +73,14 @@ class AgentLoop:
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
+    _MEMORY_WRITE_TURN_THRESHOLD = 3
+    _MEMORY_TOPIC_END_KEYWORDS = (
+        "先这样",
+        "结束",
+        "结论",
+        "收尾",
+        "done",
+    )
 
     # region [初始化与配置]
 
@@ -143,8 +151,35 @@ class AgentLoop:
         self.context = ContextBuilder(workspace)
         self.sessions = session_manager or SessionManager(workspace)
         self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
-        self._audit_sink = AuditSink(self._sqlite)
-        self._memory_worker = MemoryWriteWorker(self.workspace)
+        audit_cleanup_interval_seconds = AuditSink.DEFAULT_CLEANUP_INTERVAL_SECONDS
+        audit_event_retention_days = AuditSink.DEFAULT_EVENT_AUDIT_RETENTION_DAYS
+        audit_message_index_retention_days = AuditSink.DEFAULT_FEISHU_MESSAGE_INDEX_RETENTION_DAYS
+        if self.channels_config is not None:
+            feishu_cfg = getattr(self.channels_config, "feishu", None)
+            if feishu_cfg is not None:
+                audit_cleanup_interval_seconds = float(
+                    getattr(feishu_cfg, "audit_cleanup_interval_seconds", audit_cleanup_interval_seconds)
+                )
+                audit_event_retention_days = int(
+                    getattr(feishu_cfg, "audit_event_retention_days", audit_event_retention_days)
+                )
+                audit_message_index_retention_days = int(
+                    getattr(
+                        feishu_cfg,
+                        "audit_message_index_retention_days",
+                        audit_message_index_retention_days,
+                    )
+                )
+        self._audit_sink = AuditSink(
+            self._sqlite,
+            cleanup_interval_seconds=audit_cleanup_interval_seconds,
+            event_audit_retention_days=audit_event_retention_days,
+            feishu_message_index_retention_days=audit_message_index_retention_days,
+        )
+        self._memory_worker = MemoryWriteWorker(
+            self.workspace,
+            flush_threshold=self._MEMORY_WRITE_TURN_THRESHOLD,
+        )
         self._workers_started = False
         self.tools = ToolRegistry()
         self._runtime_text = RuntimeTextCatalog.load(workspace)
@@ -1005,12 +1040,26 @@ class AgentLoop:
 
     # region [工具与执行辅助方法]
 
-    def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
+    def _set_tool_context(
+        self,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
         """为所有需要路由信息的工具更新上下文。"""
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
-                if hasattr(tool, "set_context"):
-                    tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
+                setter = getattr(tool, "set_context", None)
+                if callable(setter):
+                    setter(channel, chat_id, *([message_id] if name == "message" else []))
+        for tool_name in self.tools.tool_names:
+            tool = self.tools.get(tool_name)
+            if tool is not None:
+                runtime_setter = getattr(tool, "set_runtime_context", None)
+                if callable(runtime_setter):
+                    runtime_setter(channel, chat_id, sender_id, metadata)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1870,7 +1919,13 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            self._set_tool_context(
+                channel,
+                chat_id,
+                msg.metadata.get("message_id"),
+                sender_id=msg.sender_id,
+                metadata=msg.metadata,
+            )
             history = session.get_history(max_messages=self.memory_window)
             prompt_context = PromptContext(purpose="chat", channel=channel, chat_id=chat_id, metadata=dict(msg.metadata or {}))
             messages = self.context.build_messages(
@@ -2014,7 +2069,13 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(
+            msg.channel,
+            msg.chat_id,
+            msg.metadata.get("message_id"),
+            sender_id=msg.sender_id,
+            metadata=msg.metadata,
+        )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -2130,6 +2191,8 @@ class AgentLoop:
         if not scopes:
             return
 
+        force_flush = self._should_force_memory_flush(msg.content, thread_id)
+
         task = MemoryTurnTask(
             channel=msg.channel,
             user_id=msg.sender_id,
@@ -2139,8 +2202,26 @@ class AgentLoop:
             assistant_text=final_text,
             message_id=str(metadata.get("message_id") or "") or None,
             scopes=tuple(scopes),
+            force_flush=force_flush,
         )
         await self._memory_worker.enqueue(task)
+
+    @classmethod
+    def _should_force_memory_flush(cls, content: str, thread_id: str | None) -> bool:
+        if not thread_id:
+            return False
+        text = " ".join(content.lower().split())
+        if not text:
+            return False
+        for keyword in cls._MEMORY_TOPIC_END_KEYWORDS:
+            token = keyword.lower()
+            if token == "done":
+                if re.search(r"\bdone\b", text):
+                    return True
+                continue
+            if token in text:
+                return True
+        return False
 
     # endregion
 

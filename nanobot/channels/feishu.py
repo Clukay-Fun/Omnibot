@@ -491,7 +491,22 @@ class FeishuChannel(BaseChannel):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
         self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
-        self._audit_sink = AuditSink(self._sqlite)
+        self._audit_sink = AuditSink(
+            self._sqlite,
+            cleanup_interval_seconds=float(
+                getattr(self.config, "audit_cleanup_interval_seconds", AuditSink.DEFAULT_CLEANUP_INTERVAL_SECONDS)
+            ),
+            event_audit_retention_days=int(
+                getattr(self.config, "audit_event_retention_days", AuditSink.DEFAULT_EVENT_AUDIT_RETENTION_DAYS)
+            ),
+            feishu_message_index_retention_days=int(
+                getattr(
+                    self.config,
+                    "audit_message_index_retention_days",
+                    AuditSink.DEFAULT_FEISHU_MESSAGE_INDEX_RETENTION_DAYS,
+                )
+            ),
+        )
         self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []

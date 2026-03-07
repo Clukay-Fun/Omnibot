@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,20 +27,26 @@ class MemoryTurnTask:
     message_id: str | None = None
     created_at: str = ""
     scopes: tuple[MemoryScope, ...] = ()
+    force_flush: bool = False
 
 
 class MemoryWriteWorker:
     """Background queue worker for memory writeback."""
+
+    DEFAULT_FLUSH_THRESHOLD = 3
 
     def __init__(
         self,
         workspace: Path,
         *,
         queue_maxsize: int = 500,
+        flush_threshold: int = DEFAULT_FLUSH_THRESHOLD,
     ) -> None:
         self._workspace = workspace
         self._queue: asyncio.Queue[MemoryTurnTask | object] = asyncio.Queue(maxsize=max(1, queue_maxsize))
         self._task: asyncio.Task[None] | None = None
+        self._flush_threshold = max(1, int(flush_threshold))
+        self._scope_buffers: dict[Path, list[str]] = defaultdict(list)
 
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -59,12 +66,12 @@ class MemoryWriteWorker:
 
     async def enqueue(self, task: MemoryTurnTask) -> None:
         if self._task is None or self._task.done():
-            await self._write_task(task)
+            await self._ingest_task(task)
             return
         try:
             self._queue.put_nowait(task)
         except asyncio.QueueFull:
-            await self._write_task(task)
+            await self._ingest_task(task)
 
     async def _run(self) -> None:
         while True:
@@ -72,25 +79,47 @@ class MemoryWriteWorker:
             if item is _SENTINEL:
                 break
             if isinstance(item, MemoryTurnTask):
-                await self._write_task(item)
+                await self._ingest_task(item)
 
         while not self._queue.empty():
             item = await self._queue.get()
             if isinstance(item, MemoryTurnTask):
-                await self._write_task(item)
+                await self._ingest_task(item)
 
-    async def _write_task(self, task: MemoryTurnTask) -> None:
+        self._flush_all()
+
+    async def _ingest_task(self, task: MemoryTurnTask) -> None:
         if task.channel != "feishu":
             return
         entry = self._render_entry(task)
         if not entry:
             return
 
+        touched_paths: set[Path] = set()
         for scope in task.scopes:
             path = self._scope_path(scope, task)
             if path is None:
                 continue
+            self._scope_buffers[path].append(entry)
+            touched_paths.add(path)
+            if len(self._scope_buffers[path]) >= self._flush_threshold:
+                self._flush_scope(path)
+
+        if task.force_flush:
+            for path in touched_paths:
+                self._flush_scope(path)
+
+    def _flush_scope(self, path: Path) -> None:
+        entries = self._scope_buffers.get(path)
+        if not entries:
+            return
+        for entry in entries:
             self._append_dedup(path, entry)
+        self._scope_buffers.pop(path, None)
+
+    def _flush_all(self) -> None:
+        for path in list(self._scope_buffers.keys()):
+            self._flush_scope(path)
 
     def _scope_path(self, scope: MemoryScope, task: MemoryTurnTask) -> Path | None:
         base = self._workspace / "memory" / "feishu"

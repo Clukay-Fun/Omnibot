@@ -605,6 +605,69 @@ class SQLiteStore:
                 rows,
             )
 
+    def query_event_audit(
+        self,
+        *,
+        event_type: str | None = None,
+        chat_id: str | None = None,
+        message_id: str | None = None,
+        start_at: str | None = None,
+        end_at: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if event_type is not None:
+            clauses.append("event_type=?")
+            params.append(event_type)
+        if chat_id is not None:
+            clauses.append("chat_id=?")
+            params.append(chat_id)
+        if message_id is not None:
+            clauses.append("message_id=?")
+            params.append(message_id)
+        if start_at is not None:
+            clauses.append("created_at>=?")
+            params.append(start_at)
+        if end_at is not None:
+            clauses.append("created_at<=?")
+            params.append(end_at)
+
+        safe_limit = max(1, int(limit))
+        safe_offset = max(0, int(offset))
+        query = "SELECT id, event_type, event_id, chat_id, message_id, payload, created_at FROM event_audit"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
+        params.extend([safe_limit, safe_offset])
+
+        rows = self._conn.execute(query, tuple(params)).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "id": int(row["id"]),
+                    "event_type": str(row["event_type"]),
+                    "event_id": row["event_id"],
+                    "chat_id": row["chat_id"],
+                    "message_id": row["message_id"],
+                    "payload": self._decode(str(row["payload"]), default={}),
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return result
+
+    def cleanup_event_audit_before(self, before_at: str) -> int:
+        with self.transaction() as cur:
+            cur.execute("DELETE FROM event_audit WHERE created_at < ?", (before_at,))
+            return cur.rowcount
+
+    def cleanup_feishu_message_index_before(self, before_at: str) -> int:
+        with self.transaction() as cur:
+            cur.execute("DELETE FROM feishu_message_index WHERE created_at < ?", (before_at,))
+            return cur.rowcount
+
     def upsert_session_state(
         self,
         session_key: str,
