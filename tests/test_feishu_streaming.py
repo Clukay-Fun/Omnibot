@@ -647,12 +647,24 @@ def test_thinking_block_hides_generic_placeholder_when_specific_detail_exists() 
     assert "调用 bitable_search" in block
 
 
-def test_thinking_block_is_empty_when_only_generic_placeholder_exists() -> None:
+def test_thinking_block_uses_placeholders_when_only_generic_lines_exist() -> None:
     channel, _ = _build_channel()
 
-    block = channel._format_thinking_block("思考中\n思考完成", collapsed=False)
+    expanded = channel._format_thinking_block("思考中\n思考完成", collapsed=False)
+    collapsed = channel._format_thinking_block("思考中\n思考完成", collapsed=True)
 
-    assert block == ""
+    assert "思考中" in expanded
+    assert "思考完成" in collapsed
+
+
+def test_streaming_initial_answer_card_marks_thinking_done_when_no_details() -> None:
+    channel, _ = _build_channel(show_thinking=True)
+
+    payload = channel._build_streaming_initial_card_content("", "最终回复", True)
+    card = json.loads(payload)
+    thinking = card["body"]["elements"][0]["content"]
+
+    assert "思考完成" in thinking
 
 
 @pytest.mark.asyncio

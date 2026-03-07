@@ -7,6 +7,53 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
+    "help": {
+        "commands_help_text": (
+            "可用命令\n"
+            "- /help 或 /commands：查看命令总览\n"
+            "- /status：查看当前偏好与授权状态\n"
+            "- /setup：查看初始化引导\n"
+            "- /connect 或 /oauth：连接飞书 OAuth\n"
+            "- /session：查看会话子命令帮助\n"
+            "- /new：开启新会话\n"
+            "- /stop：停止当前任务\n"
+            "- 继续 / 展开：查看分页剩余内容\n"
+            "- 确认 <token> / 取消 <token>：确认或取消写入"
+        ),
+        "session_help_text": (
+            "会话命令\n"
+            "- /session：查看帮助\n"
+            "- /session new [标题]：在群话题中新建会话\n"
+            "- /session list：列出当前聊天下会话\n"
+            "- /session del <id|main>：删除指定会话"
+        ),
+    },
+    "pagination": {
+        "no_more_content": "没有可继续的内容了。",
+        "continuation_hint": "回复“{continue_command}”查看剩余内容",
+        "not_found_data": "未查询到数据。",
+    },
+    "onboarding": {
+        "intro_first": "我先发你一条快速上手提示，不影响继续提问。",
+        "intro_reentry": "已重新打开上手提示。",
+        "guide_lines": [
+            "### 👋 快速上手",
+            "你可以直接开始提问，不需要先填写表单。",
+            "",
+            "我支持：案件查询、文档检索、提醒与任务协同。",
+            "",
+            "可直接对话调教：",
+            "- 叫我张律",
+            "- 以后简洁点 / 以后详细点",
+            "- 查案件时默认查全部",
+            "- 不用确认直接录入（当前策略默认仍先确认）",
+            "",
+            "常用命令：/help /status /setup /connect /session new",
+        ],
+    },
+}
+
 _DEFAULT_ROUTING: dict[str, dict[str, Any]] = {
     "smalltalk_triggers": {
         "direct_queries": [
@@ -228,7 +275,11 @@ class RuntimeTextCatalog:
     @classmethod
     def load(cls, workspace: Path | None) -> "RuntimeTextCatalog":
         del workspace
-        return cls(prompts={}, routing=deepcopy(_DEFAULT_ROUTING), templates=deepcopy(_DEFAULT_TEMPLATES))
+        return cls(
+            prompts=deepcopy(_DEFAULT_PROMPTS),
+            routing=deepcopy(_DEFAULT_ROUTING),
+            templates=deepcopy(_DEFAULT_TEMPLATES),
+        )
 
     def prompt_text(self, group: str, key: str, default: str = "") -> str:
         value = self.prompts.get(group, {}).get(key)

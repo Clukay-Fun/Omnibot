@@ -15,7 +15,7 @@
 - **SkillSpec 大模型前置路由系统**：
   - 摒弃了僵化的关键字匹配，重构为基于大语言模型原生 Tool Calling 的意图识别路由机制。
   - 将业务拆解为简单的声明式 YAML (`skillspec`)，即可低代码扩展专属于你的飞书业务数据查询与提醒技能。
-- **无感知的飞书新用户引导**：内置友好的 `/setup` 引导流程，以交互式卡片的形式一键完成团队与角色配置。
+- **无感知的飞书新用户引导**：首次会话发送一次富文本上手提示，不阻塞正常对话；可随时 `/setup` 重看。
 
 ---
 
@@ -27,6 +27,8 @@
 channels:
   feishu:
     enabled: true
+    onboarding_blocking: false  # false=首次引导不阻塞，true=引导优先
+    onboarding_guide_once: true # true=每位用户只提示一次
     react_enabled: false      # 是否自动回复表情反馈 (收到/处理中)
     reply_to_message: true    # 是否使用引用回复
     reply_in_thread: false    # 默认是否在 Thread 中回复（话题群会自动强制启用）
@@ -85,6 +87,10 @@ tools:
       task_enabled: true
       bitable_admin_enabled: true
       message_history_enabled: true
+
+agents:
+  skillspec:
+    query_rewrite_enabled: false  # 查询结果默认不做二次简化改写
 ```
 
 > **流式最佳实践**：推荐配置 `stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120` 和 `stream_card_print_frequency_ms=50` 以获得最丝滑的视觉体验。

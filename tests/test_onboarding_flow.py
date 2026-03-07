@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -27,6 +28,7 @@ def _build_loop(tmp_path):
     channels = ChannelsConfig(
         feishu=FeishuConfig(
             onboarding_enabled=True,
+            onboarding_blocking=True,
             onboarding_reentry_commands=["/setup", "重新设置"],
         )
     )
@@ -38,6 +40,70 @@ def _build_loop(tmp_path):
         skillspec_config=SkillSpecConfig(enabled=True),
     )
     return loop, provider
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_onboarding_prompts_once_without_blocking_dialogue(tmp_path) -> None:
+    provider = _DummyProvider()
+    bus = MessageBus()
+    channels = ChannelsConfig(
+        feishu=FeishuConfig(
+            onboarding_enabled=True,
+            onboarding_blocking=False,
+            onboarding_guide_once=True,
+            onboarding_reentry_commands=["/setup", "重新设置"],
+        )
+    )
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        channels_config=channels,
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    first = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_non_blocking",
+            chat_id="oc_group",
+            content="你好",
+            metadata={"chat_type": "group", "message_id": "m-1"},
+        )
+    )
+
+    assert first is not None
+    assert first.content == "llm-fallback"
+    assert provider.calls == 1
+
+    first_outbounds = []
+    while bus.outbound_size:
+        first_outbounds.append(await asyncio.wait_for(bus.consume_outbound(), timeout=1))
+
+    guide_messages = [item for item in first_outbounds if item.metadata.get("onboarding") is True]
+    assert len(guide_messages) == 1
+    assert guide_messages[0].metadata.get("onboarding_stage") == "guide"
+    assert "快速上手" in guide_messages[0].content
+
+    second = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_non_blocking",
+            chat_id="oc_group",
+            content="你是谁",
+            metadata={"chat_type": "group", "message_id": "m-2"},
+        )
+    )
+
+    assert second is not None
+    assert second.content == "llm-fallback"
+    assert provider.calls == 2
+
+    second_outbounds = []
+    while bus.outbound_size:
+        second_outbounds.append(await asyncio.wait_for(bus.consume_outbound(), timeout=1))
+
+    assert not any(item.metadata.get("onboarding") is True for item in second_outbounds)
 
 
 @pytest.mark.asyncio

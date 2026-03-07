@@ -2,6 +2,9 @@
   "agents": {
     "defaults": {
       "workspace": "~/.nanobot/workspace"
+    },
+    "skillspec": {
+      "queryRewriteEnabled": false
     }
   },
   "gateway": {
@@ -12,6 +15,8 @@
     "feishu": {
       "enabled": true,
       "onboardingEnabled": true,
+      "onboardingBlocking": false,
+      "onboardingGuideOnce": true,
       "onboardingReentryCommands": [
         "/setup",
         "重新设置"

@@ -63,6 +63,8 @@ class FeishuConfig(Base):
     activation_admin_open_ids: list[str] = Field(default_factory=list)
     activation_admin_prefix_bypass: str = ""
     onboarding_enabled: bool = True
+    onboarding_blocking: bool = False
+    onboarding_guide_once: bool = True
     onboarding_reentry_commands: list[str] = Field(default_factory=lambda: ["/setup", "重新设置"])
     onboarding_role_options: list[str] = Field(default_factory=lambda: ["律师", "助理", "实习生"])
     onboarding_team_options: list[str] = Field(default_factory=lambda: ["诉讼组", "合同组", "招投标组", "综合组"])
@@ -347,6 +349,7 @@ class SkillSpecConfig(Base):
     embedding_min_score: float = 0.15
     route_log_enabled: bool = False
     route_log_top_k: int = 3
+    query_rewrite_enabled: bool = False
 
 
 class AgentsConfig(Base):

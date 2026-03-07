@@ -247,11 +247,25 @@ class BitableSearchTool(Tool):
                 "record_id": rec_id,
                 "table_id": table_id,
                 "fields": mapped,
-                "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                "fields_text": {str(k): self._to_display_text(v) for k, v in mapped.items()},
                 "record_url": url,
             })
 
         return normalized
+
+    @classmethod
+    def _to_display_text(cls, value: Any) -> str:
+        if isinstance(value, list):
+            items = [cls._to_display_text(item) for item in value]
+            cleaned = [item for item in items if item and item != "{}" and item != "[]"]
+            return " / ".join(cleaned) if cleaned else "[]"
+        if isinstance(value, dict):
+            for key in ("text", "name", "title", "value"):
+                nested = value.get(key)
+                if nested not in (None, ""):
+                    return cls._to_display_text(nested)
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     async def _search_table(
         self,
@@ -264,7 +278,13 @@ class BitableSearchTool(Tool):
         searchable_fields: list[str],
     ) -> dict[str, Any]:
         path = FeishuEndpoints.bitable_records_search(app_token, table_id)
-        params = {"page_size": page_size}
+        client_side_keyword_filter = bool(keyword and not searchable_fields)
+        scan_page_size = page_size
+        if client_side_keyword_filter:
+            scan_page_size = max(page_size, self._fallback_scan_page_size)
+            if self.config.bitable.search.max_records > 0:
+                scan_page_size = min(scan_page_size, self.config.bitable.search.max_records)
+        params = {"page_size": scan_page_size}
 
         logger.info(
             f"Bitable search: app={app_token}, table={table_id}, keyword={keyword}, filter={payload.get('filter')}"
@@ -283,10 +303,12 @@ class BitableSearchTool(Tool):
             )
             duration = time.time() - started
             logger.info(f"Bitable search completed in {duration:.2f}s, table={table_id}, found {len(normalized)} items")
+            records = normalized[:page_size] if client_side_keyword_filter else normalized
+            total = len(normalized) if client_side_keyword_filter else response.get("data", {}).get("total", len(normalized))
             return {
                 "table_id": table_id,
-                "records": normalized,
-                "total": response.get("data", {}).get("total", len(normalized)),
+                "records": records,
+                "total": total,
             }
         except FeishuDataAPIError as e:
             if e.code == 1254018:

@@ -186,6 +186,7 @@ class SkillSpecExecutor:
             handled=True,
             content=self._render_guarded(payload, policy=policy, session=session),
             tool_turn=True,
+            metadata={"skillspec_kind": "query"},
         )
 
     async def execute_if_matched(self, msg: InboundMessage, session: Any) -> SkillExecutionResult:
@@ -219,6 +220,7 @@ class SkillSpecExecutor:
         action = spec.action if isinstance(spec.action, dict) else {}
         params = self._apply_nlp_extract(action=action, params=params)
         kind = str(action.get("kind", "")).lower()
+        route_metadata["skillspec_kind"] = kind
 
         if selection.reason != "explicit" and self._looks_like_smalltalk(msg.content):
             self._log_route_miss(msg.content)
@@ -1781,10 +1783,45 @@ class SkillSpecExecutor:
         if isinstance(row, dict):
             fields = row.get("fields_text") if isinstance(row.get("fields_text"), dict) else row.get("fields")
             if isinstance(fields, dict) and fields:
-                pairs = [f"{k}={v}" for k, v in list(fields.items())[:6]]
+                preferred_keys = [
+                    "案号",
+                    "case_no",
+                    "案件编号",
+                    "title",
+                    "案件名称",
+                    "主办律师",
+                    "owner",
+                    "负责人",
+                    "委托人",
+                    "client_name",
+                    "审理法院",
+                    "status",
+                    "next_deadline",
+                ]
+                ordered_keys: list[str] = [key for key in preferred_keys if key in fields]
+                ordered_keys.extend(key for key in fields if key not in ordered_keys)
+
+                pairs: list[str] = []
+                for key in ordered_keys[:12]:
+                    value = SkillSpecExecutor._stringify_field_value(fields.get(key))
+                    pairs.append(f"{key}={value}")
                 return ", ".join(pairs)
             return json.dumps(row, ensure_ascii=False)
         return str(row)
+
+    @staticmethod
+    def _stringify_field_value(value: Any) -> str:
+        if isinstance(value, list):
+            items = [SkillSpecExecutor._stringify_field_value(item) for item in value]
+            compact = [item for item in items if item and item != "{}" and item != "[]"]
+            return " / ".join(compact) if compact else "[]"
+        if isinstance(value, dict):
+            for key in ("text", "name", "title", "value"):
+                nested = value.get(key)
+                if nested not in (None, ""):
+                    return SkillSpecExecutor._stringify_field_value(nested)
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     @staticmethod
     def _stringify_payload(payload: Any) -> str:

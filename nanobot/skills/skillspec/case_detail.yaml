@@ -91,7 +91,7 @@ action:
           value: "{{ steps.case_base.rows[0].case_id }}"
 response:
   output_policy:
-    max_items: 5
+    max_items: 20
     include_total: true
   view:
     type: object

@@ -444,6 +444,11 @@ class FeishuChannel(BaseChannel):
     """
 
     name = "feishu"
+    _OPTIONAL_NOOP_EVENT_REGISTRATIONS: tuple[tuple[str, ...], ...] = (
+        ("register_p2_im_chat_access_event_bot_p2p_chat_entered_v1",),
+        ("register_p2_task_task_updated_v1",),
+        ("register_p2_task_task_update_tenant_v1",),
+    )
 
     def __init__(
         self,
@@ -473,6 +478,9 @@ class FeishuChannel(BaseChannel):
         self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "思考中")
         self._thinking_placeholder_markdown = self._runtime_text.prompt_text(
             "progress", "thinking_placeholder_markdown", "> 思考中"
+        )
+        self._thinking_done_placeholder_markdown = self._runtime_text.prompt_text(
+            "progress", "thinking_done_placeholder_markdown", "> 思考完成"
         )
         generic_lines = self._runtime_text.prompt_lines(
             "progress",
@@ -724,11 +732,7 @@ class FeishuChannel(BaseChannel):
             self._on_message_sync
         )
 
-        event_handler_builder = self._register_optional_event(
-            event_handler_builder,
-            ["register_p2_im_chat_access_event_bot_p2p_chat_entered_v1"],
-            lambda _event: None,
-        )
+        event_handler_builder = self._register_optional_noop_events(event_handler_builder)
         event_handler_builder = self._register_optional_event(
             event_handler_builder,
             ["register_p2_card_action_trigger"],
@@ -736,7 +740,7 @@ class FeishuChannel(BaseChannel):
         )
         event_handler_builder = self._register_optional_event(
             event_handler_builder,
-            ["register_p2_im_message_read_v1"],
+            ["register_p2_im_message_message_read_v1", "register_p2_im_message_read_v1"],
             self._on_message_read_sync,
         )
         event_handler_builder = self._register_optional_event(
@@ -823,6 +827,15 @@ class FeishuChannel(BaseChannel):
         })
         self._persist_event_registration_report()
         return builder
+
+    def _register_optional_noop_events(self, builder: Any) -> Any:
+        def _noop(_event: Any) -> None:
+            _ = _event
+
+        registered_builder = builder
+        for names in self._OPTIONAL_NOOP_EVENT_REGISTRATIONS:
+            registered_builder = self._register_optional_event(registered_builder, list(names), _noop)
+        return registered_builder
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """用于添加表情回应（运行在线程池中）的同步辅助方法。"""
@@ -1397,7 +1410,7 @@ class FeishuChannel(BaseChannel):
 
         detail_lines = self._extract_specific_thinking_lines(thinking_text)
         if not detail_lines:
-            return ""
+            return self._thinking_done_placeholder_markdown if collapsed else self._thinking_placeholder_markdown
 
         prefix = "> "
         quoted_lines = [f"{prefix}{summary}"]

@@ -70,6 +70,7 @@ class AgentLoop:
     _TOOL_RESULT_MAX_CHARS = 500
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
+    _ONBOARDING_GUIDE_PROMPTED_KEY = "guide_prompted_at"
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
@@ -759,10 +760,48 @@ class AgentLoop:
         return "你"
 
     def _build_onboarding_guide_message(self, profile: dict[str, Any] | None = None) -> str:
-        lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+        lines = self._runtime_text.prompt_lines(
+            "onboarding",
+            "guide_lines",
+            [
+                "### 👋 快速上手",
+                "你可以直接开始提问，不需要先填写表单。",
+                "",
+                "可直接对话调教：",
+                "- 叫我张律",
+                "- 以后简洁点 / 以后详细点",
+                "- 查案件时默认查全部",
+                "- 不用确认直接录入（当前策略默认仍先确认）",
+                "",
+                "常用命令：/help /status /setup /connect /session new",
+            ],
+        )
         preferred_name = self._resolve_profile_display_name(profile)
         rendered_lines = [line.replace("{preferred_name}", preferred_name) for line in lines]
         return "\n".join(rendered_lines)
+
+    def _build_onboarding_guide_outbound(
+        self,
+        msg: InboundMessage,
+        *,
+        stage: str,
+        intro_text: str,
+    ) -> OutboundMessage:
+        metadata = dict(msg.metadata or {})
+        metadata["onboarding"] = True
+        metadata["onboarding_stage"] = stage
+        metadata["_reply_in_thread"] = False
+        metadata["_disable_reply_to_message"] = True
+        content = intro_text.strip()
+        guide = self._build_onboarding_guide_message()
+        if guide:
+            content = f"{content}\n\n{guide}" if content else guide
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+            metadata=metadata,
+        )
 
     def _build_onboarding_completed_card(self, profile: dict[str, Any] | None = None) -> str:
         onboarding_tpl = self._runtime_text.template("onboarding_form")
@@ -846,14 +885,35 @@ class AgentLoop:
         callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
 
         if is_reentry:
-            onboarding.update({"status": "pending", "step": "identity", "updated_at": self._now_iso()})
+            now_iso = self._now_iso()
+            onboarding.update(
+                {
+                    "status": "pending",
+                    "step": "identity",
+                    "started_at": onboarding.get("started_at") or now_iso,
+                    "updated_at": now_iso,
+                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                }
+            )
             self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-            return self._build_onboarding_card_outbound(
+            if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                    stage="single",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding",
+                        "intro_reentry",
+                        "Welcome back, let's set up again quickly.",
+                    ),
+                )
+            return self._build_onboarding_guide_outbound(
                 msg,
-                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
-                stage="single",
+                stage="guide_reentry",
                 intro_text=self._runtime_text.prompt_text(
-                    "onboarding", "intro_reentry", "Welcome back, let's set up again quickly."
+                    "onboarding",
+                    "intro_reentry",
+                    "已重新打开上手提示。",
                 ),
             )
 
@@ -1022,24 +1082,46 @@ class AgentLoop:
         if status == "completed":
             return None
 
+        prompt_once = bool(getattr(feishu_cfg, "onboarding_guide_once", True))
+        prompted_at = str(onboarding.get(self._ONBOARDING_GUIDE_PROMPTED_KEY) or "").strip()
+        if prompt_once and prompted_at:
+            return None
+
+        now_iso = self._now_iso()
         onboarding.update(
             {
                 "status": "pending",
                 "step": "identity",
-                "started_at": onboarding.get("started_at") or self._now_iso(),
-                "updated_at": self._now_iso(),
+                "started_at": onboarding.get("started_at") or now_iso,
+                "updated_at": now_iso,
+                self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
             }
         )
         self._user_memory_store.write(msg.channel, msg.sender_id, profile)
 
-        return self._build_onboarding_card_outbound(
+        guide_outbound = self._build_onboarding_guide_outbound(
             msg,
-            card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
-            stage="single",
+            stage="guide",
             intro_text=self._runtime_text.prompt_text(
-                "onboarding", "intro_first", "Welcome, please complete setup first."
+                "onboarding",
+                "intro_first",
+                "我先发你一条快速上手提示，不影响继续提问。",
             ),
         )
+        if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+            return self._build_onboarding_card_outbound(
+                msg,
+                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                stage="single",
+                intro_text=self._runtime_text.prompt_text(
+                    "onboarding",
+                    "intro_first",
+                    "Welcome, please complete setup first.",
+                ),
+            )
+
+        await self.bus.publish_outbound(guide_outbound)
+        return None
 
     def _register_default_tools(self) -> None:
         """注册默认工具集。"""
@@ -1314,6 +1396,18 @@ class AgentLoop:
 
         logger.warning("Skillspec LLM render exhausted retries for {}, fallback to raw result", msg.session_key)
         return raw_content
+
+    @staticmethod
+    def _skillspec_kind(metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get("skillspec_kind") or "").strip().lower()
+
+    def _should_rewrite_skillspec_result(self, metadata: dict[str, Any] | None) -> bool:
+        kind = self._skillspec_kind(metadata)
+        if kind == "query" and not bool(getattr(self.skillspec_config, "query_rewrite_enabled", False)):
+            return False
+        return True
 
     # endregion
 
@@ -1712,7 +1806,32 @@ class AgentLoop:
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
-        return self._runtime_text.prompt_text("help", "commands_help_text", "").strip()
+        return self._runtime_text.prompt_text("help", "commands_help_text", self._default_commands_help_text()).strip()
+
+    @staticmethod
+    def _default_commands_help_text() -> str:
+        return (
+            "可用命令\n"
+            "- /help 或 /commands：查看命令总览\n"
+            "- /status：查看当前偏好与授权状态\n"
+            "- /setup：查看初始化引导\n"
+            "- /connect 或 /oauth：连接飞书 OAuth\n"
+            "- /session：查看会话子命令帮助\n"
+            "- /new：开启新会话\n"
+            "- /stop：停止当前任务\n"
+            "- 继续 / 展开：查看分页剩余内容\n"
+            "- 确认 <token> / 取消 <token>：确认或取消写入"
+        )
+
+    @staticmethod
+    def _default_session_help_text() -> str:
+        return (
+            "会话命令\n"
+            "- /session：查看帮助\n"
+            "- /session new [标题]：在群话题中新建会话\n"
+            "- /session list：列出当前聊天下会话\n"
+            "- /session del <id|main>：删除指定会话"
+        )
 
     def _build_status_text(self, msg: InboundMessage) -> str:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
@@ -1870,7 +1989,11 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = self._runtime_text.prompt_text("help", "session_help_text", "").strip()
+            content = self._runtime_text.prompt_text(
+                "help",
+                "session_help_text",
+                self._default_session_help_text(),
+            ).strip()
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -2040,6 +2163,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd == "/step":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_status_text(msg),
+            )
         if cmd in {"/connect", "/oauth"}:
             return self._handle_connect_command(msg)
         if cmd.startswith("/session"):
@@ -2076,7 +2205,9 @@ class AgentLoop:
         if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
-                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
+                rendered = continuation.content
+                if self._should_rewrite_skillspec_result(continuation.metadata):
+                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
                 self.sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
@@ -2094,7 +2225,9 @@ class AgentLoop:
         if self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
-                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
+                rendered = skillspec_result.content
+                if self._should_rewrite_skillspec_result(skillspec_result.metadata):
+                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
                 self.sessions.save(session)
                 outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
                 outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}

@@ -122,18 +122,16 @@ error: {}
         InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/skill query_test 关键词")
     )
     assert first is not None
-    assert first.content == "llm-fallback-1"
+    assert "RowA" in first.content
     assert first.metadata["skillspec_route"]["reason"] == "explicit"
-    assert provider.calls == 1
-    assert "RowA" in provider.prompts[0]
+    assert provider.calls == 0
 
     second = await loop._process_message(
         InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="继续")
     )
     assert second is not None
-    assert second.content == "llm-fallback-2"
-    assert provider.calls == 2
-    assert "RowB" in provider.prompts[1]
+    assert "RowB" in second.content
+    assert provider.calls == 0
 
 
 @pytest.mark.asyncio
@@ -237,7 +235,7 @@ error: {}
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
+        skillspec_config=SkillSpecConfig(enabled=True, query_rewrite_enabled=True),
         llm_timeout_seconds=0.01,
     )
     loop.tools.register(_FakeSearchTool())
@@ -273,7 +271,7 @@ error: {}
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
+        skillspec_config=SkillSpecConfig(enabled=True, query_rewrite_enabled=True),
     )
     loop.tools.register(_FakeSearchTool())
 
@@ -308,7 +306,7 @@ error: {}
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
+        skillspec_config=SkillSpecConfig(enabled=True, query_rewrite_enabled=True),
         llm_timeout_seconds=0.01,
     )
     loop.tools.register(_FakeSearchTool())
@@ -344,7 +342,7 @@ error: {}
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
+        skillspec_config=SkillSpecConfig(enabled=True, query_rewrite_enabled=True),
         llm_timeout_seconds=1.0,
         skillspec_render_primary_timeout_seconds=0.01,
         skillspec_render_retry_timeout_seconds=0.5,
