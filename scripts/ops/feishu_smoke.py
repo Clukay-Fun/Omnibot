@@ -247,7 +247,10 @@ async def calendar_task_sync_smoke(args: argparse.Namespace) -> int:
                 "description": "calendar_task_sync_smoke",
             },
         )
-        calendar = create_calendar_payload.get("data", {})
+        calendar_data = create_calendar_payload.get("data", {})
+        calendar = calendar_data.get("calendar") if isinstance(calendar_data, dict) else None
+        if not isinstance(calendar, dict):
+            calendar = calendar_data if isinstance(calendar_data, dict) else {}
         calendar_id = str(calendar.get("calendar_id") or calendar.get("id") or "").strip()
         if not calendar_id:
             raise RuntimeError("calendar_create response missing calendar_id")
@@ -271,20 +274,31 @@ async def calendar_task_sync_smoke(args: argparse.Namespace) -> int:
                 "description": "derived from bitable flow",
             },
         )
-        task = task_create.get("data", {})
-        task_id = str(task.get("task_id") or task.get("id") or "").strip()
+        task_data = task_create.get("data", {})
+        task = task_data.get("task") if isinstance(task_data, dict) else None
+        if not isinstance(task, dict):
+            task = task_data if isinstance(task_data, dict) else {}
+        task_id = str(task.get("guid") or task.get("task_id") or task.get("id") or "").strip()
         if not task_id:
             raise RuntimeError("task_create response missing task_id")
+
+        update_description = f"calendar_task_sync_smoke:update:{key}"
 
         first_task_update = await client.request(
             "PATCH",
             FeishuEndpoints.task_v2_task(task_id),
-            json_body={"status": "in_progress"},
+            json_body={
+                "task": {"description": update_description},
+                "update_fields": ["description"],
+            },
         )
         second_task_update = await client.request(
             "PATCH",
             FeishuEndpoints.task_v2_task(task_id),
-            json_body={"status": "in_progress"},
+            json_body={
+                "task": {"description": update_description},
+                "update_fields": ["description"],
+            },
         )
 
         cleanup_error = None

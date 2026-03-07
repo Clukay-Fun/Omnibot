@@ -11,9 +11,9 @@ from nanobot.agent.tools.feishu_data.task_tools import (
     TaskCreateTool,
     TaskDeleteTool,
     TaskGetTool,
+    TasklistListTool,
     TaskListTool,
     TaskUpdateTool,
-    TasklistListTool,
 )
 from nanobot.config.schema import FeishuDataConfig
 
@@ -60,11 +60,34 @@ async def test_task_update_payload(config: FeishuDataConfig, client: AsyncMock) 
 
     _ = await tool.execute(task_id="task_3", status="completed")
 
-    client.request.assert_called_once_with(
-        "PATCH",
-        FeishuEndpoints.task_v2_task("task_3"),
-        json_body={"status": "completed"},
-    )
+    client.request.assert_called_once()
+    assert client.request.call_args.args == ("PATCH", FeishuEndpoints.task_v2_task("task_3"))
+    body = client.request.call_args.kwargs["json_body"]
+    assert body["update_fields"] == ["completed_at"]
+    completed_at = body["task"]["completed_at"]
+    assert isinstance(completed_at, str)
+    assert completed_at.isdigit()
+    assert int(completed_at) > 0
+
+
+@pytest.mark.asyncio
+async def test_task_update_requires_at_least_one_field(config: FeishuDataConfig, client: AsyncMock) -> None:
+    tool = TaskUpdateTool(config, client)
+
+    result = json.loads(await tool.execute(task_id="task_3"))
+
+    assert "At least one update field" in result["error"]
+    client.request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_update_rejects_unsupported_status(config: FeishuDataConfig, client: AsyncMock) -> None:
+    tool = TaskUpdateTool(config, client)
+
+    result = json.loads(await tool.execute(task_id="task_3", status="blocked"))
+
+    assert "Unsupported status" in result["error"]
+    client.request.assert_not_called()
 
 
 @pytest.mark.asyncio
