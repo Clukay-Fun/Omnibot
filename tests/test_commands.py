@@ -1,16 +1,69 @@
 import shutil
+import sys
+import types
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 from typer.testing import CliRunner
+
+try:
+    import prompt_toolkit  # type: ignore # noqa: F401
+except ModuleNotFoundError:
+    prompt_toolkit_stub = types.ModuleType("prompt_toolkit")
+
+    class _DummyPromptSession:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+        async def prompt_async(self, *args, **kwargs):
+            _ = args, kwargs
+            return ""
+
+    prompt_toolkit_stub.PromptSession = _DummyPromptSession
+
+    formatted_stub = types.ModuleType("prompt_toolkit.formatted_text")
+    formatted_stub.HTML = lambda value: value
+
+    history_stub = types.ModuleType("prompt_toolkit.history")
+
+    class _DummyFileHistory:
+        def __init__(self, *args, **kwargs):
+            _ = args, kwargs
+
+    history_stub.FileHistory = _DummyFileHistory
+
+    patch_stdout_stub = types.ModuleType("prompt_toolkit.patch_stdout")
+
+    @contextmanager
+    def _dummy_patch_stdout():
+        yield
+
+    patch_stdout_stub.patch_stdout = _dummy_patch_stdout
+
+    sys.modules["prompt_toolkit"] = prompt_toolkit_stub
+    sys.modules["prompt_toolkit.formatted_text"] = formatted_stub
+    sys.modules["prompt_toolkit.history"] = history_stub
+    sys.modules["prompt_toolkit.patch_stdout"] = patch_stdout_stub
 
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
+from nanobot.oauth import (
+    FeishuOAuthClient,
+    FeishuOAuthService,
+    FeishuReauthorizationRequired,
+    FeishuUserTokenManager,
+    OAuthCallbackService,
+)
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
+from nanobot.storage import SQLiteStore
 from nanobot.utils.helpers import sync_workspace_templates
 
 runner = CliRunner()
@@ -180,3 +233,272 @@ def test_sync_workspace_templates_removes_legacy_runtime_dirs(tmp_path: Path) ->
 
     for legacy in ("prompts", "routing", "templates"):
         assert not (tmp_path / legacy).exists()
+
+
+def test_config_supports_feishu_oauth_server_settings() -> None:
+    config = Config.model_validate(
+        {
+            "integrations": {
+                "feishu": {
+                    "oauth": {
+                        "enabled": True,
+                        "publicBaseUrl": "https://bot.example.com",
+                        "callbackPath": "/oauth/feishu/callback",
+                        "stateTtlSeconds": 900,
+                        "refreshAheadSeconds": 180,
+                    }
+                }
+            }
+        }
+    )
+
+    oauth = config.integrations.feishu.oauth
+    assert oauth.enabled is True
+    assert oauth.public_base_url == "https://bot.example.com"
+    assert oauth.callback_path == "/oauth/feishu/callback"
+    assert oauth.state_ttl_seconds == 900
+    assert oauth.refresh_ahead_seconds == 180
+
+
+class _FakeSyncHTTPFactory:
+    def __init__(self, responses: list[httpx.Response]):
+        self._responses = list(responses)
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def __call__(self, **kwargs):
+        _ = kwargs
+        factory = self
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                _ = exc_type, exc, tb
+                return False
+
+            def post(self, url: str, json: dict | None = None, headers: dict | None = None):
+                factory.calls.append(("POST", url, json))
+                _ = headers
+                return factory._responses.pop(0)
+
+            def get(self, url: str, headers: dict | None = None):
+                factory.calls.append(("GET", url, None))
+                _ = headers
+                return factory._responses.pop(0)
+
+        return _Client()
+
+
+def _extract_state_from_url(url: str) -> str:
+    parsed = urlsplit(url)
+    query = parse_qs(parsed.query)
+    return str((query.get("state") or [""])[0])
+
+
+def test_feishu_oauth_callback_success_persists_token_and_consumes_state(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "memory" / "feishu" / "state.sqlite3")
+    fake_http = _FakeSyncHTTPFactory(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "access_token": "u_access_1",
+                    "refresh_token": "u_refresh_1",
+                    "token_type": "Bearer",
+                    "scope": "task:read",
+                    "expires_in": 7200,
+                    "refresh_expires_in": 2592000,
+                },
+            ),
+            httpx.Response(200, json={"open_id": "ou_test_1"}),
+        ]
+    )
+    client = FeishuOAuthClient(
+        api_base="https://open.feishu.cn",
+        app_id="cli_test",
+        app_secret="sec_test",
+        http_client_factory=fake_http,
+    )
+    service = FeishuOAuthService(
+        store=store,
+        client=client,
+        redirect_uri="https://bot.example.com/oauth/feishu/callback",
+        scopes=["task:read"],
+        state_ttl_seconds=600,
+    )
+
+    auth_url = service.create_authorization_url(actor_open_id="ou_sender", chat_id="oc_group")
+    state = _extract_state_from_url(auth_url)
+
+    callback = service.handle_callback({"state": state, "code": "code_ok"})
+    assert callback.success is True
+    assert callback.open_id == "ou_test_1"
+
+    token_row = store.get_feishu_user_token("ou_test_1")
+    assert token_row is not None
+    assert token_row["access_token"] == "u_access_1"
+    assert token_row["refresh_token"] == "u_refresh_1"
+    assert token_row["status"] == "active"
+
+    state_row = store.get_oauth_state(state)
+    assert state_row is not None
+    assert state_row["status"] == "consumed"
+
+    replay = service.handle_callback({"state": state, "code": "code_replay"})
+    assert replay.success is False
+    assert replay.status_code == 400
+
+
+def test_feishu_user_token_manager_refreshes_and_persists(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "memory" / "feishu" / "state.sqlite3")
+    now = datetime.now()
+    store.upsert_feishu_user_token(
+        "ou_refresh",
+        app_id="cli_test",
+        access_token="old_access",
+        refresh_token="old_refresh",
+        token_type="Bearer",
+        scope="task:read",
+        expires_at=(now - timedelta(seconds=5)).isoformat(),
+        refresh_expires_at=(now + timedelta(days=30)).isoformat(),
+        status="active",
+        last_refreshed_at=now.isoformat(),
+        last_error=None,
+        payload={"seed": True},
+    )
+
+    fake_http = _FakeSyncHTTPFactory(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "access_token": "new_access",
+                    "refresh_token": "new_refresh",
+                    "token_type": "Bearer",
+                    "scope": "task:read task:write",
+                    "expires_in": 3600,
+                    "refresh_expires_in": 2592000,
+                },
+            )
+        ]
+    )
+    client = FeishuOAuthClient(
+        api_base="https://open.feishu.cn",
+        app_id="cli_test",
+        app_secret="sec_test",
+        http_client_factory=fake_http,
+    )
+    manager = FeishuUserTokenManager(store=store, client=client, refresh_ahead_seconds=300)
+
+    token = manager.get_valid_access_token("ou_refresh")
+    assert token == "new_access"
+
+    row = store.get_feishu_user_token("ou_refresh")
+    assert row is not None
+    assert row["access_token"] == "new_access"
+    assert row["refresh_token"] == "new_refresh"
+    assert row["status"] == "active"
+    assert row["last_error"] in (None, "")
+
+
+def test_feishu_user_token_manager_marks_reauth_when_refresh_fails_and_expired(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "memory" / "feishu" / "state.sqlite3")
+    now = datetime.now()
+    store.upsert_feishu_user_token(
+        "ou_expired",
+        app_id="cli_test",
+        access_token="expired_access",
+        refresh_token="expired_refresh",
+        token_type="Bearer",
+        scope="task:read",
+        expires_at=(now - timedelta(seconds=10)).isoformat(),
+        refresh_expires_at=(now + timedelta(days=1)).isoformat(),
+        status="active",
+        last_refreshed_at=now.isoformat(),
+        last_error=None,
+        payload={"seed": True},
+    )
+
+    fake_http = _FakeSyncHTTPFactory(
+        [
+            httpx.Response(
+                400,
+                json={
+                    "error": "invalid_grant",
+                    "error_description": "refresh token invalid",
+                    "code": 20026,
+                },
+            )
+        ]
+    )
+    client = FeishuOAuthClient(
+        api_base="https://open.feishu.cn",
+        app_id="cli_test",
+        app_secret="sec_test",
+        http_client_factory=fake_http,
+    )
+    manager = FeishuUserTokenManager(store=store, client=client, refresh_ahead_seconds=0)
+
+    with pytest.raises(FeishuReauthorizationRequired):
+        manager.get_valid_access_token("ou_expired")
+
+    row = store.get_feishu_user_token("ou_expired")
+    assert row is not None
+    assert row["status"] == "reauth_required"
+    assert "refresh token invalid" in str(row["last_error"] or "")
+
+
+def test_oauth_callback_service_serves_feishu_callback(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "memory" / "feishu" / "state.sqlite3")
+    fake_http = _FakeSyncHTTPFactory(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "access_token": "u_access_2",
+                    "refresh_token": "u_refresh_2",
+                    "token_type": "Bearer",
+                    "scope": "task:read",
+                    "expires_in": 7200,
+                },
+            ),
+            httpx.Response(200, json={"open_id": "ou_http"}),
+        ]
+    )
+    client = FeishuOAuthClient(
+        api_base="https://open.feishu.cn",
+        app_id="cli_test",
+        app_secret="sec_test",
+        http_client_factory=fake_http,
+    )
+    service = FeishuOAuthService(
+        store=store,
+        client=client,
+        redirect_uri="https://bot.example.com/oauth/feishu/callback",
+        scopes=["task:read"],
+    )
+    callback = OAuthCallbackService(
+        host="127.0.0.1",
+        port=0,
+        callback_path="/oauth/feishu/callback",
+        feishu_service=service,
+    )
+
+    auth_url = service.create_authorization_url(actor_open_id="ou_sender", chat_id="oc_group")
+    state = _extract_state_from_url(auth_url)
+
+    callback.start()
+    try:
+        server = callback._server
+        assert server is not None
+        port = int(server.server_port)
+        response = httpx.get(
+            f"http://127.0.0.1:{port}/oauth/feishu/callback",
+            params={"state": state, "code": "code_http"},
+            timeout=5.0,
+        )
+        assert response.status_code == 200
+        assert "Authorization Completed" in response.text
+    finally:
+        callback.stop()

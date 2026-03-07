@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         SkillSpecConfig,
     )
     from nanobot.cron.service import CronService
+    from nanobot.oauth.feishu import FeishuOAuthService
 
 
 class AgentLoop:
@@ -98,6 +99,7 @@ class AgentLoop:
         stage_heartbeat_seconds: float = 15.0,
         skillspec_render_primary_timeout_seconds: float = 12.0,
         skillspec_render_retry_timeout_seconds: float = 6.0,
+        feishu_oauth_service: "FeishuOAuthService | None" = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -139,6 +141,7 @@ class AgentLoop:
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self._runtime_text = RuntimeTextCatalog.load(workspace)
+        self._feishu_oauth_service = feishu_oauth_service
         self._answer_placeholder_text = self._runtime_text.prompt_text(
             "progress", "answer_placeholder", "🐈努力回答中..."
         )
@@ -1577,18 +1580,75 @@ class AgentLoop:
             "pending": "进行中",
         }.get(onboarding_status, "未设置")
 
+        oauth_label = "未启用"
+        if msg.channel == "feishu" and self._feishu_oauth_service is not None:
+            token_status = self._feishu_oauth_service.get_user_token_status(msg.sender_id)
+            oauth_label = {
+                "active": "已连接",
+                "refresh_failed": "连接异常（可临时使用）",
+                "reauth_required": "需要重新授权",
+                "revoked": "已失效",
+                "not_connected": "未连接",
+            }.get(token_status, token_status)
+
         return (
             "📌 当前设置\n\n"
             f"怎么称呼您：{display_name}\n"
             f"回复风格：{style_label}\n"
             f"录入数据时：{confirm_label}\n"
             f"查案件时默认范围：{scope_label}\n"
-            f"引导状态：{status_label}\n\n"
+            f"引导状态：{status_label}\n"
+            f"飞书授权：{oauth_label}\n\n"
             "可用快捷调整：\n"
             "- 叫我XX\n"
             "- 以后简洁点 / 以后详细点\n"
             "- 不用确认直接录入\n"
-            "- /setup"
+            "- /setup\n"
+            "- /connect"
+        )
+
+    def _handle_connect_command(self, msg: InboundMessage) -> OutboundMessage:
+        if msg.channel != "feishu":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="/connect 目前仅支持飞书频道。",
+            )
+        if self._feishu_oauth_service is None:
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="当前环境未启用飞书 OAuth 回调服务，请联系管理员开启。",
+            )
+
+        metadata = msg.metadata or {}
+        thread_id = str(metadata.get("thread_id") or metadata.get("root_id") or "").strip() or None
+        try:
+            auth_url = self._feishu_oauth_service.create_authorization_url(
+                actor_open_id=msg.sender_id,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception("Failed to create Feishu OAuth authorization URL")
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="授权链接生成失败，请稍后再试。",
+            )
+
+        token_status = self._feishu_oauth_service.get_user_token_status(msg.sender_id)
+        status_hint = ""
+        if token_status == "active":
+            status_hint = "\n\n当前检测到你已授权过，重新授权会覆盖旧令牌。"
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=(
+                "请点击以下链接完成飞书授权（浏览器打开）：\n"
+                f"{auth_url}"
+                f"{status_hint}"
+            ),
         )
 
     def _list_chat_session_keys(self, channel: str, chat_id: str, current_key: str) -> list[str]:
@@ -1806,6 +1866,8 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd in {"/connect", "/oauth"}:
+            return self._handle_connect_command(msg)
         if cmd.startswith("/session"):
             return self._handle_session_command(msg, key, raw_cmd)
         if cmd == "/new":

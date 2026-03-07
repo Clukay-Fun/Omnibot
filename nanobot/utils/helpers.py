@@ -101,6 +101,7 @@ def bootstrap_workspace_dirs(workspace: Path) -> None:
     ensure_dir(workspace / "memory" / "users")
     ensure_dir(workspace / "memory" / "feishu" / "users")
     ensure_dir(workspace / "memory" / "feishu" / "chats")
+    ensure_dir(workspace / "memory" / "feishu" / "threads")
     ensure_dir(workspace / "extract")
     ensure_dir(workspace / "feishu")
     for legacy_dir in ("prompts", "routing", "templates"):

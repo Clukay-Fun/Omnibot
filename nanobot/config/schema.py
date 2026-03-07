@@ -93,12 +93,28 @@ class FeishuSharedBitableConfig(Base):
     field_mapping: dict[str, str] = Field(default_factory=dict)
 
 
+class FeishuOAuthConfig(Base):
+    """Server-side Feishu OAuth callback and token lifecycle configuration."""
+
+    enabled: bool = False
+    public_base_url: str = ""
+    callback_path: str = "/oauth/feishu/callback"
+    bind_host: str = ""
+    bind_port: int = 0
+    scopes: list[str] = Field(default_factory=list)
+    state_ttl_seconds: int = 600
+    refresh_ahead_seconds: int = 300
+    success_html_title: str = "Feishu Authorization Completed"
+    failure_html_title: str = "Feishu Authorization Failed"
+
+
 class FeishuIntegrationConfig(Base):
     """Shared Feishu integration settings."""
 
     auth: FeishuSharedAuthConfig = Field(default_factory=FeishuSharedAuthConfig)
     api: FeishuSharedAPIConfig = Field(default_factory=FeishuSharedAPIConfig)
     bitable: FeishuSharedBitableConfig = Field(default_factory=FeishuSharedBitableConfig)
+    oauth: FeishuOAuthConfig = Field(default_factory=FeishuOAuthConfig)
 
 
 class IntegrationsConfig(Base):

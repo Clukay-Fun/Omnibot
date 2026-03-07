@@ -81,9 +81,11 @@ You are nanobot, a helpful AI assistant.
 Your workspace is at: {workspace_path}
 - Main-session long-term memory: {workspace_path}/MEMORY.md (write important facts here)
 - Legacy memory compatibility path: {workspace_path}/memory/MEMORY.md
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
-- Feishu user profiles: {workspace_path}/memory/feishu/users/*.json
-- Feishu group context: {workspace_path}/memory/feishu/chats/*.json
+- Feishu user memory: {workspace_path}/memory/feishu/users/<open_id>/MEMORY.md
+- Feishu group memory: {workspace_path}/memory/feishu/chats/<chat_id>/MEMORY.md
+- Feishu thread memory: {workspace_path}/memory/feishu/threads/<chat_id>__<thread_id>/MEMORY.md
+- Feishu user profiles (compat): {workspace_path}/memory/feishu/users/*.json
+- Feishu group context (compat): {workspace_path}/memory/feishu/chats/*.json
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 ## nanobot Guidelines

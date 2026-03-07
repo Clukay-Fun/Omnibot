@@ -26,6 +26,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService
+from nanobot.storage.sqlite_store import SQLiteStore
 
 try:
     import lark_oapi as lark
@@ -488,10 +489,10 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
-        self._message_index_path = self.workspace / "memory" / "feishu" / "message_index.json"
+        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []
-        self._state_path = self.workspace / "memory" / "feishu" / "channel_state.json"
         self._cron_service = CronService(self.workspace / "cron_jobs.json")
         self._reminder_runtime = ReminderRuntime(self.workspace / "reminders.json")
         self._bitable_engine = BitableReminderRuleEngine(
@@ -503,43 +504,59 @@ class FeishuChannel(BaseChannel):
         self._load_message_index()
 
     def _read_state(self) -> dict[str, Any]:
-        if not self._state_path.exists():
-            return {}
-        try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        payload: dict[str, Any] = {}
+
+        welcomed_rows = self._sqlite.list_feishu_chat_state(SQLiteStore.GLOBAL_CHAT_ID, prefix="welcomed:")
+        if welcomed_rows:
+            payload["welcomed"] = {
+                key.split(":", 1)[1]: value
+                for key, value in welcomed_rows.items()
+                if key.startswith("welcomed:")
+            }
+
+        group_welcomes = self._sqlite.list_feishu_state_by_key("group_welcome_last_sent")
+        if group_welcomes:
+            payload["group_welcomes"] = group_welcomes
+
+        event_report = self._sqlite.get_feishu_chat_state(
+            SQLiteStore.GLOBAL_CHAT_ID,
+            "event_registration_report",
+            default=[],
+        )
+        if isinstance(event_report, list) and event_report:
+            payload["event_registration_report"] = event_report
+        return payload
 
     def _write_state(self, payload: dict[str, Any]) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        welcomed = payload.get("welcomed") if isinstance(payload.get("welcomed"), dict) else {}
+        for key, value in welcomed.items():
+            self._sqlite.upsert_feishu_chat_state(SQLiteStore.GLOBAL_CHAT_ID, f"welcomed:{key}", value)
+
+        group_welcomes = payload.get("group_welcomes") if isinstance(payload.get("group_welcomes"), dict) else {}
+        for chat_id, value in group_welcomes.items():
+            self._sqlite.upsert_feishu_chat_state(str(chat_id), "group_welcome_last_sent", value)
+
+        event_report = payload.get("event_registration_report")
+        if isinstance(event_report, list):
+            self._sqlite.upsert_feishu_chat_state(
+                SQLiteStore.GLOBAL_CHAT_ID,
+                "event_registration_report",
+                event_report,
+            )
 
     def _load_message_index(self) -> None:
-        if not self._message_index_path.exists():
-            self._message_index = OrderedDict()
-            return
-        try:
-            payload = json.loads(self._message_index_path.read_text(encoding="utf-8"))
-        except Exception:
-            self._message_index = OrderedDict()
-            return
-        if not isinstance(payload, dict):
-            self._message_index = OrderedDict()
-            return
-        self._message_index = OrderedDict((str(key), dict(value)) for key, value in payload.items() if isinstance(value, dict))
-        self._trim_message_index()
+        self._sqlite.trim_feishu_message_index(1000)
+        rows = self._sqlite.list_feishu_message_index(limit=1000)
+        self._message_index = OrderedDict((row["message_id"], row) for row in rows)
 
     def _trim_message_index(self) -> None:
+        self._sqlite.trim_feishu_message_index(1000)
         while len(self._message_index) > 1000:
-            self._message_index.popitem(last=False)
+            message_id, _ = self._message_index.popitem(last=False)
+            self._sqlite.delete_feishu_message_index(message_id)
 
     def _persist_message_index(self) -> None:
-        self._message_index_path.parent.mkdir(parents=True, exist_ok=True)
-        self._message_index_path.write_text(
-            json.dumps(dict(self._message_index), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._sqlite.trim_feishu_message_index(1000)
 
     def _persist_event_registration_report(self) -> None:
         state = self._read_state()
@@ -548,7 +565,8 @@ class FeishuChannel(BaseChannel):
 
     def _mark_welcome_sent(self, key: str) -> bool:
         state = self._read_state()
-        welcomed = state.get("welcomed") if isinstance(state.get("welcomed"), dict) else {}
+        raw_welcomed = state.get("welcomed")
+        welcomed: dict[str, Any] = raw_welcomed if isinstance(raw_welcomed, dict) else {}
         if key in welcomed:
             return False
         welcomed[key] = datetime.now().isoformat()
@@ -558,7 +576,8 @@ class FeishuChannel(BaseChannel):
 
     def _group_welcome_allowed(self, chat_id: str) -> bool:
         state = self._read_state()
-        group_welcomes = state.get("group_welcomes") if isinstance(state.get("group_welcomes"), dict) else {}
+        raw_group_welcomes = state.get("group_welcomes")
+        group_welcomes: dict[str, Any] = raw_group_welcomes if isinstance(raw_group_welcomes, dict) else {}
         last_sent = group_welcomes.get(chat_id)
         now = time.time()
         if isinstance(last_sent, (int, float)) and now - float(last_sent) < 24 * 60 * 60:
@@ -578,14 +597,21 @@ class FeishuChannel(BaseChannel):
     def _remember_bot_message(self, message_id: str | None, *, content: str, chat_id: str, source_message_id: str | None = None) -> None:
         if not message_id:
             return
-        self._message_index[str(message_id)] = {
+        entry = {
             "content": self._summarize_message_text(content),
             "chat_id": chat_id,
             "source_message_id": source_message_id,
             "created_at": datetime.now().isoformat(),
         }
+        self._message_index[str(message_id)] = entry
+        self._sqlite.upsert_feishu_message_index(
+            str(message_id),
+            chat_id=str(entry.get("chat_id") or ""),
+            content=str(entry.get("content") or ""),
+            source_message_id=str(entry.get("source_message_id") or "") or None,
+            created_at=str(entry.get("created_at") or datetime.now().isoformat()),
+        )
         self._trim_message_index()
-        self._persist_message_index()
 
     def _resolve_quoted_bot_summary(self, metadata: dict[str, Any]) -> str:
         current_chat_id = str(metadata.get("chat_id") or "").strip()

@@ -72,6 +72,7 @@ class MemoryStore:
         self.history_file = self.memory_dir / "HISTORY.md"
         self.feishu_user_dir = ensure_dir(self.memory_dir / "feishu" / "users")
         self.feishu_chat_dir = ensure_dir(self.memory_dir / "feishu" / "chats")
+        self.feishu_thread_dir = ensure_dir(self.memory_dir / "feishu" / "threads")
 
     def read_long_term(self) -> str:
         """用处，参数
@@ -107,11 +108,36 @@ class MemoryStore:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
+    @staticmethod
+    def _read_markdown(path: Path) -> str:
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+
     def feishu_user_profile_path(self, open_id: str) -> Path:
         return self.feishu_user_dir / f"{safe_filename(open_id)}.json"
 
     def feishu_chat_context_path(self, chat_id: str) -> Path:
         return self.feishu_chat_dir / f"{safe_filename(chat_id)}.json"
+
+    def feishu_user_memory_path(self, open_id: str) -> Path:
+        return self.feishu_user_dir / safe_filename(open_id) / "MEMORY.md"
+
+    def feishu_chat_memory_path(self, chat_id: str) -> Path:
+        return self.feishu_chat_dir / safe_filename(chat_id) / "MEMORY.md"
+
+    def feishu_thread_memory_path(self, chat_id: str, thread_id: str) -> Path:
+        key = f"{safe_filename(chat_id)}__{safe_filename(thread_id)}"
+        return self.feishu_thread_dir / key / "MEMORY.md"
+
+    def read_feishu_user_memory(self, open_id: str) -> str:
+        return self._read_markdown(self.feishu_user_memory_path(open_id))
+
+    def read_feishu_chat_memory(self, chat_id: str) -> str:
+        return self._read_markdown(self.feishu_chat_memory_path(chat_id))
+
+    def read_feishu_thread_memory(self, chat_id: str, thread_id: str) -> str:
+        return self._read_markdown(self.feishu_thread_memory_path(chat_id, thread_id))
 
     def read_feishu_user_profile(self, open_id: str) -> dict:
         return self._read_json(self.feishu_user_profile_path(open_id))
@@ -149,10 +175,9 @@ class MemoryStore:
         """用处，参数
 
         功能:
-            - 追加一条历史日志记录。
+            - Batch 1 起禁用 HISTORY 落盘，保留接口兼容。
         """
-        with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(entry.rstrip() + "\n\n")
+        _ = entry
 
     def get_memory_context(self, runtime: PromptContext | None = None) -> str:
         """用处，参数
@@ -166,10 +191,37 @@ class MemoryStore:
         if runtime.purpose == "heartbeat":
             return ""
 
-        if not (runtime.is_feishu and runtime.is_group):
+        if not runtime.is_feishu:
             long_term = self.read_long_term()
             if long_term:
                 parts.append(f"## Long-term Memory\n{long_term}")
+
+        if runtime.is_feishu and runtime.is_private:
+            long_term = self.read_long_term()
+            if long_term:
+                parts.append(f"## Long-term Memory\n{long_term}")
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                user_memory = self.read_feishu_user_memory(open_id)
+                if user_memory:
+                    parts.append(f"## Feishu User Memory\n{user_memory}")
+
+        if runtime.is_feishu and runtime.is_group and runtime.chat_id:
+            chat_memory = self.read_feishu_chat_memory(runtime.chat_id)
+            if runtime.is_topic:
+                if chat_memory:
+                    parts.append(f"## Feishu Chat Memory\n{chat_memory}")
+                thread_id = str(runtime.metadata.get("thread_id") or runtime.metadata.get("root_id") or "").strip()
+                if thread_id:
+                    thread_memory = self.read_feishu_thread_memory(runtime.chat_id, thread_id)
+                    if thread_memory:
+                        parts.append(f"## Feishu Thread Memory\n{thread_memory}")
+            else:
+                long_term = self.read_long_term()
+                if long_term:
+                    parts.append(f"## Long-term Memory\n{long_term}")
+                if chat_memory:
+                    parts.append(f"## Feishu Chat Memory\n{chat_memory}")
 
         if runtime.is_feishu and runtime.sender_id:
             profile = self.read_feishu_user_profile(runtime.sender_id)

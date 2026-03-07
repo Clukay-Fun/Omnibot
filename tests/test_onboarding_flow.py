@@ -338,3 +338,34 @@ async def test_status_command_returns_current_preferences(tmp_path) -> None:
     assert "录入数据时：直接写入，不用每次确认" in response.content
     assert "查案件时默认范围：查全部" in response.content
     assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_connect_command_reports_oauth_not_enabled_when_service_missing(tmp_path) -> None:
+    loop, provider = _build_loop(tmp_path)
+    store = UserMemoryStore(tmp_path)
+    store.write(
+        "feishu",
+        "ou_connect",
+        {
+            "identity": {"name": "张三", "role": "lawyer"},
+            "preferences": {},
+            "dynamic": {},
+            "skillspec": {},
+            "onboarding": {"status": "completed", "step": "completed"},
+        },
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_connect",
+            chat_id="oc_group",
+            content="/connect",
+            metadata={"chat_type": "group", "message_id": "m-connect"},
+        )
+    )
+
+    assert response is not None
+    assert "未启用飞书 OAuth 回调服务" in response.content
+    assert provider.calls == 0
