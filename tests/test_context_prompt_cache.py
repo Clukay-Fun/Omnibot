@@ -135,7 +135,7 @@ def test_feishu_memory_scope_isolated_by_runtime(tmp_path) -> None:
         )
     )
 
-    assert "global-memory" in private_prompt
+    assert "global-memory" not in private_prompt
     assert "private-user-memory" in private_prompt
 
     assert "global-memory" in group_prompt
@@ -145,6 +145,37 @@ def test_feishu_memory_scope_isolated_by_runtime(tmp_path) -> None:
     assert "group-memory" in topic_prompt
     assert "thread-memory" in topic_prompt
     assert "global-memory" not in topic_prompt
+
+
+def test_private_feishu_long_term_memory_reads_and_writes_user_scope(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "MEMORY.md").write_text("shared-memory", encoding="utf-8")
+
+    memory = MemoryStore(workspace)
+    user_memory = memory.feishu_user_memory_path("ou_user")
+    user_memory.parent.mkdir(parents=True, exist_ok=True)
+    user_memory.write_text("private-memory", encoding="utf-8")
+
+    private_runtime = PromptContext(
+        channel="feishu",
+        chat_id="ou_user",
+        sender_id="ou_user",
+        metadata={"chat_type": "p2p"},
+    )
+    group_runtime = PromptContext(
+        channel="feishu",
+        chat_id="oc_group",
+        sender_id="ou_user",
+        metadata={"chat_type": "group"},
+    )
+
+    assert memory.read_long_term(runtime=private_runtime) == "private-memory"
+    assert memory.read_long_term(runtime=group_runtime) == "shared-memory"
+
+    memory.write_long_term("private-memory-updated", runtime=private_runtime)
+
+    assert user_memory.read_text(encoding="utf-8") == "private-memory-updated"
+    assert (workspace / "MEMORY.md").read_text(encoding="utf-8") == "shared-memory"
 
 
 #endregion

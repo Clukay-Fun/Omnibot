@@ -23,7 +23,7 @@ from rich.text import Text
 
 from nanobot import __logo__, __version__
 from nanobot.config.schema import Config
-from nanobot.utils.helpers import sync_workspace_templates
+from nanobot.utils.helpers import get_state_path, sync_workspace_templates
 
 app = typer.Typer(
     name="nanobot",
@@ -357,7 +357,7 @@ def gateway(
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
-    from nanobot.config.loader import get_data_dir, load_config
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
@@ -386,7 +386,7 @@ def gateway(
         oauth_stack.store.cleanup_expired_oauth_states(now_iso=datetime.now().isoformat())
 
     # 首先创建 Cron 服务（将会在 agent 创建后设置回调）
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path = get_state_path() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
     # 连同 Cron 服务一并创建 agent
@@ -559,7 +559,7 @@ def agent(
 
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.loader import get_data_dir, load_config
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
 
     config = load_config()
@@ -571,7 +571,7 @@ def agent(
     provider = _make_provider(config)
 
     # 为工具使用创建 Cron 服务（除非正在运行否则 CLI 不需要回调）
-    cron_store_path = get_data_dir() / "cron" / "jobs.json"
+    cron_store_path = get_state_path() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
 
     if logs:
@@ -927,10 +927,9 @@ def cron_list(
     all: bool = typer.Option(False, "--all", "-a", help="包含已禁用的任务"),
 ):
     """列出所有已调度的定时任务。"""
-    from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    store_path = get_state_path() / "cron" / "jobs.json"
     service = CronService(store_path)
 
     jobs = service.list_jobs(include_disabled=all)
@@ -988,7 +987,6 @@ def cron_add(
     channel: str = typer.Option(None, "--channel", help="响应投递的目标渠道 (例如 'telegram', 'whatsapp')"),
 ):
     """添加一个新的定时调度任务。"""
-    from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
 
@@ -1009,7 +1007,7 @@ def cron_add(
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    store_path = get_state_path() / "cron" / "jobs.json"
     service = CronService(store_path)
 
     try:
@@ -1033,10 +1031,9 @@ def cron_remove(
     job_id: str = typer.Argument(..., help="需要被删除的任务 ID"),
 ):
     """删除指定的定时任务。"""
-    from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    store_path = get_state_path() / "cron" / "jobs.json"
     service = CronService(store_path)
 
     if service.remove_job(job_id):
@@ -1051,10 +1048,9 @@ def cron_enable(
     disable: bool = typer.Option(False, "--disable", help="禁用任务而非启用"),
 ):
     """启用或禁用一个任务。"""
-    from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    store_path = get_state_path() / "cron" / "jobs.json"
     service = CronService(store_path)
 
     job = service.enable_job(job_id, enabled=not disable)
@@ -1075,7 +1071,7 @@ def cron_run(
 
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
-    from nanobot.config.loader import get_data_dir, load_config
+    from nanobot.config.loader import load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     logger.disable("nanobot")
@@ -1108,7 +1104,7 @@ def cron_run(
         skillspec_embedding_provider_config=config.providers.siliconflow,
     )
 
-    store_path = get_data_dir() / "cron" / "jobs.json"
+    store_path = get_state_path() / "cron" / "jobs.json"
     service = CronService(store_path)
 
     result_holder = []

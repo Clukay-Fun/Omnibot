@@ -41,6 +41,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 from nanobot.storage.audit import AuditSink
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -152,7 +153,10 @@ class AgentLoop:
         )
 
         self.context = ContextBuilder(workspace)
-        self._state_db_path = state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._memory_store = self.context.memory
+        legacy_state_db_path = self.workspace / "memory" / "feishu" / "state.sqlite3"
+        self._state_db_path = state_db_path or (get_state_path() / "feishu" / "state.sqlite3")
+        migrate_legacy_path(legacy_state_db_path, self._state_db_path, related_suffixes=("-wal", "-shm", ".bak"))
         self._sqlite_options = sqlite_options
         self.sessions = session_manager or SessionManager(
             workspace,
@@ -313,7 +317,10 @@ class AgentLoop:
             embedding_min_score=self.skillspec_config.embedding_min_score,
             route_log_enabled=self.skillspec_config.route_log_enabled,
             route_log_top_k=self.skillspec_config.route_log_top_k,
-            reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
+            reminder_runtime=ReminderRuntime(
+                get_state_path() / "reminders.json",
+                legacy_store_paths=[self.workspace / "reminders.json"],
+            ),
             runtime_text=self._runtime_text,
             table_registry=TableRegistry(workspace=self.workspace),
         )
@@ -349,6 +356,35 @@ class AgentLoop:
             session_key=session_key or msg.session_key,
             metadata=dict(msg.metadata or {}),
         )
+
+    @staticmethod
+    def _prompt_context_from_session(session: Session) -> PromptContext:
+        metadata = dict(session.metadata or {})
+        return PromptContext(
+            purpose="chat",
+            channel=str(metadata.get("channel") or "") or None,
+            chat_id=str(metadata.get("chat_id") or "") or None,
+            sender_id=str(metadata.get("sender_id") or "") or None,
+            session_key=session.key,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _remember_session_runtime_metadata(session: Session, msg: InboundMessage) -> None:
+        metadata = dict(session.metadata or {})
+        msg_metadata = dict(msg.metadata or {})
+        metadata["channel"] = msg.channel
+        metadata["chat_id"] = msg.chat_id
+        metadata["sender_id"] = msg.sender_id
+        metadata["chat_type"] = str(msg_metadata.get("chat_type") or "")
+
+        thread_id = str(msg_metadata.get("thread_id") or msg_metadata.get("root_id") or "").strip()
+        if thread_id:
+            metadata["thread_id"] = thread_id
+        else:
+            metadata.pop("thread_id", None)
+
+        session.metadata = metadata
 
     def _feishu_onboarding_config(self) -> Any | None:
         if not self.channels_config:
@@ -759,25 +795,94 @@ class AgentLoop:
             return user_name
         return "你"
 
-    def _build_onboarding_guide_message(self, profile: dict[str, Any] | None = None) -> str:
+    def _resolve_onboarding_name_example(self, profile: dict[str, Any] | None = None) -> str:
+        preferred_name = self._resolve_profile_display_name(profile)
+        return preferred_name if preferred_name != "你" else "小律"
+
+    @staticmethod
+    def _workspace_template_path(filename: str) -> Path:
+        return Path(__file__).resolve().parent.parent / "templates" / filename
+
+    def _read_workspace_or_template_file(self, filename: str, runtime: PromptContext | None = None) -> str:
+        if runtime is not None and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"}:
+            path = self._memory_store.resolve_persona_markdown_path(filename, runtime)
+            if path is not None:
+                try:
+                    if path.exists():
+                        return path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+
+        for path in (self.workspace / filename, self._workspace_template_path(filename)):
+            try:
+                if path.exists():
+                    return path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+        return ""
+
+    def _build_bootstrap_identity_summary(self, runtime: PromptContext | None = None) -> str:
+        bootstrap_text = self._read_workspace_or_template_file("BOOTSTRAP.md", runtime)
+        topics = re.findall(r"\d+\.\s+\*\*(.*?)\*\*", bootstrap_text)
+        normalized_topics = [topic.strip().lower() for topic in topics if topic.strip()]
+        if any("name" in topic for topic in normalized_topics):
+            return "名字 / 类型 / 语气 / emoji"
+        return "名字 / 语气 / 行为偏好"
+
+    def _build_bootstrap_action_summary(self, runtime: PromptContext | None = None) -> str:
+        soul_text = self._read_workspace_or_template_file("SOUL.md", runtime)
+        lower_soul = soul_text.lower()
+        parts: list[str] = []
+        if "concise" in lower_soul or "简洁" in soul_text:
+            parts.append("默认简洁直接")
+        if "accuracy" in lower_soul or "准确" in soul_text:
+            parts.append("先保证准确")
+        if "privacy" in lower_soul or "隐私" in soul_text:
+            parts.append("重视隐私")
+        if "ask before external actions" in lower_soul or "外部动作" in soul_text:
+            parts.append("外部动作先确认")
+        if not parts:
+            parts.extend(["默认简洁直接", "重视准确与隐私", "外部动作先确认"])
+        return "、".join(parts[:3])
+
+    def _build_onboarding_guide_message(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> str:
+        if runtime is not None and runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                self._memory_store.ensure_feishu_user_persona_files(open_id)
+        preferred_name = self._resolve_onboarding_name_example(profile)
+        bootstrap_identity = self._build_bootstrap_identity_summary(runtime)
+        bootstrap_action = self._build_bootstrap_action_summary(runtime)
         lines = self._runtime_text.prompt_lines(
             "onboarding",
             "guide_lines",
             [
-                "### 👋 快速上手",
-                "你可以直接开始提问，不需要先填写表单。",
+                "### 👋 BOOTSTRAP 确认",
+                "我会先按 `BOOTSTRAP.md` / `SOUL.md` 的默认设定继续，不阻塞对话。",
                 "",
-                "可直接对话调教：",
-                "- 叫我张律",
-                "- 以后简洁点 / 以后详细点",
-                "- 查案件时默认查全部",
-                "- 不用确认直接录入（当前策略默认仍先确认）",
+                "默认先确认两类事：",
+                "- 人格：{bootstrap_identity}",
+                "- 行动方式：{bootstrap_action}",
                 "",
-                "常用命令：/help /status /setup /connect /session new",
+                "如果你想改，直接对我说：",
+                "- 以后叫我 {preferred_name}",
+                "- 语气再松一点 / 以后详细一点",
+                "- 查案件默认查全部",
+                "- 写入仍先确认 / 以后直接写",
+                "",
+                "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
             ],
         )
-        preferred_name = self._resolve_profile_display_name(profile)
-        rendered_lines = [line.replace("{preferred_name}", preferred_name) for line in lines]
+        rendered_lines = [
+            line.replace("{preferred_name}", preferred_name)
+            .replace("{bootstrap_identity}", bootstrap_identity)
+            .replace("{bootstrap_action}", bootstrap_action)
+            for line in lines
+        ]
         return "\n".join(rendered_lines)
 
     def _build_onboarding_guide_outbound(
@@ -786,6 +891,7 @@ class AgentLoop:
         *,
         stage: str,
         intro_text: str,
+        profile: dict[str, Any] | None = None,
     ) -> OutboundMessage:
         metadata = dict(msg.metadata or {})
         metadata["onboarding"] = True
@@ -793,7 +899,7 @@ class AgentLoop:
         metadata["_reply_in_thread"] = False
         metadata["_disable_reply_to_message"] = True
         content = intro_text.strip()
-        guide = self._build_onboarding_guide_message()
+        guide = self._build_onboarding_guide_message(profile, runtime=self._prompt_context_for_message(msg))
         if guide:
             content = f"{content}\n\n{guide}" if content else guide
         return OutboundMessage(
@@ -803,7 +909,11 @@ class AgentLoop:
             metadata=metadata,
         )
 
-    def _build_onboarding_completed_card(self, profile: dict[str, Any] | None = None) -> str:
+    def _build_onboarding_completed_card(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> str:
         onboarding_tpl = self._runtime_text.template("onboarding_form")
         card = {
             "config": {"wide_screen_mode": True},
@@ -817,7 +927,7 @@ class AgentLoop:
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": self._build_onboarding_guide_message(profile).replace("\n", "  \n"),
+                    "content": self._build_onboarding_guide_message(profile, runtime=runtime).replace("\n", "  \n"),
                 }
             ],
         }
@@ -886,15 +996,27 @@ class AgentLoop:
 
         if is_reentry:
             now_iso = self._now_iso()
-            onboarding.update(
-                {
-                    "status": "pending",
-                    "step": "identity",
-                    "started_at": onboarding.get("started_at") or now_iso,
-                    "updated_at": now_iso,
-                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
-                }
-            )
+            if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+                onboarding.update(
+                    {
+                        "status": "pending",
+                        "step": "identity",
+                        "started_at": onboarding.get("started_at") or now_iso,
+                        "updated_at": now_iso,
+                        self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                    }
+                )
+            else:
+                onboarding.update(
+                    {
+                        "status": "completed",
+                        "step": "bootstrap_default",
+                        "started_at": onboarding.get("started_at") or now_iso,
+                        "completed_at": now_iso,
+                        "updated_at": now_iso,
+                        self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                    }
+                )
             self._user_memory_store.write(msg.channel, msg.sender_id, profile)
             if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
                 return self._build_onboarding_card_outbound(
@@ -915,6 +1037,7 @@ class AgentLoop:
                     "intro_reentry",
                     "已重新打开上手提示。",
                 ),
+                profile=profile,
             )
 
         onboarding_action_keys = {
@@ -938,7 +1061,10 @@ class AgentLoop:
             if status == "completed":
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding",
@@ -1048,7 +1174,10 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding", "intro_submit_done", "Setup completed."
@@ -1069,7 +1198,10 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding", "intro_skip_done", "Skipped setup. Preferences will be learned in dialogue."
@@ -1088,15 +1220,27 @@ class AgentLoop:
             return None
 
         now_iso = self._now_iso()
-        onboarding.update(
-            {
-                "status": "pending",
-                "step": "identity",
-                "started_at": onboarding.get("started_at") or now_iso,
-                "updated_at": now_iso,
-                self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
-            }
-        )
+        if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+            onboarding.update(
+                {
+                    "status": "pending",
+                    "step": "identity",
+                    "started_at": onboarding.get("started_at") or now_iso,
+                    "updated_at": now_iso,
+                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                }
+            )
+        else:
+            onboarding.update(
+                {
+                    "status": "completed",
+                    "step": "bootstrap_default",
+                    "started_at": onboarding.get("started_at") or now_iso,
+                    "completed_at": now_iso,
+                    "updated_at": now_iso,
+                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                }
+            )
         self._user_memory_store.write(msg.channel, msg.sender_id, profile)
 
         guide_outbound = self._build_onboarding_guide_outbound(
@@ -1107,6 +1251,7 @@ class AgentLoop:
                 "intro_first",
                 "我先发你一条快速上手提示，不影响继续提问。",
             ),
+            profile=profile,
         )
         if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
             return self._build_onboarding_card_outbound(
@@ -2136,6 +2281,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        self._remember_session_runtime_metadata(session, msg)
         base_key = f"{msg.channel}:{msg.chat_id}"
         self._consume_one_pending_topic_title(base_key, key)
 
@@ -2182,6 +2328,7 @@ class AgentLoop:
                     if snapshot:
                         temp = Session(key=session.key)
                         temp.messages = list(snapshot)
+                        temp.metadata = dict(session.metadata or {})
                         if not await self._consolidate_memory(temp, archive_all=True):
                             return OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
@@ -2359,8 +2506,11 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
         """委托给 MemoryStore.consolidate()，成功时返回 True。"""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
+        return await self._memory_store.consolidate(
+            session,
+            self.provider,
+            self.model,
+            runtime=self._prompt_context_from_session(session),
             archive_all=archive_all, memory_window=self.memory_window,
         )
 

@@ -286,6 +286,19 @@ def test_config_resolves_feishu_storage_path_and_sqlite_options(tmp_path: Path) 
     assert options.busy_timeout_ms == 9000
 
 
+def test_config_resolves_default_feishu_state_db_outside_workspace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path / "workspace")}},
+        }
+    )
+
+    state_path = config.resolve_feishu_state_db_path()
+
+    assert state_path == tmp_path / ".nanobot" / "state" / "feishu" / "state.sqlite3"
+
+
 def test_build_oauth_stack_rejects_non_https_public_base_url(tmp_path: Path) -> None:
     config = Config.model_validate(
         {

@@ -580,7 +580,9 @@ class Config(BaseSettings):
         """Resolve Feishu state sqlite path using shared storage config."""
         raw_path = str(self.integrations.feishu.storage.state_db_path or "").strip()
         if not raw_path:
-            return self.workspace_path / "memory" / "feishu" / "state.sqlite3"
+            from nanobot.utils.helpers import get_state_path
+
+            return get_state_path() / "feishu" / "state.sqlite3"
         path = Path(raw_path).expanduser()
         if path.is_absolute():
             return path

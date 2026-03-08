@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -28,6 +29,7 @@ from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService
 from nanobot.storage.audit import AuditSink
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path
 
 try:
     import lark_oapi as lark
@@ -97,6 +99,10 @@ _STREAM_ANSWER_ELEMENT_ID = "answer_text"
 
 _MENTION_MARKER_RE = re.compile(r"@_user_\d+")
 _AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+_BENIGN_LARK_WS_ERRORS = (
+    "receive message loop exit, err: no close frame received or sent",
+)
+_LARK_LOG_FILTER_INSTALLED = False
 
 # 消息类型展示映射
 MSG_TYPE_MAP = {
@@ -124,6 +130,21 @@ def _safe_dig(source: Any, *keys: str, default: Any = None) -> Any:
         if current is None:
             return default
     return current
+
+
+class _SuppressBenignLarkWsErrors(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(snippet in message for snippet in _BENIGN_LARK_WS_ERRORS)
+
+
+def _configure_lark_logger() -> None:
+    global _LARK_LOG_FILTER_INSTALLED
+    if _LARK_LOG_FILTER_INSTALLED:
+        return
+    lark_logger = logging.getLogger("Lark")
+    lark_logger.addFilter(_SuppressBenignLarkWsErrors())
+    _LARK_LOG_FILTER_INSTALLED = True
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -500,10 +521,14 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
-        self._sqlite = SQLiteStore(
-            state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3"),
-            options=sqlite_options,
+        default_state_db_path = get_state_path() / "feishu" / "state.sqlite3"
+        resolved_state_db_path = state_db_path or default_state_db_path
+        migrate_legacy_path(
+            self.workspace / "memory" / "feishu" / "state.sqlite3",
+            resolved_state_db_path,
+            related_suffixes=("-wal", "-shm", ".bak"),
         )
+        self._sqlite = SQLiteStore(resolved_state_db_path, options=sqlite_options)
         self._audit_sink = AuditSink(
             self._sqlite,
             cleanup_interval_seconds=float(
@@ -523,8 +548,15 @@ class FeishuChannel(BaseChannel):
         self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []
-        self._cron_service = CronService(self.workspace / "cron_jobs.json")
-        self._reminder_runtime = ReminderRuntime(self.workspace / "reminders.json")
+        runtime_state_root = get_state_path()
+        self._cron_service = CronService(
+            runtime_state_root / "cron" / "jobs.json",
+            legacy_store_paths=[self.workspace / "cron_jobs.json"],
+        )
+        self._reminder_runtime = ReminderRuntime(
+            runtime_state_root / "reminders.json",
+            legacy_store_paths=[self.workspace / "reminders.json"],
+        )
         self._bitable_engine = BitableReminderRuleEngine(
             self.workspace,
             reminder_runtime=self._reminder_runtime,
@@ -711,6 +743,8 @@ class FeishuChannel(BaseChannel):
         if not self.config.app_id or not self.config.app_secret:
             logger.error("Feishu app_id and app_secret not configured")
             return
+
+        _configure_lark_logger()
 
         self._running = True
         self._loop = asyncio.get_running_loop()

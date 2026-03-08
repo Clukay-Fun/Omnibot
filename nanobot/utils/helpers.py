@@ -17,6 +17,11 @@ def get_data_path() -> Path:
     return ensure_dir(Path.home() / ".nanobot")
 
 
+def get_state_path() -> Path:
+    """~/.nanobot/state directory for runtime state and SQLite files."""
+    return ensure_dir(get_data_path() / "state")
+
+
 def get_workspace_path(workspace: str | None = None) -> Path:
     """Resolve and ensure workspace path. Defaults to ~/.nanobot/workspace."""
     path = Path(workspace).expanduser() if workspace else Path.home() / ".nanobot" / "workspace"
@@ -35,6 +40,39 @@ _UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*]')
 def safe_filename(name: str) -> str:
     """Replace unsafe path characters with underscores."""
     return _UNSAFE_CHARS.sub("_", name).strip()
+
+
+def migrate_legacy_path(source: Path, target: Path, *, related_suffixes: tuple[str, ...] = ()) -> bool:
+    """Move a legacy runtime file and optional sidecars if target does not exist."""
+    try:
+        if source.resolve() == target.resolve():
+            return False
+    except FileNotFoundError:
+        pass
+
+    if not source.exists() or target.exists():
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+
+    for suffix in related_suffixes:
+        legacy_path = Path(f"{source}{suffix}")
+        target_path = Path(f"{target}{suffix}")
+        if not legacy_path.exists() or target_path.exists():
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_path), str(target_path))
+
+    source_parent = source.parent
+    while source_parent != source_parent.parent:
+        try:
+            source_parent.rmdir()
+        except OSError:
+            break
+        source_parent = source_parent.parent
+
+    return True
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
@@ -59,6 +97,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     for item in tpl.iterdir():
         if item.name.endswith(".md"):
             _write(item, workspace / item.name)
+    _write(tpl / "runtime_texts.yaml", workspace / "runtime_texts.yaml")
     _write(tpl / "memory" / "MEMORY.md", workspace / "MEMORY.md")
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")

@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.utils.helpers import migrate_legacy_path
 
 CalendarHook = Callable[[dict[str, Any]], Awaitable[dict[str, Any] | None]]
 
@@ -31,6 +32,7 @@ class ReminderRuntime:
         *,
         now_fn: Callable[[], datetime] | None = None,
         calendar_hook: CalendarHook | None = None,
+        legacy_store_paths: Sequence[Path] | None = None,
     ):
         """
         用处: 建构基础文件关联器与依赖指针注入。参数 store_path: 落地数据源址。
@@ -41,6 +43,12 @@ class ReminderRuntime:
         self._store_path = store_path
         self._now_fn = now_fn or (lambda: datetime.now(UTC))
         self._calendar_hook = calendar_hook
+        for legacy_path in legacy_store_paths or ():
+            migrate_legacy_path(
+                legacy_path,
+                self._store_path,
+                related_suffixes=(".migrated", ".bak", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3.bak"),
+            )
         self._sqlite = SQLiteStore(self._store_path.with_suffix(".sqlite3"))
 
     def _migrate_legacy_json_if_needed(self) -> None:

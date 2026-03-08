@@ -16,7 +16,8 @@ from nanobot.agent.skills import SkillsLoader
 class ContextBuilder:
     """构建智能体的上下文（系统提示词 + 消息历史记录）。"""
 
-    COMMON_FILES = ["AGENTS.md", "TOOLS.md", "IDENTITY.md"]
+    SHARED_COMMON_FILES = ["AGENTS.md", "TOOLS.md"]
+    PERSONA_COMMON_FILES = ["IDENTITY.md"]
     PRIVATE_CHAT_FILES = ["SOUL.md", "USER.md"]
     GROUP_CHAT_FILES = ["SOUL.md"]
     BOOTSTRAP_FILES = ["BOOTSTRAP.md"]
@@ -81,6 +82,7 @@ You are nanobot, a helpful AI assistant.
 Your workspace is at: {workspace_path}
 - Main-session long-term memory: {workspace_path}/MEMORY.md (write important facts here)
 - Legacy memory compatibility path: {workspace_path}/memory/MEMORY.md
+- Private Feishu persona root: {workspace_path}/memory/feishu/users/<open_id>/{{BOOTSTRAP,SOUL,USER,IDENTITY,MEMORY}}.md
 - Feishu user memory: {workspace_path}/memory/feishu/users/<open_id>/MEMORY.md
 - Feishu group memory: {workspace_path}/memory/feishu/chats/<chat_id>/MEMORY.md
 - Feishu thread memory: {workspace_path}/memory/feishu/threads/<chat_id>__<thread_id>/MEMORY.md
@@ -111,27 +113,45 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
-    def _resolve_workspace_files(self, runtime: PromptContext) -> list[str]:
-        files = list(self.COMMON_FILES)
+    def _resolve_workspace_files(self, runtime: PromptContext) -> list[Path]:
+        files = [self.workspace / filename for filename in self.SHARED_COMMON_FILES if (self.workspace / filename).exists()]
+
+        if runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                self.memory.ensure_feishu_user_persona_files(open_id)
+
+        for filename in self.PERSONA_COMMON_FILES:
+            path = self.memory.resolve_persona_markdown_path(filename, runtime)
+            if path is not None and path.exists():
+                files.append(path)
+
         if runtime.purpose == "bootstrap":
-            files.extend(self.BOOTSTRAP_FILES)
+            file_names = self.BOOTSTRAP_FILES
         elif runtime.purpose == "heartbeat":
-            files.extend(self.HEARTBEAT_FILES)
+            file_names = self.HEARTBEAT_FILES
         elif runtime.is_feishu and runtime.is_group:
-            files.extend(self.GROUP_CHAT_FILES)
+            file_names = self.GROUP_CHAT_FILES
         else:
-            files.extend(self.PRIVATE_CHAT_FILES)
+            file_names = self.PRIVATE_CHAT_FILES
+
+        for filename in file_names:
+            if runtime.is_feishu and runtime.is_private and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md"}:
+                path = self.memory.resolve_persona_markdown_path(filename, runtime)
+            else:
+                path = self.workspace / filename
+            if path is not None and path.exists():
+                files.append(path)
         return files
 
     def _load_bootstrap_files(self, runtime: PromptContext) -> str:
         """从工作区加载所有引导文件（bootstrap files）。"""
         parts = []
 
-        for filename in self._resolve_workspace_files(runtime):
-            file_path = self.workspace / filename
+        for file_path in self._resolve_workspace_files(runtime):
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
-                parts.append(f"## {filename}\n\n{content}")
+                parts.append(f"## {file_path.name}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 

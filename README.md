@@ -16,6 +16,7 @@
   - 摒弃了僵化的关键字匹配，重构为基于大语言模型原生 Tool Calling 的意图识别路由机制。
   - 将业务拆解为简单的声明式 YAML (`skillspec`)，即可低代码扩展专属于你的飞书业务数据查询与提醒技能。
 - **无感知的飞书新用户引导**：首次会话发送一次富文本上手提示，不阻塞正常对话；可随时 `/setup` 重看。
+- **Workspace 可覆盖运行文案**：在 `workspace/runtime_texts.yaml` 中覆盖 onboarding / routing / 卡片文案；未覆盖部分自动回退到代码默认值。
 
 ---
 
@@ -66,7 +67,7 @@ integrations:
       encrypt_key: ""      # 建议用环境变量注入
       verification_token: "" # 建议用环境变量注入
     storage:
-      state_db_path: ""    # 可为空；默认 ~/.nanobot/workspace/memory/feishu/state.sqlite3
+      state_db_path: ""    # 可为空；默认 ~/.nanobot/state/feishu/state.sqlite3
       sqlite_journal_mode: "WAL"
       sqlite_synchronous: "NORMAL"
       sqlite_busy_timeout_ms: 5000
@@ -94,6 +95,8 @@ agents:
 ```
 
 > **流式最佳实践**：推荐配置 `stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120` 和 `stream_card_print_frequency_ms=50` 以获得最丝滑的视觉体验。
+
+可选地，你也可以编辑 `~/.nanobot/workspace/runtime_texts.yaml` 来覆盖 onboarding 等运行期文案；只写需要改的键，未写部分会继续使用内置默认值。
 
 推荐通过环境变量注入敏感配置（避免明文入库）：
 

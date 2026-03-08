@@ -10,7 +10,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
-from nanobot.utils.helpers import ensure_dir, safe_filename
+from nanobot.utils.helpers import ensure_dir, get_state_path, migrate_legacy_path, safe_filename
 
 
 @dataclass
@@ -88,7 +88,9 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = Path.home() / ".nanobot" / "sessions"
         self._cache: dict[str, Session] = {}
-        db_path = state_db_path or (self.workspace / "memory" / "feishu" / "state.sqlite3")
+        legacy_db_path = self.workspace / "memory" / "feishu" / "state.sqlite3"
+        db_path = state_db_path or (get_state_path() / "feishu" / "state.sqlite3")
+        migrate_legacy_path(legacy_db_path, db_path, related_suffixes=("-wal", "-shm", ".bak"))
         self._sqlite = SQLiteStore(db_path, options=sqlite_options)
 
     def _get_session_path(self, key: str) -> Path:

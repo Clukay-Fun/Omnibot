@@ -49,6 +49,7 @@ from nanobot.agent.tools.feishu_data.token_manager import TenantAccessTokenManag
 from nanobot.config.schema import FeishuDataConfig
 from nanobot.oauth import FeishuOAuthClient, FeishuUserTokenManager
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path
 
 # region [注册工厂]
 
@@ -72,7 +73,12 @@ def build_feishu_data_tools(
     user_token_manager: FeishuUserTokenManager | None = None
     sqlite_path = state_db_path
     if sqlite_path is None and workspace is not None:
-        sqlite_path = workspace / "memory" / "feishu" / "state.sqlite3"
+        sqlite_path = get_state_path() / "feishu" / "state.sqlite3"
+        migrate_legacy_path(
+            workspace / "memory" / "feishu" / "state.sqlite3",
+            sqlite_path,
+            related_suffixes=("-wal", "-shm", ".bak"),
+        )
     if sqlite_path is not None:
         try:
             sqlite_store = SQLiteStore(sqlite_path, options=sqlite_options)

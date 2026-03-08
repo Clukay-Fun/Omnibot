@@ -14,13 +14,25 @@
   "channels": {
     "feishu": {
       "enabled": true,
+      "replyToMessage": true,
+      "replyInThread": false,
+      "streamCardEnabled": true,
+      "activationPrivatePolicy": "always",
+      "activationGroupPolicy": "mention",
+      "activationTopicPolicy": "always",
       "onboardingEnabled": true,
       "onboardingBlocking": false,
       "onboardingGuideOnce": true,
       "onboardingReentryCommands": [
         "/setup",
         "重新设置"
-      ]
+      ],
+      "auditCleanupIntervalSeconds": 21600,
+      "auditEventRetentionDays": 365,
+      "auditMessageIndexRetentionDays": 365,
+      "memoryFlushThresholdPrivate": 3,
+      "memoryFlushThresholdGroup": 5,
+      "memoryForceFlushOnTopicEnd": true
     }
   },
   "integrations": {
@@ -28,6 +40,9 @@
       "auth": {
         "appId": "",
         "appSecret": ""
+      },
+      "api": {
+        "apiBase": "https://open.feishu.cn"
       },
       "storage": {
         "stateDbPath": "",
@@ -37,9 +52,6 @@
         "sqliteBackupDir": "",
         "sqliteBackupIntervalHours": 24,
         "sqliteBackupRetentionDays": 7
-      },
-      "api": {
-        "apiBase": "https://open.feishu.cn"
       },
       "oauth": {
         "enabled": true,
@@ -56,6 +68,16 @@
         ],
         "successHtmlTitle": "Feishu Authorization Completed",
         "failureHtmlTitle": "Feishu Authorization Failed"
+      }
+    }
+  },
+  "tools": {
+    "feishuData": {
+      "featureFlags": {
+        "calendarEnabled": true,
+        "taskEnabled": true,
+        "bitableAdminEnabled": true,
+        "messageHistoryEnabled": true
       }
     }
   }

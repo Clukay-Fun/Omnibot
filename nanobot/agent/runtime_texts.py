@@ -1,11 +1,46 @@
-"""Runtime text/template defaults without workspace overrides."""
+"""Runtime text/template defaults with optional workspace overrides."""
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
+from loguru import logger
+
+_OVERRIDE_FILENAMES = ("runtime_texts.yaml", "runtime_texts.yml", "runtime_texts.json")
+
+
+def _deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    for key, value in overlay.items():
+        existing = base.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _deep_merge_dict(existing, value)
+        else:
+            base[key] = deepcopy(value)
+    return base
+
+
+def _load_override_payload(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to read runtime text override {}: {}", path, exc)
+        return {}
+
+    try:
+        if path.suffix.lower() == ".json":
+            payload = json.loads(text)
+        else:
+            payload = yaml.safe_load(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to parse runtime text override {}: {}", path, exc)
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
 
 _DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
     "help": {
@@ -35,21 +70,23 @@ _DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
         "not_found_data": "未查询到数据。",
     },
     "onboarding": {
-        "intro_first": "我先发你一条快速上手提示，不影响继续提问。",
-        "intro_reentry": "已重新打开上手提示。",
+        "intro_first": "我先按 BOOTSTRAP 默认继续，也把确认方式发你，不影响继续提问。",
+        "intro_reentry": "已重新打开 BOOTSTRAP 确认提示。",
         "guide_lines": [
-            "### 👋 快速上手",
-            "你可以直接开始提问，不需要先填写表单。",
+            "### 👋 BOOTSTRAP 确认",
+            "我会先按 `BOOTSTRAP.md` / `SOUL.md` 的默认设定继续，不阻塞对话。",
             "",
-            "我支持：案件查询、文档检索、提醒与任务协同。",
+            "默认先确认两类事：",
+            "- 人格：{bootstrap_identity}",
+            "- 行动方式：{bootstrap_action}",
             "",
-            "可直接对话调教：",
-            "- 叫我张律",
-            "- 以后简洁点 / 以后详细点",
-            "- 查案件时默认查全部",
-            "- 不用确认直接录入（当前策略默认仍先确认）",
+            "如果你想改，直接对我说：",
+            "- 以后叫我 {preferred_name}",
+            "- 语气再松一点 / 以后详细一点",
+            "- 默认查全部案件",
+            "- 写入仍先确认 / 以后直接写",
             "",
-            "常用命令：/help /status /setup /connect /session new",
+            "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
         ],
     },
 }
@@ -273,12 +310,47 @@ class RuntimeTextCatalog:
     templates: dict[str, dict[str, Any]]
 
     @classmethod
+    def _apply_workspace_overrides(
+        cls,
+        *,
+        workspace: Path | None,
+        prompts: dict[str, dict[str, Any]],
+        routing: dict[str, dict[str, Any]],
+        templates: dict[str, dict[str, Any]],
+    ) -> None:
+        if workspace is None:
+            return
+
+        for filename in _OVERRIDE_FILENAMES:
+            path = workspace / filename
+            if not path.exists():
+                continue
+            payload = _load_override_payload(path)
+            prompts_override = payload.get("prompts")
+            routing_override = payload.get("routing")
+            templates_override = payload.get("templates")
+            if isinstance(prompts_override, dict):
+                _deep_merge_dict(prompts, prompts_override)
+            if isinstance(routing_override, dict):
+                _deep_merge_dict(routing, routing_override)
+            if isinstance(templates_override, dict):
+                _deep_merge_dict(templates, templates_override)
+
+    @classmethod
     def load(cls, workspace: Path | None) -> "RuntimeTextCatalog":
-        del workspace
+        prompts = deepcopy(_DEFAULT_PROMPTS)
+        routing = deepcopy(_DEFAULT_ROUTING)
+        templates = deepcopy(_DEFAULT_TEMPLATES)
+        cls._apply_workspace_overrides(
+            workspace=workspace,
+            prompts=prompts,
+            routing=routing,
+            templates=templates,
+        )
         return cls(
-            prompts=deepcopy(_DEFAULT_PROMPTS),
-            routing=deepcopy(_DEFAULT_ROUTING),
-            templates=deepcopy(_DEFAULT_TEMPLATES),
+            prompts=prompts,
+            routing=routing,
+            templates=templates,
         )
 
     def prompt_text(self, group: str, key: str, default: str = "") -> str:
