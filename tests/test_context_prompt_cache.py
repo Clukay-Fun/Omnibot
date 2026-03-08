@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime as real_datetime
+import json
 from pathlib import Path
 import datetime as datetime_module
 
@@ -176,6 +177,64 @@ def test_private_feishu_long_term_memory_reads_and_writes_user_scope(tmp_path) -
 
     assert user_memory.read_text(encoding="utf-8") == "private-memory-updated"
     assert (workspace / "MEMORY.md").read_text(encoding="utf-8") == "shared-memory"
+
+
+def test_add_tool_result_compacts_bitable_table_metadata_for_llm(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+    messages: list[dict[str, object]] = []
+    raw_tables = {
+        "keyword": "团队周工作计划",
+        "total": 30,
+        "matched": 18,
+        "truncated": True,
+        "tables": [
+            {"table_id": f"tbl{i:03d}", "name": f"团队周工作计划表 {i}"}
+            for i in range(18)
+        ],
+    }
+
+    builder.add_tool_result(messages, "call-1", "bitable_list_tables", json.dumps(raw_tables, ensure_ascii=False))
+
+    payload = json.loads(str(messages[-1]["content"]))
+    assert payload["total"] == 30
+    assert payload["matched"] == 18
+    assert payload["truncated_for_llm"] is True
+    assert len(payload["tables"]) == 8
+    assert payload["tables"][0]["name"] == "团队周工作计划表 0"
+
+
+def test_add_tool_result_compacts_bitable_field_metadata_for_llm(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+    messages: list[dict[str, object]] = []
+    raw_fields = {
+        "table_id": "tbl_week",
+        "total": 25,
+        "fields": [
+            {
+                "field_id": f"fld{i:03d}",
+                "field_name": f"字段{i}",
+                "type": 1,
+                "property": {
+                    "option_count": 10,
+                    "options_preview": ["A", "B", "C", "D", "E"],
+                    "formatter": "0.00",
+                },
+            }
+            for i in range(25)
+        ],
+    }
+
+    builder.add_tool_result(messages, "call-2", "bitable_list_fields", json.dumps(raw_fields, ensure_ascii=False))
+
+    payload = json.loads(str(messages[-1]["content"]))
+    assert payload["table_id"] == "tbl_week"
+    assert payload["total"] == 25
+    assert payload["truncated_for_llm"] is True
+    assert len(payload["fields"]) == 12
+    assert payload["fields"][0]["field_name"] == "字段0"
+    assert payload["fields"][0]["property"]["option_count"] == 10
 
 
 #endregion

@@ -9,7 +9,9 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.bitable import (
     BitableGetTool,
     BitableListFieldsTool,
+    BitableMatchTableTool,
     BitableListTablesTool,
+    BitablePrepareCreateTool,
     BitableSearchPersonTool,
     BitableSearchTool,
     BitableSyncSchemaTool,
@@ -109,7 +111,9 @@ def build_feishu_data_tools(
         # 只读工具
         BitableSearchTool(config, client),
         BitableListTablesTool(config, client),
+        BitableMatchTableTool(config, client),
         BitableListFieldsTool(config, client),
+        BitablePrepareCreateTool(config, client),
         BitableSyncSchemaTool(config, client, workspace=workspace),
         BitableGetTool(config, client),
         BitableSearchPersonTool(config, client),

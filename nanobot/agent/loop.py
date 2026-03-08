@@ -41,7 +41,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 from nanobot.storage.audit import AuditSink
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
-from nanobot.utils.helpers import get_state_path, migrate_legacy_path
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path, sync_workspace_templates
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -73,6 +73,7 @@ class AgentLoop:
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
     _ONBOARDING_GUIDE_PROMPTED_KEY = "guide_prompted_at"
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
+    _BOOTSTRAP_INTERNAL_TRIGGER_PREFIX = "[Bootstrap Internal Trigger]"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
     _MEMORY_WRITE_TURN_THRESHOLD = 3
@@ -131,6 +132,7 @@ class AgentLoop:
         self._skillspec_embedding_provider_config = skillspec_embedding_provider_config or ProviderConfig()
         self.provider = provider
         self.workspace = workspace
+        sync_workspace_templates(self.workspace, silent=True)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -283,6 +285,8 @@ class AgentLoop:
             if feishu_cfg is not None:
                 self._stream_warmup_chars = max(1, int(getattr(feishu_cfg, "stream_answer_warmup_chars", 24)))
                 self._stream_warmup_ms = max(0, int(getattr(feishu_cfg, "stream_answer_warmup_ms", 300)))
+        self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
+        self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
@@ -845,6 +849,106 @@ class AgentLoop:
             parts.extend(["默认简洁直接", "重视准确与隐私", "外部动作先确认"])
         return "、".join(parts[:3])
 
+    @staticmethod
+    def _extract_markdown_list_items(text: str, pattern: str, *, limit: int | None = None) -> list[str]:
+        items = [match.strip() for match in re.findall(pattern, text, flags=re.MULTILINE) if match.strip()]
+        return items[:limit] if limit is not None else items
+
+    @staticmethod
+    def _extract_first_blockquote(text: str) -> str:
+        quotes = [match.strip() for match in re.findall(r"^>\s*(.+)$", text, flags=re.MULTILINE) if match.strip()]
+        return quotes[0] if quotes else ""
+
+    @staticmethod
+    def _extract_section_bullets(text: str, section_titles: tuple[str, ...], *, limit: int = 3) -> list[str]:
+        targets = {title.lower() for title in section_titles}
+        current_section = ""
+        bullets: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("## "):
+                current_section = line[3:].strip().lower()
+                continue
+            if current_section in targets and re.match(r"^[-*]\s+", line):
+                bullets.append(re.sub(r"^[-*]\s+", "", line).strip())
+                if len(bullets) >= limit:
+                    return bullets
+        if bullets:
+            return bullets[:limit]
+        fallback = [
+            re.sub(r"^[-*]\s+", "", line.strip()).strip()
+            for line in text.splitlines()
+            if re.match(r"^\s*[-*]\s+", line)
+        ]
+        return [item for item in fallback if item][:limit]
+
+    def _build_dynamic_onboarding_guide_lines(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> list[str]:
+        preferred_name = self._resolve_onboarding_name_example(profile)
+        bootstrap_text = self._read_workspace_or_template_file("BOOTSTRAP.md", runtime)
+        soul_text = self._read_workspace_or_template_file("SOUL.md", runtime)
+
+        bootstrap_items = self._extract_markdown_list_items(
+            bootstrap_text,
+            r"^\d+\.\s+(.+)$",
+            limit=4,
+        )
+        bootstrap_quote = self._extract_first_blockquote(bootstrap_text)
+        update_targets = self._extract_markdown_list_items(
+            bootstrap_text,
+            r"^[-*]\s+(`[^`]+`.+)$",
+            limit=4,
+        )
+        soul_items = self._extract_section_bullets(
+            soul_text,
+            ("Response Defaults", "Boundaries", "Core Values"),
+            limit=4,
+        )
+
+        lines = [
+            "### 👋 BOOTSTRAP 确认",
+            "我会先按当前 `BOOTSTRAP.md` / `SOUL.md` 的内容继续，不阻塞对话。",
+            "",
+        ]
+
+        if bootstrap_items:
+            lines.append("当前 `BOOTSTRAP.md` 里优先确认：")
+            lines.extend(f"- {item}" for item in bootstrap_items)
+            lines.append("")
+        else:
+            lines.extend([
+                "默认先确认两类事：",
+                f"- 人格：{self._build_bootstrap_identity_summary(runtime)}",
+                f"- 行动方式：{self._build_bootstrap_action_summary(runtime)}",
+                "",
+            ])
+
+        if bootstrap_quote:
+            lines.append("当前建议开场原文：")
+            lines.append(f"> {bootstrap_quote}")
+            lines.append("")
+
+        if update_targets:
+            lines.append("确认后会更新：")
+            lines.extend(f"- {item}" for item in update_targets)
+            lines.append("")
+
+        if soul_items:
+            lines.append("当前 `SOUL.md` 强调：")
+            lines.extend(f"- {item}" for item in soul_items)
+            lines.append("")
+
+        lines.extend(
+            [
+                f"直接回复你想改的点即可；例如名字改成“{preferred_name}”、调整语气、边界或写入确认方式。",
+                "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
+            ]
+        )
+        return lines
+
     def _build_onboarding_guide_message(
         self,
         profile: dict[str, Any] | None = None,
@@ -857,26 +961,10 @@ class AgentLoop:
         preferred_name = self._resolve_onboarding_name_example(profile)
         bootstrap_identity = self._build_bootstrap_identity_summary(runtime)
         bootstrap_action = self._build_bootstrap_action_summary(runtime)
-        lines = self._runtime_text.prompt_lines(
-            "onboarding",
-            "guide_lines",
-            [
-                "### 👋 BOOTSTRAP 确认",
-                "我会先按 `BOOTSTRAP.md` / `SOUL.md` 的默认设定继续，不阻塞对话。",
-                "",
-                "默认先确认两类事：",
-                "- 人格：{bootstrap_identity}",
-                "- 行动方式：{bootstrap_action}",
-                "",
-                "如果你想改，直接对我说：",
-                "- 以后叫我 {preferred_name}",
-                "- 语气再松一点 / 以后详细一点",
-                "- 查案件默认查全部",
-                "- 写入仍先确认 / 以后直接写",
-                "",
-                "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
-            ],
-        )
+        if self._runtime_text.has_prompt_override("onboarding", "guide_lines"):
+            lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+        else:
+            lines = self._build_dynamic_onboarding_guide_lines(profile, runtime)
         rendered_lines = [
             line.replace("{preferred_name}", preferred_name)
             .replace("{bootstrap_identity}", bootstrap_identity)
@@ -932,6 +1020,76 @@ class AgentLoop:
             ],
         }
         return json.dumps(card, ensure_ascii=False)
+
+    @staticmethod
+    def _is_private_feishu_message(msg: InboundMessage) -> bool:
+        if msg.channel != "feishu":
+            return False
+        return str((msg.metadata or {}).get("chat_type") or "") != "group"
+
+    def _mark_bootstrap_defaulted(self, profile: dict[str, Any], *, step: str) -> None:
+        onboarding = cast(dict[str, Any], profile["onboarding"])
+        now_iso = self._now_iso()
+        onboarding.update(
+            {
+                "status": "completed",
+                "step": step,
+                "started_at": onboarding.get("started_at") or now_iso,
+                "completed_at": onboarding.get("completed_at") or now_iso,
+                "updated_at": now_iso,
+                self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+            }
+        )
+
+    def _prepare_private_bootstrap_turn(
+        self,
+        msg: InboundMessage,
+        profile: dict[str, Any],
+        *,
+        step: str,
+        proactive: bool = False,
+        reentry: bool = False,
+    ) -> None:
+        self._mark_bootstrap_defaulted(profile, step=step)
+        self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+
+        metadata = dict(msg.metadata or {})
+        metadata["_bootstrap"] = True
+        metadata["_bootstrap_inline"] = not proactive and not reentry
+        if proactive:
+            metadata["_bootstrap_proactive"] = True
+            metadata["_disable_reply_to_message"] = True
+        if reentry:
+            metadata["_bootstrap_reentry"] = True
+            metadata["_disable_reply_to_message"] = True
+        msg.metadata = metadata
+
+    def _bootstrap_internal_prompt(self, msg: InboundMessage) -> str:
+        metadata = msg.metadata or {}
+        if metadata.get("_bootstrap_proactive"):
+            return (
+                f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+                "The user has just opened this private chat and has not sent a real message yet. "
+                "Start the conversation proactively according to the current bootstrap files."
+            )
+        if metadata.get("_bootstrap_reentry"):
+            return (
+                f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+                "The user explicitly asked to revisit setup. Re-open the conversation naturally based on the current bootstrap files."
+            )
+        return (
+            f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+            "This is the first real user message in a brand-new private chat. Bootstrap is not optional here. "
+            "Respond to the user's actual message, but the reply must begin the bootstrap conversation according to the current bootstrap files. "
+            "Do not skip directly to a generic help offer.\n\n"
+            f"Actual user message:\n{msg.content}"
+        )
+
+    def _effective_user_message_for_llm(self, msg: InboundMessage) -> str:
+        metadata = msg.metadata or {}
+        if metadata.get("_bootstrap"):
+            return self._bootstrap_internal_prompt(msg)
+        return msg.content
 
     def _build_onboarding_card_outbound(
         self,
@@ -993,6 +1151,24 @@ class AgentLoop:
         action_key, action_value, form_value = self._extract_onboarding_action(msg)
         normalized_action_key = action_key.strip().lower()
         callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
+        prompt_once = bool(getattr(feishu_cfg, "onboarding_guide_once", True))
+        prompted_at = str(onboarding.get(self._ONBOARDING_GUIDE_PROMPTED_KEY) or "").strip()
+
+        if self._is_private_feishu_message(msg) and not is_card_action:
+            metadata = msg.metadata or {}
+            source_event_type = str(metadata.get("source_event_type") or "")
+            if metadata.get("_bootstrap_proactive") or source_event_type == "p2p_chat_create":
+                self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_proactive", proactive=True)
+                return None
+            if is_reentry:
+                self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_reentry", reentry=True)
+                return None
+            if status == "completed":
+                return None
+            if prompt_once and prompted_at:
+                return None
+            self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_default")
+            return None
 
         if is_reentry:
             now_iso = self._now_iso()
@@ -1214,8 +1390,6 @@ class AgentLoop:
         if status == "completed":
             return None
 
-        prompt_once = bool(getattr(feishu_cfg, "onboarding_guide_once", True))
-        prompted_at = str(onboarding.get(self._ONBOARDING_GUIDE_PROMPTED_KEY) or "").strip()
         if prompt_once and prompted_at:
             return None
 
@@ -1612,6 +1786,7 @@ class AgentLoop:
             stream_started_at = time.monotonic()
             announced_tool_names: set[str] = set()
             answer_placeholder_task: asyncio.Task[None] | None = None
+            answer_placeholder_emitted = False
 
             async def _on_delta(delta: str) -> None:
                 nonlocal streamed_content, published_stream
@@ -1621,7 +1796,14 @@ class AgentLoop:
 
                 if not published_stream and iteration == 1:
                     elapsed_ms = int((time.monotonic() - stream_started_at) * 1000)
-                    if len(streamed_content) < self._stream_warmup_chars or elapsed_ms < self._stream_warmup_ms:
+                    warmup_chars = self._stream_warmup_chars
+                    warmup_ms = self._stream_warmup_ms
+                    if not thinking_detail_emitted and not announced_tool_names:
+                        warmup_chars = self._plain_stream_warmup_chars
+                        warmup_ms = self._plain_stream_warmup_ms
+                    if not answer_placeholder_emitted and (
+                        len(streamed_content) < warmup_chars or elapsed_ms < warmup_ms
+                    ):
                         return
 
                 await _emit_progress(streamed_content, phase="answer")
@@ -1638,11 +1820,13 @@ class AgentLoop:
                 thinking_detail_emitted = True
 
             async def _emit_answer_placeholder() -> None:
+                nonlocal answer_placeholder_emitted
                 if not on_progress:
                     return
                 await asyncio.sleep(self._ANSWER_PLACEHOLDER_DELAY_MS / 1000)
                 if published_stream or thinking_detail_emitted:
                     return
+                answer_placeholder_emitted = True
                 await _emit_progress(self._answer_placeholder_text, phase="answer")
 
             if on_progress and iteration == 1:
@@ -2421,9 +2605,10 @@ class AgentLoop:
 
         history = session.get_history(max_messages=self.memory_window)
         prompt_context = self._prompt_context_for_message(msg, session_key=key)
+        llm_user_message = self._effective_user_message_for_llm(msg)
         initial_messages = self.context.build_messages(
             history=history,
-            current_message=msg.content,
+            current_message=llm_user_message,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
             runtime=prompt_context,
@@ -2492,6 +2677,8 @@ class AgentLoop:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                    continue
+                if isinstance(content, str) and content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
                     continue
                 if isinstance(content, list):
                     entry["content"] = [

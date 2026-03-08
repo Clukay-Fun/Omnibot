@@ -93,6 +93,7 @@ class BitableCreateTool(Tool):
     def description(self) -> str:
         return (
             "Create a new record in Feishu Bitable. "
+            "If table or fields are still unclear from natural language, call bitable_prepare_create first. "
             "First call returns a preview and confirm_token (dry_run). "
             "Pass confirm_token back to execute the actual write."
         )

@@ -14,9 +14,13 @@ from nanobot.providers.base import LLMResponse
 class _DummyProvider:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_messages = []
+        self.last_kwargs = {}
 
     async def chat(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
+        self.last_messages = list(kwargs.get("messages") or [])
         return LLMResponse(content="llm-fallback", tool_calls=[])
 
     def get_default_model(self) -> str:
@@ -151,15 +155,179 @@ async def test_setup_reentry_uses_bootstrap_confirmation_text(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_private_first_message_uses_bootstrap_llm_as_normal_reply(tmp_path) -> None:
+    provider = _DummyProvider()
+    bus = MessageBus()
+    (tmp_path / "BOOTSTRAP.md").write_text("1. **Your name**\n2. **Your vibe**", encoding="utf-8")
+    channels = ChannelsConfig(
+        feishu=FeishuConfig(
+            onboarding_enabled=True,
+            onboarding_blocking=False,
+            onboarding_guide_once=True,
+            onboarding_reentry_commands=["/setup", "重新设置"],
+        )
+    )
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        channels_config=channels,
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_private_first",
+            chat_id="ou_private_first",
+            content="你好",
+            metadata={"chat_type": "p2p", "message_id": "m-1"},
+        )
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+    assert response.metadata.get("onboarding") is None
+    queued = []
+    while bus.outbound_size:
+        queued.append(await asyncio.wait_for(bus.consume_outbound(), timeout=1))
+    assert not any(item.metadata.get("onboarding") is True for item in queued)
+    system_prompt = "\n".join(str(msg.get("content")) for msg in provider.last_messages if msg.get("role") == "system")
+    assert "## BOOTSTRAP.md" in system_prompt
+    assert "Do not skip the bootstrap conversation" in system_prompt
+    assert str(provider.last_messages[-1]["content"]).startswith("[Bootstrap Internal Trigger]")
+    assert "Actual user message:\n你好" in str(provider.last_messages[-1]["content"])
+
+    store = UserMemoryStore(tmp_path)
+    profile = store.read("feishu", "ou_private_first")
+    assert profile["onboarding"]["status"] == "completed"
+    assert profile["onboarding"]["step"] == "bootstrap_default"
+
+
+@pytest.mark.asyncio
+async def test_private_setup_reentry_is_model_driven_not_fixed_guide(tmp_path) -> None:
+    provider = _DummyProvider()
+    bus = MessageBus()
+    user_dir = tmp_path / "memory" / "feishu" / "users" / "ou_private_reentry"
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "BOOTSTRAP.md").write_text("1. **Your name**\n2. **Your nature**", encoding="utf-8")
+    channels = ChannelsConfig(
+        feishu=FeishuConfig(
+            onboarding_enabled=True,
+            onboarding_blocking=False,
+            onboarding_guide_once=True,
+            onboarding_reentry_commands=["/setup", "重新设置"],
+        )
+    )
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        channels_config=channels,
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_private_reentry",
+            chat_id="ou_private_reentry",
+            content="/setup",
+            metadata={"chat_type": "p2p", "message_id": "m-setup"},
+        )
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback"
+    assert response.metadata.get("onboarding") is None
+    assert provider.calls == 1
+    assert any(msg.get("role") == "system" and "## BOOTSTRAP.md" in str(msg.get("content")) for msg in provider.last_messages)
+    assert str(provider.last_messages[-1]["content"]).startswith("[Bootstrap Internal Trigger]")
+
+
+@pytest.mark.asyncio
+async def test_private_p2p_chat_create_bootstrap_is_model_driven(tmp_path) -> None:
+    provider = _DummyProvider()
+    bus = MessageBus()
+    channels = ChannelsConfig(
+        feishu=FeishuConfig(
+            onboarding_enabled=True,
+            onboarding_blocking=False,
+            onboarding_guide_once=True,
+            onboarding_reentry_commands=["/setup", "重新设置"],
+        )
+    )
+    loop = AgentLoop(
+        bus=bus,
+        provider=provider,
+        workspace=tmp_path,
+        channels_config=channels,
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_p2p_create",
+            chat_id="ou_p2p_create",
+            content="",
+            metadata={
+                "chat_type": "p2p",
+                "source_event_type": "p2p_chat_create",
+                "_bootstrap": True,
+                "_bootstrap_proactive": True,
+            },
+        )
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+    assert response.metadata.get("_disable_reply_to_message") is True
+    assert str(provider.last_messages[-1]["content"]).startswith("[Bootstrap Internal Trigger]")
+
+
+@pytest.mark.asyncio
 async def test_private_setup_reentry_prefers_user_persona_files(tmp_path) -> None:
     provider = _DummyProvider()
     bus = MessageBus()
-    (tmp_path / "BOOTSTRAP.md").write_text("1. **Your vibe**\n2. **Your emoji**", encoding="utf-8")
-    (tmp_path / "SOUL.md").write_text("accuracy\nprivacy", encoding="utf-8")
+    (tmp_path / "BOOTSTRAP.md").write_text("1. **Shared vibe**", encoding="utf-8")
+    (tmp_path / "SOUL.md").write_text("- shared-soul-line", encoding="utf-8")
     user_dir = tmp_path / "memory" / "feishu" / "users" / "ou_private"
     user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / "BOOTSTRAP.md").write_text("1. **Your name**\n2. **Your vibe**", encoding="utf-8")
-    (user_dir / "SOUL.md").write_text("简洁", encoding="utf-8")
+    (user_dir / "BOOTSTRAP.md").write_text(
+        """
+# BOOTSTRAP.md - Hello, World
+
+Start with something like:
+
+> "Hey. I just came online. Who am I? Who are you?"
+
+Then figure out together:
+
+1. **Your name** — What should they call you?
+2. **Your nature** — What kind of creature are you?
+
+Update these files with what you learned:
+
+- `IDENTITY.md` — your name, creature, vibe, emoji
+- `USER.md` — their name, how to address them, timezone, notes
+""".strip(),
+        encoding="utf-8",
+    )
+    (user_dir / "SOUL.md").write_text(
+        """
+## Response Defaults
+
+- Default to concise answers unless detail is clearly useful.
+
+## Boundaries
+
+- Ask before external actions or public output.
+""".strip(),
+        encoding="utf-8",
+    )
 
     channels = ChannelsConfig(
         feishu=FeishuConfig(
@@ -188,9 +356,11 @@ async def test_private_setup_reentry_prefers_user_persona_files(tmp_path) -> Non
     )
 
     assert response is not None
-    assert "名字 / 类型 / 语气 / emoji" in response.content
-    assert "默认简洁直接" in response.content
-    assert "先保证准确" not in response.content
+    assert response.content == "llm-fallback"
+    system_prompt = "\n".join(str(msg.get("content")) for msg in provider.last_messages if msg.get("role") == "system")
+    assert "Hey. I just came online. Who am I? Who are you?" in system_prompt
+    assert "Default to concise answers unless detail is clearly useful." in system_prompt
+    assert "Ask before external actions or public output." in system_prompt
 
 
 @pytest.mark.asyncio

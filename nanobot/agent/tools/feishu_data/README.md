@@ -28,6 +28,8 @@ feishu_data/
 |--------|------|------|
 | `bitable_search` | 只读 | 按关键词/日期/过滤器检索多维表格记录 |
 | `bitable_list_tables` | 只读 | 列出多维表格 App 下的所有数据表 |
+| `bitable_match_table` | 只读 | 根据自然语言意图召回最可能的目标数据表 |
+| `bitable_prepare_create` | 只读 | 为 `bitable_create` 准备候选表与紧凑字段摘要 |
 | `bitable_get` | 只读 | 按 record_id 获取单条记录详情 |
 | `bitable_search_person` | 只读 | 按人员姓名搜索多维表格记录 |
 | `doc_search` | 只读 | 搜索飞书云文档 |

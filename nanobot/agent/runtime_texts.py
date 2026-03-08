@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -308,6 +308,7 @@ class RuntimeTextCatalog:
     prompts: dict[str, dict[str, Any]]
     routing: dict[str, dict[str, Any]]
     templates: dict[str, dict[str, Any]]
+    prompt_override_keys: set[tuple[str, str]] = field(default_factory=set)
 
     @classmethod
     def _apply_workspace_overrides(
@@ -317,9 +318,10 @@ class RuntimeTextCatalog:
         prompts: dict[str, dict[str, Any]],
         routing: dict[str, dict[str, Any]],
         templates: dict[str, dict[str, Any]],
-    ) -> None:
+    ) -> set[tuple[str, str]]:
+        override_keys: set[tuple[str, str]] = set()
         if workspace is None:
-            return
+            return override_keys
 
         for filename in _OVERRIDE_FILENAMES:
             path = workspace / filename
@@ -330,18 +332,22 @@ class RuntimeTextCatalog:
             routing_override = payload.get("routing")
             templates_override = payload.get("templates")
             if isinstance(prompts_override, dict):
+                for group, entries in prompts_override.items():
+                    if isinstance(entries, dict):
+                        override_keys.update((str(group), str(key)) for key in entries.keys())
                 _deep_merge_dict(prompts, prompts_override)
             if isinstance(routing_override, dict):
                 _deep_merge_dict(routing, routing_override)
             if isinstance(templates_override, dict):
                 _deep_merge_dict(templates, templates_override)
+        return override_keys
 
     @classmethod
     def load(cls, workspace: Path | None) -> "RuntimeTextCatalog":
         prompts = deepcopy(_DEFAULT_PROMPTS)
         routing = deepcopy(_DEFAULT_ROUTING)
         templates = deepcopy(_DEFAULT_TEMPLATES)
-        cls._apply_workspace_overrides(
+        override_keys = cls._apply_workspace_overrides(
             workspace=workspace,
             prompts=prompts,
             routing=routing,
@@ -351,6 +357,7 @@ class RuntimeTextCatalog:
             prompts=prompts,
             routing=routing,
             templates=templates,
+            prompt_override_keys=override_keys,
         )
 
     def prompt_text(self, group: str, key: str, default: str = "") -> str:
@@ -376,3 +383,6 @@ class RuntimeTextCatalog:
     def template(self, name: str) -> dict[str, Any]:
         raw = self.templates.get(name)
         return deepcopy(raw) if isinstance(raw, dict) else {}
+
+    def has_prompt_override(self, group: str, key: str) -> bool:
+        return (group, key) in self.prompt_override_keys

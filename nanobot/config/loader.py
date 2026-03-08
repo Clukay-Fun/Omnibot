@@ -41,7 +41,10 @@ def load_config(config_path: Path | None = None) -> Config:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")
 
-    return Config().apply_shared_integration_defaults()
+    config = Config().apply_shared_integration_defaults()
+    if not path.exists():
+        save_config(config, path)
+    return config
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
