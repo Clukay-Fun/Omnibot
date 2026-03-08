@@ -35,6 +35,7 @@ from nanobot.agent.tools.feishu_data.calendar_tools import (
 )
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
+from nanobot.agent.tools.feishu_data.directory import BitableDirectorySearchTool
 from nanobot.agent.tools.feishu_data.doc_search import DocSearchTool
 from nanobot.agent.tools.feishu_data.message_history import MessageHistoryListTool
 from nanobot.agent.tools.feishu_data.task_tools import (
@@ -110,6 +111,7 @@ def build_feishu_data_tools(
     tools: list[Tool] = [
         # 只读工具
         BitableSearchTool(config, client),
+        BitableDirectorySearchTool(config, client, workspace=workspace),
         BitableListTablesTool(config, client),
         BitableMatchTableTool(config, client),
         BitableListFieldsTool(config, client),
