@@ -119,9 +119,9 @@ def build_feishu_data_tools(
         BitableSearchPersonTool(config, client),
         DocSearchTool(config, client),
         # 写入工具（两阶段安全）
-        BitableCreateTool(config, client, confirm_store),
-        BitableUpdateTool(config, client, confirm_store),
-        BitableDeleteTool(config, client, confirm_store),
+        BitableCreateTool(config, client, confirm_store, workspace=workspace),
+        BitableUpdateTool(config, client, confirm_store, workspace=workspace),
+        BitableDeleteTool(config, client, confirm_store, workspace=workspace),
     ]
 
     if flags.bitable_admin_enabled:

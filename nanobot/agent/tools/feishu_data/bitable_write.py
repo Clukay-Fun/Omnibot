@@ -3,13 +3,18 @@
 import json
 import re
 from datetime import UTC, datetime, time
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import yaml
+
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.feishu_data.bitable import BitableListFieldsTool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
+from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver
 from nanobot.config.schema import FeishuDataConfig
 
 # region [写入工具]
@@ -18,6 +23,8 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _DATE_ONLY_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%Y.%m.%d")
 _DATE_TIME_FORMATS = ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y.%m.%d %H:%M")
 _DATE_FIELD_RE = re.compile(r"(日|日期|date|deadline)$", re.IGNORECASE)
+_PERSON_FIELD_TYPES = {11}
+_SELF_PERSON_ALIASES = {"我", "本人", "我本人", "自己"}
 
 
 def _looks_like_date_field(field_name: str) -> bool:
@@ -73,17 +80,164 @@ def _normalize_fields_for_write(fields: Any) -> Any:
     return normalized
 
 
-class BitableCreateTool(Tool):
+class _BitableWriteToolBase(Tool):
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        store: ConfirmTokenStore,
+        *,
+        workspace: Path | None = None,
+    ):
+        self.config = config
+        self.client = client
+        self.store = store
+        self._workspace = workspace
+        self._field_tool = BitableListFieldsTool(config, client)
+        self._runtime_channel = ""
+        self._runtime_chat_id = ""
+        self._runtime_sender_id = ""
+        self._runtime_metadata: dict[str, Any] = {}
+        self._directory_config_cache: dict[str, Any] | None = None
+        self._person_resolver: BitablePersonResolver | None = None
+
+    def set_runtime_context(
+        self,
+        channel: str,
+        chat_id: str,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._runtime_channel = channel or ""
+        self._runtime_chat_id = chat_id or ""
+        self._runtime_sender_id = sender_id or ""
+        self._runtime_metadata = dict(metadata or {})
+
+    def _directory_config(self) -> dict[str, Any]:
+        if self._directory_config_cache is not None:
+            return dict(self._directory_config_cache)
+        if self._workspace is None:
+            self._directory_config_cache = {}
+            return {}
+        path = self._workspace / "feishu" / "bitable_rules.yaml"
+        if not path.exists():
+            self._directory_config_cache = {}
+            return {}
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            payload = {}
+        directory = payload.get("directory") if isinstance(payload, dict) else {}
+        self._directory_config_cache = dict(directory) if isinstance(directory, dict) else {}
+        return dict(self._directory_config_cache)
+
+    def _ensure_person_resolver(self) -> BitablePersonResolver | None:
+        directory = self._directory_config()
+        if not directory.get("app_token") or not directory.get("table_id"):
+            return None
+        if self._person_resolver is None:
+            self._person_resolver = BitablePersonResolver(self.config, client=self.client, directory=directory)
+        return self._person_resolver
+
+    async def _field_type_map(self, *, app_token: str, table_id: str) -> dict[str, int]:
+        payload = json.loads(await self._field_tool.execute(app_token=app_token, table_id=table_id))
+        if not isinstance(payload, dict) or payload.get("error"):
+            return {}
+        mapping: dict[str, int] = {}
+        for item in payload.get("fields", []):
+            if not isinstance(item, dict):
+                continue
+            field_name = str(item.get("field_name") or "").strip()
+            field_type = item.get("type")
+            if field_name and isinstance(field_type, int):
+                mapping[field_name] = field_type
+        return mapping
+
+    def _runtime_open_id(self) -> str:
+        return (
+            str(self._runtime_metadata.get("sender_open_id") or "").strip()
+            or str(self._runtime_sender_id or "").strip()
+        )
+
+    async def _resolve_person_open_ids(self, value: Any) -> list[str]:
+        if value in (None, "", [], {}):
+            return []
+        if isinstance(value, list):
+            resolved: list[str] = []
+            for item in value:
+                for current in await self._resolve_person_open_ids(item):
+                    if current not in resolved:
+                        resolved.append(current)
+            return resolved
+        if isinstance(value, dict):
+            direct = str(value.get("open_id") or value.get("id") or "").strip()
+            if direct.startswith("ou_"):
+                return [direct]
+            nested = str(value.get("name") or value.get("text") or "").strip()
+            if nested:
+                return await self._resolve_person_open_ids(nested)
+            return []
+
+        text = str(value or "").strip()
+        if not text:
+            return []
+        if text in _SELF_PERSON_ALIASES:
+            current_open_id = self._runtime_open_id()
+            return [current_open_id] if current_open_id else []
+        if text.startswith("ou_"):
+            return [text]
+
+        resolver = self._ensure_person_resolver()
+        if resolver is None:
+            return []
+        resolved_open_id: str | None = await resolver.resolve(text)
+        if isinstance(resolved_open_id, str) and resolved_open_id:
+            return [resolved_open_id]
+        return []
+
+    async def _normalize_person_field_value(self, field_name: str, value: Any) -> Any:
+        open_ids = await self._resolve_person_open_ids(value)
+        if not open_ids:
+            raise ValueError(
+                f"人员字段“{field_name}”无法解析为 open_id。请配置 workspace/feishu/bitable_rules.yaml 的 directory，或直接传 open_id。"
+            )
+        return [{"id": open_id} for open_id in open_ids]
+
+    async def _normalize_write_fields(self, *, app_token: str, table_id: str, fields: Any) -> Any:
+        normalized = _normalize_fields_for_write(fields)
+        if not isinstance(normalized, dict):
+            return normalized
+        if not self._runtime_open_id() and not self._directory_config():
+            return normalized
+        type_map = await self._field_type_map(app_token=app_token, table_id=table_id)
+        if not type_map:
+            return normalized
+
+        result: dict[str, Any] = {}
+        for key, value in normalized.items():
+            field_name = str(key)
+            if type_map.get(field_name) in _PERSON_FIELD_TYPES:
+                result[field_name] = await self._normalize_person_field_value(field_name, value)
+            else:
+                result[field_name] = value
+        return result
+
+
+class BitableCreateTool(_BitableWriteToolBase):
     """
     在飞书多维表格中创建新记录。
     默认以 dry_run 模式运行，返回操作预览和 confirm_token；
     确认后以 confirm_token 回传才实际执行写入。
     """
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient, store: ConfirmTokenStore):
-        self.config = config
-        self.client = client
-        self.store = store
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        store: ConfirmTokenStore,
+        workspace: Path | None = None,
+    ):
+        super().__init__(config, client, store, workspace=workspace)
 
     @property
     def name(self) -> str:
@@ -134,7 +288,10 @@ class BitableCreateTool(Tool):
         if not fields:
             return json.dumps({"error": "Missing fields."}, ensure_ascii=False)
 
-        fields = _normalize_fields_for_write(fields)
+        try:
+            fields = await self._normalize_write_fields(app_token=app_token, table_id=table_id, fields=fields)
+        except ValueError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         # 构建操作负载（用于 token 绑定验证）
         op_payload = {"action": "create", "app_token": app_token, "table_id": table_id, "fields": fields}
@@ -168,16 +325,20 @@ class BitableCreateTool(Tool):
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
-class BitableUpdateTool(Tool):
+class BitableUpdateTool(_BitableWriteToolBase):
     """
     更新飞书多维表格中的已有记录。
     同样采用两阶段安全机制（dry_run + confirm_token）。
     """
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient, store: ConfirmTokenStore):
-        self.config = config
-        self.client = client
-        self.store = store
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        store: ConfirmTokenStore,
+        workspace: Path | None = None,
+    ):
+        super().__init__(config, client, store, workspace=workspace)
 
     @property
     def name(self) -> str:
@@ -234,7 +395,10 @@ class BitableUpdateTool(Tool):
         if not fields:
             return json.dumps({"error": "Missing fields."}, ensure_ascii=False)
 
-        fields = _normalize_fields_for_write(fields)
+        try:
+            fields = await self._normalize_write_fields(app_token=app_token, table_id=table_id, fields=fields)
+        except ValueError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         op_payload = {
             "action": "update", "app_token": app_token, "table_id": table_id,
@@ -245,7 +409,7 @@ class BitableUpdateTool(Tool):
             token = self.store.create(op_payload)
             return json.dumps({
                 "dry_run": True,
-                "preview": {"action": "update", "record_id": record_id, "fields": fields},
+                "preview": {"action": "update", "record_id": record_id, "table_id": table_id, "fields": fields},
                 "confirm_token": token,
                 "message": "请确认以上操作。将 confirm_token 传回本工具以执行更新。"
             }, ensure_ascii=False)
@@ -268,16 +432,20 @@ class BitableUpdateTool(Tool):
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
-class BitableDeleteTool(Tool):
+class BitableDeleteTool(_BitableWriteToolBase):
     """
     删除飞书多维表格中的记录。
     同样采用两阶段安全机制（dry_run + confirm_token）。
     """
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient, store: ConfirmTokenStore):
-        self.config = config
-        self.client = client
-        self.store = store
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        store: ConfirmTokenStore,
+        workspace: Path | None = None,
+    ):
+        super().__init__(config, client, store, workspace=workspace)
 
     @property
     def name(self) -> str:
