@@ -4,6 +4,7 @@ from nanobot.agent.coordinators.continuation import ContinuationCoordinator
 from nanobot.agent.coordinators.pending_write import PendingWriteCoordinator
 from nanobot.agent.coordinators.reference_resolution import ReferenceResolutionCoordinator
 from nanobot.agent.coordinators.result_selection import ResultSelectionCoordinator
+from nanobot.agent.coordinators.write_followup import WriteFollowupCoordinator
 
 __all__ = [
     "AgentCoordinator",
@@ -13,4 +14,5 @@ __all__ = [
     "PendingWriteCoordinator",
     "ReferenceResolutionCoordinator",
     "ResultSelectionCoordinator",
+    "WriteFollowupCoordinator",
 ]

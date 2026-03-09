@@ -21,6 +21,7 @@ from nanobot.agent.coordinators import (
     PendingWriteCoordinator,
     ReferenceResolutionCoordinator,
     ResultSelectionCoordinator,
+    WriteFollowupCoordinator,
 )
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
@@ -305,6 +306,7 @@ class AgentLoop:
     def _build_coordinators(self) -> list[AgentCoordinator]:
         return [
             PendingWriteCoordinator(self),
+            WriteFollowupCoordinator(self),
             ContactQueryCoordinator(self),
             ContinuationCoordinator(self),
             ResultSelectionCoordinator(self),

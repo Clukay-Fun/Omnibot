@@ -469,6 +469,73 @@ async def test_prepare_create_auto_executes_suggested_create_without_second_llm_
 
 
 @pytest.mark.asyncio
+async def test_affirmative_followup_replays_recent_write_request_into_prepare_create(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    prepare_tool = _FakePrepareCreateTool(
+        {
+            "needs_table_confirmation": False,
+            "selected_table": {"table_id": "tbl_contract", "name": "合同管理"},
+            "draft_fields": {"合同编号": "HT-001"},
+            "identity_strategy": ["合同编号"],
+            "record_lookup": {"attempted": True, "matched": 0, "records": []},
+            "operation_guess": "create_new",
+            "needs_record_confirmation": False,
+            "next_step": {
+                "tool": "bitable_create",
+                "mode": "dry_run",
+                "arguments": {"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}},
+            },
+        }
+    )
+    create_tool = _FakeCreateTool()
+    loop.tools.register(prepare_tool)
+    loop.tools.register(create_tool)
+    session = loop.sessions.get_or_create("cli:chat")
+    session.add_message("user", "新增合同，合同编号 HT-001，乙方 星火科技")
+    session.add_message("assistant", "创建成功后我会回你：记录链接 + 已填字段清单。你确认后我就直接执行创建。")
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="就这些填进去")
+    )
+
+    assert response is not None
+    assert "确认" in response.content
+    assert provider.calls == 0
+    assert prepare_tool.calls == [{"request_text": "新增合同，合同编号 HT-001，乙方 星火科技"}]
+    assert create_tool.calls == [{"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}}]
+
+
+@pytest.mark.asyncio
+async def test_affirmative_followup_without_replayable_request_returns_honest_message(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    session = loop.sessions.get_or_create("cli:chat")
+    session.add_message("user", "你好")
+    session.add_message("assistant", "创建成功后我会回你记录链接。")
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="需要")
+    )
+
+    assert response is not None
+    assert "还没有生成可执行的写入预览" in response.content
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_normal_chat_confirmation_with_extra_fields_refreshes_preview(tmp_path) -> None:
     provider = _ScriptedProvider(
         [
