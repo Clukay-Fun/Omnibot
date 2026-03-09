@@ -469,8 +469,23 @@ async def test_prepare_create_auto_executes_suggested_create_without_second_llm_
 
 
 @pytest.mark.asyncio
-async def test_affirmative_followup_replays_recent_write_request_into_prepare_create(tmp_path) -> None:
-    provider = _CoordinatorOnlyProvider()
+async def test_semantic_followup_replays_recent_write_request_into_prepare_create(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "action": "execute_previous_write",
+                        "confident": True,
+                        "context_index": 0,
+                        "merged_request": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            )
+        ]
+    )
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -497,23 +512,31 @@ async def test_affirmative_followup_replays_recent_write_request_into_prepare_cr
     loop.tools.register(prepare_tool)
     loop.tools.register(create_tool)
     session = loop.sessions.get_or_create("cli:chat")
-    session.add_message("user", "新增合同，合同编号 HT-001，乙方 星火科技")
-    session.add_message("assistant", "创建成功后我会回你：记录链接 + 已填字段清单。你确认后我就直接执行创建。")
+    session.metadata["recent_write_contexts"] = [
+        {
+            "source_text": "新增合同，合同编号 HT-001，乙方 星火科技",
+            "assistant_text": "创建成功后我会回你：记录链接 + 已填字段清单。你确认后我就直接执行创建。",
+            "table_name": "合同管理",
+            "table_id": "tbl_contract",
+            "created_at": loop._now_iso(),
+            "status": "pending_followup",
+        }
+    ]
     loop.sessions.save(session)
 
     response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="就这些填进去")
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="创建记录")
     )
 
     assert response is not None
     assert "确认" in response.content
-    assert provider.calls == 0
-    assert prepare_tool.calls == [{"request_text": "新增合同，合同编号 HT-001，乙方 星火科技"}]
+    assert provider.calls == 1
+    assert prepare_tool.calls == [{"request_text": "新增合同，合同编号 HT-001，乙方 星火科技", "table_hint": "合同管理"}]
     assert create_tool.calls == [{"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}}]
 
 
 @pytest.mark.asyncio
-async def test_affirmative_followup_without_replayable_request_returns_honest_message(tmp_path) -> None:
+async def test_followup_without_replayable_context_falls_back_to_normal_flow(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -531,8 +554,208 @@ async def test_affirmative_followup_without_replayable_request_returns_honest_me
     )
 
     assert response is not None
-    assert "还没有生成可执行的写入预览" in response.content
-    assert provider.calls == 0
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_semantic_followup_lists_candidates_when_multiple_write_contexts_exist(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "action": "execute_previous_write",
+                        "confident": True,
+                        "context_index": None,
+                        "merged_request": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            )
+        ]
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    session = loop.sessions.get_or_create("cli:chat")
+    session.metadata["recent_write_contexts"] = [
+        {
+            "source_text": "新增合同，合同编号 HT-001",
+            "assistant_text": "我会继续创建合同。",
+            "table_name": "合同管理",
+            "table_id": "tbl_contract",
+            "created_at": loop._now_iso(),
+            "status": "pending_followup",
+        },
+        {
+            "source_text": "更新案件，案号 (2026)京01民初123号",
+            "assistant_text": "我会继续更新案件。",
+            "table_name": "案件项目总库",
+            "table_id": "tbl_case",
+            "created_at": loop._now_iso(),
+            "status": "pending_followup",
+        },
+    ]
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="继续执行")
+    )
+
+    assert response is not None
+    assert "你最近提到了多条待继续的写入" in response.content
+    assert "合同管理" in response.content
+    assert "案件项目总库" in response.content
+
+
+@pytest.mark.asyncio
+async def test_semantic_followup_replays_selected_candidate_after_listing(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "action": "execute_previous_write",
+                        "confident": True,
+                        "context_index": None,
+                        "merged_request": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            ),
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "action": "execute_previous_write",
+                        "confident": True,
+                        "context_index": 0,
+                        "merged_request": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            ),
+        ]
+    )
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    prepare_tool = _FakePrepareCreateTool(
+        {
+            "needs_table_confirmation": False,
+            "selected_table": {"table_id": "tbl_case", "name": "案件项目总库"},
+            "draft_fields": {"案号": "(2026)京01民初123号"},
+            "identity_strategy": ["案号"],
+            "record_lookup": {"attempted": True, "matched": 0, "records": []},
+            "operation_guess": "create_new",
+            "needs_record_confirmation": False,
+            "next_step": {
+                "tool": "bitable_create",
+                "mode": "dry_run",
+                "arguments": {"table_id": "tbl_case", "fields": {"案号": "(2026)京01民初123号"}},
+            },
+        }
+    )
+    create_tool = _FakeCreateTool()
+    loop.tools.register(prepare_tool)
+    loop.tools.register(create_tool)
+    session = loop.sessions.get_or_create("cli:chat")
+    session.metadata["recent_write_contexts"] = [
+        {
+            "source_text": "新增合同，合同编号 HT-001",
+            "assistant_text": "我会继续创建合同。",
+            "table_name": "合同管理",
+            "table_id": "tbl_contract",
+            "created_at": loop._now_iso(),
+            "status": "pending_followup",
+        },
+        {
+            "source_text": "更新案件，案号 (2026)京01民初123号",
+            "assistant_text": "我会继续更新案件。",
+            "table_name": "案件项目总库",
+            "table_id": "tbl_case",
+            "created_at": loop._now_iso(),
+            "status": "pending_followup",
+        },
+    ]
+    loop.sessions.save(session)
+
+    _ = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="继续执行")
+    )
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="2")
+    )
+
+    assert response is not None
+    assert "确认" in response.content
+    assert prepare_tool.calls[-1]["request_text"] == "更新案件，案号 (2026)京01民初123号"
+    assert create_tool.calls[-1]["table_id"] == "tbl_case"
+
+
+@pytest.mark.asyncio
+async def test_write_promise_context_is_recorded_and_replayed_on_semantic_followup(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(content="收到，我现在创建。成功后我只回你 record URL。", tool_calls=[]),
+            LLMResponse(
+                content=json.dumps(
+                    {
+                        "action": "execute_previous_write",
+                        "confident": True,
+                        "context_index": 0,
+                        "merged_request": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                tool_calls=[],
+            ),
+        ]
+    )
+    loop = _build_loop(tmp_path, provider)
+    prepare_tool = _FakePrepareCreateTool(
+        {
+            "needs_table_confirmation": False,
+            "selected_table": {"table_id": "tbl_contract", "name": "合同管理"},
+            "draft_fields": {"合同编号": "HT-001"},
+            "identity_strategy": ["合同编号"],
+            "record_lookup": {"attempted": True, "matched": 0, "records": []},
+            "operation_guess": "create_new",
+            "needs_record_confirmation": False,
+            "next_step": {
+                "tool": "bitable_create",
+                "mode": "dry_run",
+                "arguments": {"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}},
+            },
+        }
+    )
+    create_tool = _FakeCreateTool()
+    loop.tools.register(prepare_tool)
+    loop.tools.register(create_tool)
+
+    first = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="新增合同，合同编号 HT-001")
+    )
+    assert first is not None
+    assert "我现在创建" in first.content
+
+    second = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="创建记录")
+    )
+
+    assert second is not None
+    assert "确认" in second.content
+    assert prepare_tool.calls[-1]["request_text"] == "新增合同，合同编号 HT-001"
+    assert create_tool.calls[-1]["table_id"] == "tbl_contract"
 
 
 @pytest.mark.asyncio
