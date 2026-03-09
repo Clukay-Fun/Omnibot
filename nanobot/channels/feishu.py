@@ -1449,10 +1449,12 @@ class FeishuChannel(BaseChannel):
         summary = self._thinking_collapsed_summary if collapsed else self._thinking_active
         if not self.config.stream_card_show_thinking:
             return ""
+        if collapsed:
+            return self._thinking_done_placeholder_markdown
 
         detail_lines = self._extract_specific_thinking_lines(thinking_text)
         if not detail_lines:
-            return self._thinking_done_placeholder_markdown if collapsed else self._thinking_placeholder_markdown
+            return self._thinking_placeholder_markdown
 
         prefix = "> "
         quoted_lines = [f"{prefix}{summary}"]

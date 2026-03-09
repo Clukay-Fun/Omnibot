@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__, __version__
+from nanobot.cli.progress import CliProgressRenderState, consume_cli_progress_event
 from nanobot.config.schema import Config
 from nanobot.utils.helpers import get_state_path, sync_workspace_templates
 
@@ -615,17 +616,24 @@ def agent(
         # 动画加载器可以安全地与 prompt_toolkit 的输入处理一起使用
         return console.status("[dim]nanobot 正在思考...[/dim]", spinner="dots")
 
-    async def _cli_progress(content: str, *, tool_hint: bool = False) -> None:
+    cli_progress_state = CliProgressRenderState()
+
+    async def _cli_progress(content: str, *, tool_hint: bool = False, phase: str = "answer") -> None:
         ch = agent_loop.channels_config
         if ch and tool_hint and not ch.send_tool_hints:
             return
         if ch and not tool_hint and not ch.send_progress:
             return
-        console.print(f"  [dim]↳ {content}[/dim]")
+        lines, log_text = consume_cli_progress_event(cli_progress_state, content, phase=phase)
+        if logs and log_text:
+            logger.debug("[think] {}", log_text)
+        for line in lines:
+            console.print(f"  [dim]↳ {line}[/dim]")
 
     if message:
         # 单条消息模式 — 直接调用，不需要总线 (bus)
         async def run_once():
+            cli_progress_state.reset()
             with _thinking_ctx():
                 response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
             _print_agent_response(response, render_markdown=markdown)
@@ -662,13 +670,18 @@ def agent(
                         msg = await asyncio.wait_for(bus.consume_outbound(), timeout=1.0)
                         if msg.metadata.get("_progress"):
                             is_tool_hint = msg.metadata.get("_tool_hint", False)
+                            phase = str(msg.metadata.get("_progress_phase") or "answer")
                             ch = agent_loop.channels_config
                             if ch and is_tool_hint and not ch.send_tool_hints:
                                 pass
                             elif ch and not is_tool_hint and not ch.send_progress:
                                 pass
                             else:
-                                console.print(f"  [dim]↳ {msg.content}[/dim]")
+                                lines, log_text = consume_cli_progress_event(cli_progress_state, msg.content, phase=phase)
+                                if logs and log_text:
+                                    logger.debug("[think] {}", log_text)
+                                for line in lines:
+                                    console.print(f"  [dim]↳ {line}[/dim]")
                         elif not turn_done.is_set():
                             if msg.content:
                                 turn_response.append(msg.content)
@@ -699,6 +712,7 @@ def agent(
 
                         turn_done.clear()
                         turn_response.clear()
+                        cli_progress_state.reset()
 
                         await bus.publish_inbound(InboundMessage(
                             channel=cli_channel,
