@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.coordinators.base import AgentCoordinator, CoordinatorToolResult
 from nanobot.agent.pending_write import extract_json_object
+from nanobot.agent.tools.registry import ToolExposureContext
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.session.manager import Session
 
@@ -69,6 +70,25 @@ class ResultSelectionCoordinator(AgentCoordinator):
             lines.append(f"\n还有 {remaining} 个候选，回复“继续”查看。")
         return "\n".join(lines)
 
+    @staticmethod
+    def _render_record_candidates(records: list[dict[str, Any]], *, offset: int, page_size: int) -> str:
+        visible = records[:page_size]
+        lines = ["找到多个候选记录，请直接回复“第几个/第二个”等进行选择："]
+        for idx, item in enumerate(visible, start=1):
+            record_id = str(item.get("record_id") or "").strip()
+            fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+            field_preview = "，".join(
+                f"{key}: {value}"
+                for key, value in list(fields.items())[:3]
+                if str(key).strip() and value not in (None, "")
+            )
+            extra = f"（{record_id}）" if record_id else ""
+            lines.append(f"- {idx}. {field_preview or '未命名记录'}{extra}")
+        remaining = max(0, len(records) - offset)
+        if remaining > 0:
+            lines.append(f"\n还有 {remaining} 个候选，回复“继续”查看。")
+        return "\n".join(lines)
+
     def on_tool_result(
         self,
         *,
@@ -102,6 +122,39 @@ class ResultSelectionCoordinator(AgentCoordinator):
                         final_content=self._render_table_candidates(
                             candidates,
                             offset=min(len(candidates), page_size),
+                            page_size=page_size,
+                        )
+                    )
+            record_lookup = payload.get("record_lookup") if isinstance(payload.get("record_lookup"), dict) else None
+            if payload.get("needs_record_confirmation") and isinstance(record_lookup, dict) and isinstance(record_lookup.get("records"), list):
+                records = [dict(item) for item in record_lookup.get("records", []) if isinstance(item, dict)]
+                if records:
+                    page_size = 5
+                    self._set_metadata(
+                        session,
+                        result_selection={
+                            "kind": "record_candidates",
+                            "items": records,
+                            "offset": min(len(records), page_size),
+                            "page_size": page_size,
+                        },
+                        record_selection_action={
+                            "tool": "bitable_update",
+                            "app_token": str(raw_args.get("app_token") or ""),
+                            "table_id": str((selected or {}).get("table_id") or ""),
+                            "draft_fields": dict(payload.get("draft_fields") or {}),
+                            "identity_strategy": [
+                                str(item).strip()
+                                for item in payload.get("identity_strategy", [])
+                                if str(item).strip()
+                            ] if isinstance(payload.get("identity_strategy"), list) else [],
+                            "request_text": str(payload.get("request_text") or raw_args.get("request_text") or ""),
+                        },
+                    )
+                    return CoordinatorToolResult(
+                        final_content=self._render_record_candidates(
+                            records,
+                            offset=min(len(records), page_size),
                             page_size=page_size,
                         )
                     )
@@ -147,6 +200,45 @@ class ResultSelectionCoordinator(AgentCoordinator):
             content = (
                 f"已选中联系人：{selected.get('display_name') or selected.get('open_id')}"
                 f"（open_id: {selected.get('open_id') or '—'}）。"
+            )
+        elif kind == "record_candidates":
+            action = session.metadata.get("record_selection_action") if isinstance(session.metadata.get("record_selection_action"), dict) else {}
+            record_id = str(selected.get("record_id") or "").strip()
+            draft_fields = dict(action.get("draft_fields") or {}) if action else {}
+            identity_strategy = {
+                str(item).strip()
+                for item in action.get("identity_strategy", [])
+                if str(item).strip()
+            } if action else set()
+            update_fields = {key: value for key, value in draft_fields.items() if key not in identity_strategy}
+            args: dict[str, Any] = {
+                "record_id": record_id,
+                "fields": update_fields,
+            }
+            table_id = str(action.get("table_id") or "").strip()
+            app_token = str(action.get("app_token") or "").strip()
+            if table_id:
+                args["table_id"] = table_id
+            if app_token:
+                args["app_token"] = app_token
+            tool_name = str(action.get("tool") or "bitable_update").strip() or "bitable_update"
+            exposure = ToolExposureContext(
+                channel=msg.channel,
+                user_text=str(action.get("request_text") or msg.content or ""),
+                mode="main_write_prepare",
+            )
+            result = await self._loop.tools.execute(tool_name, args, exposure=exposure)
+            content = self._loop._capture_coordinator_tool_result(
+                session=session,
+                tool_name=tool_name,
+                raw_args=args,
+                result=result,
+            ) or f"已选中记录：{record_id}。"
+            self._set_metadata(
+                session,
+                recent_selected_record=dict(selected),
+                result_selection={},
+                record_selection_action={},
             )
         else:
             return None

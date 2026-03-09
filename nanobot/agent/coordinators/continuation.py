@@ -58,9 +58,18 @@ class ContinuationCoordinator(AgentCoordinator):
     ) -> str:
         kind = str(selection.get("kind") or "options")
         title = "继续展示候选项：" if kind == "table_candidates" else "继续展示可选项："
+        if kind == "record_candidates":
+            title = "继续展示候选记录："
         lines = [title]
         for idx, item in enumerate(items, start=start_index):
-            label = str(item.get("name") or item.get("display_name") or item.get("table_id") or item.get("open_id") or "未命名项")
+            label = str(
+                item.get("name")
+                or item.get("display_name")
+                or item.get("table_id")
+                or item.get("open_id")
+                or item.get("record_id")
+                or "未命名项"
+            )
             lines.append(f"- {idx}. {label}")
         if remaining > 0:
             lines.append(f"\n还有 {remaining} 条，回复“继续”查看。")

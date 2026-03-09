@@ -104,6 +104,81 @@ class _FakePrepareCreateTool(Tool):
         )
 
 
+class _FakePrepareCreateAmbiguousRecordTool(Tool):
+    @property
+    def name(self) -> str:
+        return "bitable_prepare_create"
+
+    @property
+    def description(self) -> str:
+        return "fake prepare create with ambiguous records"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return json.dumps(
+            {
+                "request_text": "更新合同，合同编号 HT-001，合同状态 已签署",
+                "needs_table_confirmation": False,
+                "selected_table": {"table_id": "tbl_contract", "name": "合同管理"},
+                "draft_fields": {"合同编号": "HT-001", "合同状态": "已签署"},
+                "identity_strategy": ["合同编号"],
+                "record_lookup": {
+                    "attempted": True,
+                    "matched": 2,
+                    "records": [
+                        {"record_id": "rec_contract_1", "fields": {"合同编号": "HT-001"}},
+                        {"record_id": "rec_contract_2", "fields": {"合同编号": "HT-001-旧"}},
+                    ],
+                },
+                "operation_guess": "ambiguous_existing",
+                "needs_record_confirmation": True,
+                "next_step": None,
+            },
+            ensure_ascii=False,
+        )
+
+
+class _FakeUpdateTool(Tool):
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def name(self) -> str:
+        return "bitable_update"
+
+    @property
+    def description(self) -> str:
+        return "fake bitable update"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {"record_id": {"type": "string"}, "fields": {"type": "object"}},
+            "required": ["record_id", "fields"],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        return json.dumps(
+            {
+                "dry_run": True,
+                "preview": {
+                    "action": "update",
+                    "table_id": kwargs.get("table_id", "tbl_contract"),
+                    "record_id": kwargs.get("record_id"),
+                    "fields": kwargs.get("fields", {}),
+                },
+                "confirm_token": "tok-update-1",
+            },
+            ensure_ascii=False,
+        )
+
+
 def _build_loop(tmp_path) -> AgentLoop:
     return AgentLoop(
         bus=MessageBus(),
@@ -302,3 +377,64 @@ async def test_result_selection_coordinator_logs_tool_result_short_circuit(tmp_p
     )
 
     assert ("ResultSelectionCoordinator", "feishu:ou_chat", "tool_result") in events
+
+
+@pytest.mark.asyncio
+async def test_result_selection_coordinator_prompts_for_ambiguous_record_candidates(tmp_path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_ToolCallingProvider(),
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    loop.tools.register(_FakePrepareCreateAmbiguousRecordTool())
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="更新合同，合同编号 HT-001，合同状态 已签署")
+    )
+
+    assert response is not None
+    assert "候选记录" in response.content
+    assert "rec_contract_1" in response.content
+    session = loop.sessions.get_or_create("feishu:ou_chat")
+    assert session.metadata["result_selection"]["kind"] == "record_candidates"
+    assert session.metadata["record_selection_action"]["tool"] == "bitable_update"
+
+
+@pytest.mark.asyncio
+async def test_result_selection_coordinator_executes_selected_record_update_preview(tmp_path) -> None:
+    loop = _build_loop(tmp_path)
+    update_tool = _FakeUpdateTool()
+    loop.tools.register(update_tool)
+    session = loop.sessions.get_or_create("feishu:ou_chat")
+    session.metadata["result_selection"] = {
+        "kind": "record_candidates",
+        "items": [
+            {"record_id": "rec_contract_1", "fields": {"合同编号": "HT-001"}},
+            {"record_id": "rec_contract_2", "fields": {"合同编号": "HT-001-旧"}},
+        ],
+        "offset": 2,
+        "page_size": 5,
+    }
+    session.metadata["record_selection_action"] = {
+        "tool": "bitable_update",
+        "table_id": "tbl_contract",
+        "draft_fields": {"合同编号": "HT-001", "合同状态": "已签署"},
+        "identity_strategy": ["合同编号"],
+        "request_text": "更新合同，合同编号 HT-001，合同状态 已签署",
+    }
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="第一个")
+    )
+
+    assert response is not None
+    assert "确认" in response.content
+    assert update_tool.calls == [
+        {"table_id": "tbl_contract", "record_id": "rec_contract_1", "fields": {"合同状态": "已签署"}}
+    ]
+    refreshed = loop.sessions.get_or_create("feishu:ou_chat")
+    pending = refreshed.metadata.get("pending_write") or {}
+    assert pending["tool"] == "bitable_update"
+    assert pending["args"]["record_id"] == "rec_contract_1"
