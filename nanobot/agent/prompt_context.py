@@ -43,3 +43,24 @@ class PromptContext:
     def quoted_bot_summary(self) -> str:
         value = self.metadata.get("quoted_bot_summary")
         return str(value).strip() if value else ""
+
+    @property
+    def recent_selected_table(self) -> dict[str, Any]:
+        value = self.metadata.get("recent_selected_table")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def recent_directory_hits(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_directory_hits")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def referenced_message(self) -> dict[str, Any]:
+        value = self.metadata.get("referenced_message")
+        if isinstance(value, dict):
+            return dict(value)
+        if self.quoted_bot_summary:
+            return {"summary": self.quoted_bot_summary}
+        return {}

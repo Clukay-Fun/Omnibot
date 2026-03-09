@@ -4,18 +4,20 @@ import json
 import re
 from datetime import UTC, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
-
-import yaml
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.bitable import BitableListFieldsTool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
+from nanobot.agent.tools.feishu_data.directory_config import load_directory_config
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver
 from nanobot.config.schema import FeishuDataConfig
+
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 # region [写入工具]
 
@@ -113,22 +115,13 @@ class _BitableWriteToolBase(Tool):
         self._runtime_sender_id = sender_id or ""
         self._runtime_metadata = dict(metadata or {})
 
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self.set_runtime_context(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
+
     def _directory_config(self) -> dict[str, Any]:
         if self._directory_config_cache is not None:
             return dict(self._directory_config_cache)
-        if self._workspace is None:
-            self._directory_config_cache = {}
-            return {}
-        path = self._workspace / "feishu" / "bitable_rules.yaml"
-        if not path.exists():
-            self._directory_config_cache = {}
-            return {}
-        try:
-            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            payload = {}
-        directory = payload.get("directory") if isinstance(payload, dict) else {}
-        self._directory_config_cache = dict(directory) if isinstance(directory, dict) else {}
+        self._directory_config_cache = load_directory_config(self._workspace)
         return dict(self._directory_config_cache)
 
     def _ensure_person_resolver(self) -> BitablePersonResolver | None:

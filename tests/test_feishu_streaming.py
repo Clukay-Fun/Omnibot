@@ -585,7 +585,7 @@ async def test_tool_turn_final_response_updates_same_stream_card() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thinking_done_keeps_thinking_detail_before_answer_stream() -> None:
+async def test_thinking_done_replaces_detail_with_compact_placeholder() -> None:
     channel, client = _build_channel()
 
     await channel.send(
@@ -613,8 +613,8 @@ async def test_thinking_done_keeps_thinking_detail_before_answer_stream() -> Non
     ]
     assert thinking_updates
     last_content = getattr(getattr(thinking_updates[-1], "request_body", None), "content", "")
-    assert "我来帮您查一下" in last_content
-    assert "已折叠" not in last_content
+    assert "思考完成" in last_content
+    assert "我来帮您查一下" not in last_content
 
 
 @pytest.mark.asyncio
@@ -688,7 +688,8 @@ def test_thinking_block_uses_quoted_subtle_style() -> None:
     assert expanded.startswith("> ")
     assert collapsed.startswith("> ")
     assert "已折叠" not in collapsed
-    assert "检索中" in collapsed
+    assert "检索中" not in collapsed
+    assert "思考完成" in collapsed
 
 
 def test_thinking_block_hides_generic_placeholder_when_specific_detail_exists() -> None:

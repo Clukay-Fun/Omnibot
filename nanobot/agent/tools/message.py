@@ -3,10 +3,13 @@
     - 提供向外部频道发送消息的工具能力。
 """
 
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
+
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 #region 消息发送工具
 
@@ -44,6 +47,10 @@ class MessageTool(Tool):
         self._default_channel = channel
         self._default_chat_id = chat_id
         self._default_message_id = message_id
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        message_id = str(runtime.metadata.get("message_id") or "").strip() or None
+        self.set_context(runtime.channel, runtime.chat_id, message_id)
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
         """用处，参数

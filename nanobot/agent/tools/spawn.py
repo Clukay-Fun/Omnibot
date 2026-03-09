@@ -6,6 +6,7 @@ from nanobot.agent.tools.base import Tool
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 
 # region [子代理派生工具]
@@ -24,6 +25,11 @@ class SpawnTool(Tool):
         self._origin_channel = channel
         self._origin_chat_id = chat_id
         self._session_key = f"{channel}:{chat_id}"
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self._origin_channel = runtime.channel
+        self._origin_chat_id = runtime.chat_id
+        self._session_key = runtime.session_key or f"{runtime.channel}:{runtime.chat_id}"
 
     @property
     def name(self) -> str:
@@ -50,18 +56,32 @@ class SpawnTool(Tool):
                     "type": "string",
                     "description": "可选的任务简短标签（用于显示）",
                 },
+                "mode": {
+                    "type": "string",
+                    "description": "可选子代理模式，如 subagent_plan 或 subagent_apply。",
+                },
+                "grant": {
+                    "type": "object",
+                    "description": "可选显式授权对象，例如 {allowed_tools:[...] }。",
+                },
             },
             "required": ["task"],
         }
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
+    async def execute(self, **kwargs: Any) -> str:
         """派生子代理在后台执行指定的任务。"""
+        task = str(kwargs.get("task") or "")
+        label = kwargs.get("label")
+        mode = kwargs.get("mode")
+        grant = kwargs.get("grant") if isinstance(kwargs.get("grant"), dict) else None
         return await self._manager.spawn(
             task=task,
             label=label,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,
+            mode=mode or "subagent_plan",
+            grant=grant,
         )
 
 # endregion

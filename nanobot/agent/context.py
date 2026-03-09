@@ -111,13 +111,36 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
     # region [运行时上下文与引导]
 
     @staticmethod
-    def _build_runtime_context(channel: str | None, chat_id: str | None) -> str:
+    def _build_runtime_context(
+        channel: str | None,
+        chat_id: str | None,
+        runtime: PromptContext | None = None,
+    ) -> str:
         """构建不受信任的运行时元数据块，用于注入到用户消息之前。"""
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = time.strftime("%Z") or "UTC"
         lines = [f"Current Time: {now} ({tz})"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
+        if runtime is not None:
+            thread_id = str(runtime.metadata.get("thread_id") or runtime.metadata.get("root_id") or "").strip()
+            if thread_id:
+                lines.append(f"Thread ID: {thread_id}")
+            selected_table = runtime.recent_selected_table
+            if selected_table:
+                table_name = str(selected_table.get("table_name") or selected_table.get("name") or "").strip()
+                table_id = str(selected_table.get("table_id") or "").strip()
+                if table_name or table_id:
+                    label = table_name or table_id
+                    if table_name and table_id:
+                        label = f"{table_name} ({table_id})"
+                    lines.append(f"Recent Selected Table: {label}")
+            directory_hits = runtime.recent_directory_hits[:3]
+            if directory_hits:
+                names = [str(item.get("display_name") or item.get("open_id") or "").strip() for item in directory_hits]
+                names = [name for name in names if name]
+                if names:
+                    lines.append(f"Recent Directory Hits: {', '.join(names)}")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _resolve_workspace_files(self, runtime: PromptContext) -> list[Path]:
@@ -214,12 +237,13 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         messages = [
             {"role": "system", "content": self.build_system_prompt(skill_names, runtime=runtime)},
             *history,
-            {"role": "user", "content": self._build_runtime_context(channel, chat_id)},
+            {"role": "user", "content": self._build_runtime_context(channel, chat_id, runtime)},
         ]
-        if runtime.quoted_bot_summary:
+        referenced_summary = str(runtime.referenced_message.get("summary") or runtime.quoted_bot_summary or "").strip()
+        if referenced_summary:
             messages.append({
                 "role": "user",
-                "content": f"[Referenced Bot Message]\n{runtime.quoted_bot_summary}",
+                "content": f"[Referenced Bot Message]\n{referenced_summary}",
             })
         messages.append({"role": "user", "content": self._build_user_content(current_message, media)})
         return messages

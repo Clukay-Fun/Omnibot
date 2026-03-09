@@ -1,0 +1,19 @@
+id: judgment_minimal
+document_type: judgment
+fields:
+  - name: case_number
+    required: true
+    patterns:
+      - '(?:case\s*(?:no|number)?\s*[:#]?\s*)([A-Z0-9()\-]{4,})'
+  - name: court_name
+    required: true
+    patterns:
+      - '(?:court\s*[:]?\s*)([^\n]+)'
+  - name: plaintiff
+    required: false
+    patterns:
+      - '(?:plaintiff\s*[:]?\s*)([^\n]+)'
+  - name: defendant
+    required: false
+    patterns:
+      - '(?:defendant\s*[:]?\s*)([^\n]+)'

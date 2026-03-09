@@ -14,8 +14,9 @@ if TYPE_CHECKING:
 
 from loguru import logger
 
+from nanobot.agent.subagent_contracts import SubagentResultContract, normalize_subagent_contract
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
-from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.registry import ToolExposureContext, ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
@@ -67,6 +68,8 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        mode: str = "subagent_plan",
+        grant: dict[str, Any] | None = None,
     ) -> str:
         """派发（Spawn）一个子代理在后台执行任务。"""
         task_id = str(uuid.uuid4())[:8]
@@ -74,7 +77,7 @@ class SubagentManager:
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, mode=mode, grant=grant)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -102,6 +105,8 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        mode: str = "subagent_plan",
+        grant: dict[str, Any] | None = None,
     ) -> None:
         """执行一个子代理任务。"""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -133,7 +138,25 @@ class SubagentManager:
                 ):
                     tools.register(tool)
 
-            system_prompt = self._build_subagent_prompt()
+            allowed_tools = tuple(
+                str(item).strip()
+                for item in (grant or {}).get("allowed_tools", [])
+                if str(item).strip()
+            )
+            allowed_tables = tuple(
+                str(item).strip()
+                for item in (grant or {}).get("allowed_tables", [])
+                if str(item).strip()
+            )
+            tool_exposure = ToolExposureContext(
+                channel=origin.get("channel", ""),
+                user_text=task,
+                mode=mode,
+                authorized_tools=allowed_tools,
+                authorized_resources={"allowed_tables": allowed_tables} if allowed_tables else {},
+            )
+
+            system_prompt = self._build_subagent_prompt(mode)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -149,7 +172,7 @@ class SubagentManager:
 
                 response = await self.provider.chat(
                     messages=messages,
-                    tools=tools.get_definitions(),
+                    tools=tools.get_definitions(exposure=tool_exposure),
                     model=self.model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
@@ -179,7 +202,7 @@ class SubagentManager:
                     for tool_call in response.tool_calls:
                         args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                         logger.debug("Subagent [{}] executing: {} with arguments: {}", task_id, tool_call.name, args_str)
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
+                        result = await tools.execute(tool_call.name, tool_call.arguments, exposure=tool_exposure)
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
@@ -190,16 +213,16 @@ class SubagentManager:
                     final_result = response.content
                     break
 
-            if final_result is None:
-                final_result = "Task completed but no final response was generated."
+            contract = normalize_subagent_contract(final_result, mode=mode, status="ok")
 
             logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            await self._announce_result(task_id, label, task, contract, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            contract = normalize_subagent_contract(error_msg, mode=mode, status="error")
+            await self._announce_result(task_id, label, task, contract, origin, "error")
 
     # endregion
 
@@ -210,7 +233,7 @@ class SubagentManager:
         task_id: str,
         label: str,
         task: str,
-        result: str,
+        contract: SubagentResultContract,
         origin: dict[str, str],
         status: str,
     ) -> None:
@@ -221,10 +244,10 @@ class SubagentManager:
 
 Task: {task}
 
-Result:
-{result}
+Structured Result:
+{json.dumps(contract.to_payload(), ensure_ascii=False, indent=2)}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+Summarize this naturally for the user. Prefer `summary` as the user-facing truth. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
 
         # 作为系统消息注入以触发主智能体执行
         msg = InboundMessage(
@@ -237,7 +260,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
         await self.bus.publish_inbound(msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
 
-    def _build_subagent_prompt(self) -> str:
+    def _build_subagent_prompt(self, mode: str = "subagent_plan") -> str:
         """为子代理构建目标聚焦的系统提示词。"""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
@@ -247,8 +270,24 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
 {time_ctx}
 
-You are a subagent spawned by the main agent to complete a specific task.
+You are a specialist subagent spawned by the main agent to complete a specific task.
 Stay focused on the assigned task. Your final response will be reported back to the main agent.
+
+## Specialist Mode
+{mode}
+
+## Output Contract
+Return ONLY JSON with the following shape:
+{{
+  "kind": "{mode}",
+  "status": "ok|partial|error",
+  "summary": "short human-readable finding",
+  "data": {{"key": "value"}},
+  "confidence": "low|medium|high",
+  "next_action": "report|needs_input|apply"
+}}
+
+Do not return markdown fences. Do not return free-form prose outside the JSON object.
 
 ## Workspace
 {self.workspace}"""]

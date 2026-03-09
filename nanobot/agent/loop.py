@@ -14,16 +14,17 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
+from nanobot.agent.coordinators import (
+    AgentCoordinator,
+    ContactQueryCoordinator,
+    ContinuationCoordinator,
+    PendingWriteCoordinator,
+    ReferenceResolutionCoordinator,
+    ResultSelectionCoordinator,
+)
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
-from nanobot.agent.pending_write import (
-    PENDING_WRITE_METADATA_KEY,
-    coerce_pending_write_result,
-    extract_json_object,
-    extract_pending_write_command,
-    format_pending_write_preview,
-)
 from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
@@ -35,10 +36,11 @@ from nanobot.agent.skill_runtime import (
     UserMemoryStore,
 )
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.turn_runtime import TurnRuntime
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
-from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.tools.registry import ToolExposureContext, ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
@@ -295,9 +297,19 @@ class AgentLoop:
         self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
         self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
+        self._coordinators: list[AgentCoordinator] = self._build_coordinators()
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
         self._init_skillspec_runtime()
+
+    def _build_coordinators(self) -> list[AgentCoordinator]:
+        return [
+            PendingWriteCoordinator(self),
+            ContactQueryCoordinator(self),
+            ContinuationCoordinator(self),
+            ResultSelectionCoordinator(self),
+            ReferenceResolutionCoordinator(self),
+        ]
 
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
@@ -359,26 +371,19 @@ class AgentLoop:
         source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
         if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
             purpose = "bootstrap"
-        return PromptContext(
+        runtime = TurnRuntime.from_message(
+            msg,
+            session=None,
             purpose=purpose,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            session_key=session_key or msg.session_key,
-            metadata=dict(msg.metadata or {}),
+            mode="",
         )
+        if session_key:
+            runtime.session_key = session_key
+        return runtime.to_prompt_context()
 
     @staticmethod
     def _prompt_context_from_session(session: Session) -> PromptContext:
-        metadata = dict(session.metadata or {})
-        return PromptContext(
-            purpose="chat",
-            channel=str(metadata.get("channel") or "") or None,
-            chat_id=str(metadata.get("chat_id") or "") or None,
-            sender_id=str(metadata.get("sender_id") or "") or None,
-            session_key=session.key,
-            metadata=metadata,
-        )
+        return TurnRuntime.from_session(session).to_prompt_context()
 
     @staticmethod
     def _remember_session_runtime_metadata(session: Session, msg: InboundMessage) -> None:
@@ -389,11 +394,26 @@ class AgentLoop:
         metadata["sender_id"] = msg.sender_id
         metadata["chat_type"] = str(msg_metadata.get("chat_type") or "")
 
+        for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id", "quoted_bot_summary"):
+            value = msg_metadata.get(key)
+            if isinstance(value, str):
+                value = value.strip()
+            if value not in (None, ""):
+                metadata[key] = value
+            else:
+                metadata.pop(key, None)
+
+        quoted_summary = str(metadata.get("quoted_bot_summary") or "").strip()
+        referenced_id = str(msg_metadata.get("upper_message_id") or msg_metadata.get("parent_id") or msg_metadata.get("root_id") or "").strip()
+        if quoted_summary:
+            metadata["referenced_message"] = {
+                "message_id": referenced_id,
+                "summary": quoted_summary,
+            }
+
         thread_id = str(msg_metadata.get("thread_id") or msg_metadata.get("root_id") or "").strip()
         if thread_id:
             metadata["thread_id"] = thread_id
-        else:
-            metadata.pop("thread_id", None)
 
         session.metadata = metadata
 
@@ -1507,26 +1527,28 @@ class AgentLoop:
 
     # region [工具与执行辅助方法]
 
-    def _set_tool_context(
-        self,
-        channel: str,
-        chat_id: str,
-        message_id: str | None = None,
-        sender_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
+    def _set_tool_context(self, runtime: TurnRuntime) -> None:
         """为所有需要路由信息的工具更新上下文。"""
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
+                runtime_setter = getattr(tool, "set_turn_runtime", None)
+                if callable(runtime_setter):
+                    runtime_setter(runtime)
+                    continue
                 setter = getattr(tool, "set_context", None)
                 if callable(setter):
-                    setter(channel, chat_id, *([message_id] if name == "message" else []))
+                    message_id = str(runtime.metadata.get("message_id") or "").strip() or None
+                    setter(runtime.channel, runtime.chat_id, *([message_id] if name == "message" else []))
         for tool_name in self.tools.tool_names:
             tool = self.tools.get(tool_name)
             if tool is not None:
+                runtime_setter = getattr(tool, "set_turn_runtime", None)
+                if callable(runtime_setter):
+                    runtime_setter(runtime)
+                    continue
                 runtime_setter = getattr(tool, "set_runtime_context", None)
                 if callable(runtime_setter):
-                    runtime_setter(channel, chat_id, sender_id, metadata)
+                    runtime_setter(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1618,211 +1640,100 @@ class AgentLoop:
     ) -> str | None:
         return fallback_text
 
-    @staticmethod
-    def _pending_write(session: Session) -> dict[str, Any]:
-        value = session.metadata.get(PENDING_WRITE_METADATA_KEY)
-        return dict(value) if isinstance(value, dict) else {}
+    async def _run_coordinators(self, msg: InboundMessage, *, session: Session) -> OutboundMessage | None:
+        for coordinator in self._coordinators:
+            outbound = await coordinator.handle(msg=msg, session=session)
+            if outbound is not None:
+                self._log_coordinator_hit(coordinator.name, session.key, "message")
+                return outbound
+        return None
 
-    @staticmethod
-    def _set_pending_write(session: Session, payload: dict[str, Any]) -> None:
-        metadata = dict(session.metadata or {})
-        metadata[PENDING_WRITE_METADATA_KEY] = payload
-        session.metadata = metadata
-
-    @staticmethod
-    def _clear_pending_write(session: Session) -> None:
-        metadata = dict(session.metadata or {})
-        metadata.pop(PENDING_WRITE_METADATA_KEY, None)
-        session.metadata = metadata
-
-    @staticmethod
-    def _record_direct_turn(session: Session, msg: InboundMessage, assistant_content: str) -> None:
-        session.add_message("user", msg.content)
-        session.add_message("assistant", assistant_content)
-
-    @staticmethod
-    def _pending_write_args_from_payload(
-        *,
-        tool_name: str,
-        raw_args: dict[str, Any],
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        args = dict(raw_args)
-        args.pop("confirm_token", None)
-        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
-        if isinstance(preview.get("fields"), dict):
-            args["fields"] = dict(preview["fields"])
-        for key in ("table_id", "record_id"):
-            value = preview.get(key)
-            if value not in (None, ""):
-                args[key] = value
-        if tool_name == "bitable_delete" and "record_id" in raw_args:
-            args.setdefault("record_id", raw_args.get("record_id"))
-        return args
-
-    def _store_pending_write_from_result(
+    def _capture_coordinator_tool_result(
         self,
         *,
-        session: Session,
+        session: Session | None,
         tool_name: str,
         raw_args: dict[str, Any],
         result: str,
     ) -> str | None:
-        payload = extract_json_object(result)
-        if not payload or payload.get("dry_run") is not True or not payload.get("confirm_token"):
+        if session is None:
             return None
-        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
-        pending = {
-            "tool": tool_name,
-            "token": str(payload.get("confirm_token") or ""),
-            "args": self._pending_write_args_from_payload(tool_name=tool_name, raw_args=raw_args, payload=payload),
-            "preview": preview,
-            "created_at": self._now_iso(),
-        }
-        self._set_pending_write(session, pending)
-        return format_pending_write_preview(preview)
-
-    async def _load_pending_write_schema(self, pending: dict[str, Any]) -> list[dict[str, Any]]:
-        tool_name = str(pending.get("tool") or "")
-        if tool_name not in {"bitable_create", "bitable_update"}:
-            return []
-        if not self.tools.has("bitable_list_fields"):
-            return []
-        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
-        if not isinstance(args, dict):
-            return []
-        tool_args: dict[str, Any] = {"compact": True}
-        if args.get("app_token"):
-            tool_args["app_token"] = args["app_token"]
-        if args.get("table_id"):
-            tool_args["table_id"] = args["table_id"]
-        result = await self.tools.execute("bitable_list_fields", tool_args)
-        payload = extract_json_object(result)
-        if not payload:
-            return []
-        fields = payload.get("fields")
-        return [item for item in fields if isinstance(item, dict)][:12] if isinstance(fields, list) else []
-
-    async def _interpret_pending_write_reply(self, *, msg: InboundMessage, pending: dict[str, Any]) -> dict[str, Any]:
-        schema_fields = await self._load_pending_write_schema(pending)
-        prompt = (
-            "你是写入确认协调器。只输出 JSON，不要调用工具。\n"
-            "根据当前待写入预览和用户最新一句话，判断 action：confirm / cancel / modify / ignore。\n"
-            "规则：\n"
-            "1. 只有明确确认且没有修改字段时，action 才能是 confirm。\n"
-            "2. 用户补充或修改字段时，action=modify，并返回 fields_patch 对象。\n"
-            "3. 用户取消时，action=cancel。\n"
-            "4. 如果这句话和当前待写入无关，action=ignore。\n"
-            "5. fields_patch 只写需要变更的字段；日期优先保留 YYYY-MM-DD，不要自己造毫秒时间戳。\n\n"
-            f"当前待写入：{json.dumps(pending.get('preview') or {}, ensure_ascii=False)}\n"
-            f"可用字段：{json.dumps(schema_fields, ensure_ascii=False)}\n"
-            f"用户消息：{msg.content}\n\n"
-            '只返回 JSON，例如：{"action":"modify","fields_patch":{"人员":"房怡康"}}'
-        )
-        try:
-            response = await asyncio.wait_for(
-                self.provider.chat(
-                    messages=[
-                        {"role": "system", "content": "You are a strict JSON-only write confirmation coordinator."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    tools=None,
-                    model=self.model,
-                    temperature=0,
-                    max_tokens=300,
-                    reasoning_effort=None,
-                ),
-                timeout=min(self._llm_timeout_seconds, self._skillspec_render_primary_timeout_seconds),
+        for coordinator in self._coordinators:
+            captured = coordinator.on_tool_result(
+                session=session,
+                tool_name=tool_name,
+                raw_args=raw_args,
+                result=result,
             )
-        except Exception:
-            return {"action": "ignore"}
-        payload = extract_json_object(self._strip_think(response.content) or response.content)
-        return payload or {"action": "ignore"}
+            if captured is not None:
+                self._log_coordinator_hit(coordinator.name, session.key, "tool_result")
+                return captured.final_content
+        return None
 
-    async def _try_handle_pending_write(self, msg: InboundMessage, *, session: Session) -> OutboundMessage | None:
-        pending = self._pending_write(session)
-        if not pending:
-            return None
+    @staticmethod
+    def _log_coordinator_hit(name: str, session_key: str, source: str) -> None:
+        logger.info("Coordinator hit: {} session={} source={}", name, session_key, source)
 
-        command, token, extra_text = extract_pending_write_command(msg)
-        pending_token = str(pending.get("token") or "")
-        if token and token != pending_token:
-            content = "当前没有匹配的待确认写入。请按最新预览直接回复“确认”或“取消”。"
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+    @staticmethod
+    def _tool_exposure_context_for_message(msg: InboundMessage, *, session: Session | None = None) -> ToolExposureContext:
+        metadata = dict(msg.metadata or {})
+        text = msg.content.strip().lower()
+        pending_write = False
+        if session is not None:
+            pending_write = isinstance(session.metadata.get("pending_write"), dict)
+        mode = ""
+        if msg.channel == "feishu":
+            if pending_write:
+                mode = "main_write_commit"
+            elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
+                mode = "main_write_prepare"
+            elif any(
+                token in text
+                for token in (
+                    "通讯录",
+                    "联系人",
+                    "同事",
+                    "open_id",
+                    "邮箱",
+                    "手机号",
+                    "电话",
+                    "表格",
+                    "多维表格",
+                    "bitable",
+                    "字段",
+                    "schema",
+                    "视图",
+                    "table_id",
+                    "日历",
+                    "日程",
+                    "会议",
+                    "空闲",
+                    "任务",
+                    "待办",
+                    "聊天记录",
+                    "消息历史",
+                )
+            ) or re.match(r"^\s*(?:帮我)?(?:查|找|搜)(?:一下)?\s*[\w.@\-\u4e00-\u9fff]{2,40}\s*$", msg.content):
+                mode = "main_feishu_query"
+            else:
+                mode = "main_chat_readonly"
+        return ToolExposureContext(
+            channel=msg.channel,
+            user_text=msg.content,
+            metadata=metadata,
+            pending_write=pending_write,
+            mode=mode,
+        )
 
-        if command == "cancel":
-            self._clear_pending_write(session)
-            content = "已取消这次待写入操作。"
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
-
-        if command == "confirm" and not extra_text:
-            args = dict(pending.get("args") or {})
-            tool_name = str(pending.get("tool") or "")
-            args["confirm_token"] = pending_token
-            result = await self.tools.execute(tool_name, args)
-            self._clear_pending_write(session)
-            payload = extract_json_object(result)
-            content = coerce_pending_write_result(payload) if payload else result
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
-
-        decision = await self._interpret_pending_write_reply(msg=msg, pending=pending)
-        action = str(decision.get("action") or "ignore").strip().lower()
-        if action == "ignore":
-            return None
-        if action == "cancel":
-            self._clear_pending_write(session)
-            content = "已取消这次待写入操作。"
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
-        if action == "confirm":
-            args = dict(pending.get("args") or {})
-            tool_name = str(pending.get("tool") or "")
-            args["confirm_token"] = pending_token
-            result = await self.tools.execute(tool_name, args)
-            self._clear_pending_write(session)
-            payload = extract_json_object(result)
-            content = coerce_pending_write_result(payload) if payload else result
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
-        if action != "modify":
-            return None
-
-        patch = decision.get("fields_patch") if isinstance(decision.get("fields_patch"), dict) else {}
-        tool_name = str(pending.get("tool") or "")
-        args = dict(pending.get("args") or {})
-        fields = dict(args.get("fields") or {}) if isinstance(args.get("fields"), dict) else None
-        if not tool_name or fields is None:
-            content = "当前待写入操作不支持直接补字段，请先取消后重新发起。"
-            self._record_direct_turn(session, msg, content)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
-
-        fields.update(patch)
-        args["fields"] = fields
-        args.pop("confirm_token", None)
-        result = await self.tools.execute(tool_name, args)
-        content = self._store_pending_write_from_result(session=session, tool_name=tool_name, raw_args=args, result=result)
-        if content is None:
-            payload = extract_json_object(result)
-            rendered = coerce_pending_write_result(payload) if payload else result
-            self._clear_pending_write(session)
-            self._record_direct_turn(session, msg, rendered)
-            self.sessions.save(session)
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=rendered, metadata={**(msg.metadata or {}), "_tool_turn": True})
-
-        refreshed_preview = dict(session.metadata.get(PENDING_WRITE_METADATA_KEY) or {}).get("preview")
-        rendered = format_pending_write_preview(refreshed_preview if isinstance(refreshed_preview, dict) else {}, refreshed=True)
-        self._record_direct_turn(session, msg, rendered)
-        self.sessions.save(session)
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=rendered, metadata={**(msg.metadata or {}), "_tool_turn": True})
+    @staticmethod
+    def _turn_runtime_for_message(
+        msg: InboundMessage,
+        *,
+        session: Session | None = None,
+        purpose: str = "chat",
+        mode: str = "",
+    ) -> TurnRuntime:
+        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, purpose), mode=mode)
 
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
@@ -1951,6 +1862,7 @@ class AgentLoop:
         on_progress: Callable[..., Awaitable[None]] | None = None,
         session_key: str = "unknown",
         session: Session | None = None,
+        tool_exposure: ToolExposureContext | None = None,
     ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
         messages = initial_messages
@@ -2053,7 +1965,7 @@ class AgentLoop:
                 response = await asyncio.wait_for(
                     self.provider.chat(
                         messages=messages,
-                        tools=self.tools.get_definitions(),
+                        tools=self.tools.get_definitions(exposure=tool_exposure),
                         model=self.model,
                         temperature=self.temperature,
                         max_tokens=self.max_tokens,
@@ -2145,7 +2057,7 @@ class AgentLoop:
                     tool_started = time.perf_counter()
                     tool_heartbeat_task = _start_stage_heartbeat(f"tool:{tool_call.name}", tool_started)
                     try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments, exposure=tool_exposure)
                     finally:
                         await _stop_stage_heartbeat(tool_heartbeat_task)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
@@ -2153,14 +2065,12 @@ class AgentLoop:
                         "stage": f"tool:{tool_call.name}",
                         "duration_ms": tool_duration_ms,
                     })
-                    pending_preview = None
-                    if session is not None:
-                        pending_preview = self._store_pending_write_from_result(
-                            session=session,
-                            tool_name=tool_call.name,
-                            raw_args=tool_call.arguments,
-                            result=result,
-                        )
+                    pending_preview = self._capture_coordinator_tool_result(
+                        session=session,
+                        tool_name=tool_call.name,
+                        raw_args=tool_call.arguments,
+                        result=result,
+                    )
                     result_preview = (
                         "已生成写入预览，等待用户确认。"
                         if pending_preview is not None
@@ -2663,22 +2573,23 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(
-                channel,
-                chat_id,
-                msg.metadata.get("message_id"),
-                sender_id=msg.sender_id,
-                metadata=msg.metadata,
-            )
+            tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
+            turn_runtime = self._turn_runtime_for_message(msg, session=session, mode=tool_exposure.mode)
+            self._set_tool_context(turn_runtime)
             history = session.get_history(max_messages=self.memory_window)
-            prompt_context = PromptContext(purpose="chat", channel=channel, chat_id=chat_id, metadata=dict(msg.metadata or {}))
+            prompt_context = turn_runtime.to_prompt_context()
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 runtime=prompt_context,
             )
             turn_started = time.perf_counter()
-            final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key, session=session)
+            final_content, _, all_msgs, timings = await self._run_agent_loop(
+                messages,
+                session_key=key,
+                session=session,
+                tool_exposure=tool_exposure,
+            )
             turn_new = all_msgs[1 + len(history):]
             total_ms = int((time.perf_counter() - turn_started) * 1000)
             final_content = self._render_with_template(
@@ -2766,7 +2677,7 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
-        pending_outbound = await self._try_handle_pending_write(msg, session=session)
+        pending_outbound = await self._run_coordinators(msg, session=session)
         if pending_outbound is not None:
             return pending_outbound
 
@@ -2829,19 +2740,15 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(
-            msg.channel,
-            msg.chat_id,
-            msg.metadata.get("message_id"),
-            sender_id=msg.sender_id,
-            metadata=msg.metadata,
-        )
+        tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
+        turn_runtime = self._turn_runtime_for_message(msg, session=session, mode=tool_exposure.mode)
+        self._set_tool_context(turn_runtime)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
-        prompt_context = self._prompt_context_for_message(msg, session_key=key)
+        prompt_context = turn_runtime.to_prompt_context()
         llm_user_message = self._effective_user_message_for_llm(msg)
         initial_messages = self.context.build_messages(
             history=history,
@@ -2865,6 +2772,7 @@ class AgentLoop:
             on_progress=on_progress or _bus_progress,
             session_key=key,
             session=session,
+            tool_exposure=tool_exposure,
         )
 
         if final_content is None:
