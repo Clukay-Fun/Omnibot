@@ -9,6 +9,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel
 from nanobot.config.schema import FeishuConfig
+from nanobot.utils.helpers import get_state_path
 
 
 class _FakeResponse:
@@ -669,6 +670,13 @@ def test_streaming_card_payload_does_not_use_action_tag() -> None:
     tags = [str(el.get("tag")) for el in card.get("body", {}).get("elements", [])]
 
     assert "action" not in tags
+
+
+def test_feishu_channel_uses_isolated_cron_store_from_gateway() -> None:
+    channel, _ = _build_channel()
+
+    assert channel._cron_service.store_path == get_state_path() / "feishu" / "cron" / "jobs.json"
+    assert channel._cron_service.store_path != get_state_path() / "cron" / "jobs.json"
 
 
 def test_thinking_block_uses_quoted_subtle_style() -> None:
