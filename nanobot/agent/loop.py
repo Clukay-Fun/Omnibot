@@ -14,11 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
-from nanobot.agent.coordinators import (
-    AgentCoordinator,
-    ContinuationCoordinator,
-    PendingWriteCoordinator,
-)
+from nanobot.agent.coordinators import ContinuationCoordinator, PendingWriteCoordinator
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
@@ -34,7 +30,6 @@ from nanobot.agent.skill_runtime import (
 )
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.turn_runtime import TurnRuntime
-from nanobot.agent.write_followup_state import build_write_context, clear_write_contexts, push_write_context
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -298,13 +293,9 @@ class AgentLoop:
         self._register_default_tools()
         self._pending_write_coordinator = PendingWriteCoordinator(self)
         self._continuation_coordinator = ContinuationCoordinator(self)
-        self._coordinators: list[AgentCoordinator] = self._build_coordinators()
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
         self._init_skillspec_runtime()
-
-    def _build_coordinators(self) -> list[AgentCoordinator]:
-        return [self._pending_write_coordinator]
 
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
@@ -1637,32 +1628,6 @@ class AgentLoop:
     ) -> str | None:
         return fallback_text
 
-    def _remember_write_followup_context(self, session: Session, *, user_text: str, assistant_text: str, tools_used: list[str]) -> None:
-        metadata = dict(session.metadata or {})
-        if isinstance(metadata.get("pending_write"), dict) and metadata.get("pending_write"):
-            session.metadata = clear_write_contexts(metadata)
-            return
-        if tools_used:
-            return
-        selected_table = metadata.get("recent_selected_table") if isinstance(metadata.get("recent_selected_table"), dict) else None
-        context = build_write_context(
-            source_text=user_text,
-            assistant_text=assistant_text,
-            selected_table=selected_table,
-            created_at=self._now_iso(),
-        )
-        if context is None:
-            return
-        session.metadata = push_write_context(metadata, context)
-
-    async def _run_coordinators(self, msg: InboundMessage, *, session: Session) -> OutboundMessage | None:
-        for coordinator in self._coordinators:
-            outbound = await coordinator.handle(msg=msg, session=session)
-            if outbound is not None:
-                self._log_coordinator_hit(coordinator.name, session.key, "message")
-                return outbound
-        return None
-
     def _capture_coordinator_tool_result(
         self,
         *,
@@ -1673,16 +1638,15 @@ class AgentLoop:
     ) -> str | None:
         if session is None:
             return None
-        for coordinator in self._coordinators:
-            captured = coordinator.on_tool_result(
-                session=session,
-                tool_name=tool_name,
-                raw_args=raw_args,
-                result=result,
-            )
-            if captured is not None:
-                self._log_coordinator_hit(coordinator.name, session.key, "tool_result")
-                return captured.final_content
+        captured = self._pending_write_coordinator.on_tool_result(
+            session=session,
+            tool_name=tool_name,
+            raw_args=raw_args,
+            result=result,
+        )
+        if captured is not None:
+            self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "tool_result")
+            return captured.final_content
         return None
 
     @staticmethod
@@ -2924,7 +2888,6 @@ class AgentLoop:
         final_text = final_content or "I've completed processing but have no response to give."
 
         self._save_turn(session, all_msgs, 1 + len(history))
-        self._remember_write_followup_context(session, user_text=msg.content, assistant_text=final_text, tools_used=tools_used)
         self.sessions.save(session)
         await self._enqueue_memory_write(msg, final_text)
 

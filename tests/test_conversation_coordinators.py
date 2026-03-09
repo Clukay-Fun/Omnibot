@@ -148,11 +148,6 @@ async def test_ordinary_feishu_queries_bypass_pre_llm_routing(tmp_path, content,
     if tool is not None:
         loop.tools.register(tool())
 
-    async def _fail_coordinators(*args: Any, **kwargs: Any):
-        _ = (args, kwargs)
-        raise AssertionError("ordinary messages should not call _run_coordinators")
-
-    loop._run_coordinators = _fail_coordinators  # type: ignore[method-assign]
     loop._skillspec_runtime = _ExplodingSkillRuntime()  # type: ignore[assignment]
 
     response = await loop._process_message(

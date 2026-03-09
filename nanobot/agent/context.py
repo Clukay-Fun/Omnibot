@@ -11,6 +11,7 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.prompt_context import PromptContext
+from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skills import SkillsLoader
 
 
@@ -25,6 +26,8 @@ class ContextBuilder:
     HEARTBEAT_FILES = ["HEARTBEAT.md"]
     _LLM_TABLE_METADATA_LIMIT = 8
     _LLM_FIELD_METADATA_LIMIT = 12
+    _SKILLSPEC_BLUEPRINT_LIMIT = 16
+    _SKILLSPEC_DESCRIPTION_LIMIT = 120
 
     # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
@@ -54,6 +57,10 @@ class ContextBuilder:
         memory = self.memory.get_memory_context(runtime)
         if memory:
             parts.append(f"# Memory\n\n{memory}")
+
+        business_capabilities = self._build_business_capabilities_context(runtime)
+        if business_capabilities:
+            parts.append(business_capabilities)
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -229,6 +236,71 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             )
 
         return "\n".join(lines)
+
+    def _build_business_capabilities_context(self, runtime: PromptContext) -> str:
+        if not runtime.is_feishu:
+            return ""
+
+        registry = SkillSpecRegistry(workspace_root=self.workspace / "skillspec")
+        registry.load()
+        blueprints = sorted(registry.blueprints.values(), key=lambda item: item.id)
+        if not blueprints:
+            return ""
+
+        lines = [
+            "# Business Capabilities",
+            "Use these Feishu skillspec blueprints as concise business capability references. They help map user intent to tools and tables, but they do not change routing.",
+        ]
+
+        for blueprint in blueprints[: self._SKILLSPEC_BLUEPRINT_LIMIT]:
+            lines.append(self._format_blueprint_for_prompt(blueprint))
+
+        omitted = len(blueprints) - self._SKILLSPEC_BLUEPRINT_LIMIT
+        if omitted > 0:
+            lines.append(f"- additional_capabilities_omitted={omitted}")
+
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_blueprint_for_prompt(cls, blueprint: Any) -> str:
+        title = cls._normalize_prompt_text(getattr(blueprint, "title", None))
+        description = cls._normalize_prompt_text(getattr(blueprint, "description", None), limit=cls._SKILLSPEC_DESCRIPTION_LIMIT)
+        action_kind = cls._normalize_prompt_text(getattr(blueprint, "action_kind", None)) or "unknown"
+        primary_tool = cls._normalize_prompt_text(getattr(blueprint, "primary_tool", None)) or "unknown"
+
+        table_aliases: list[str] = []
+        for table in getattr(blueprint, "tables", []) or []:
+            alias = cls._normalize_prompt_text(getattr(table, "alias", None))
+            table_id = cls._normalize_prompt_text(getattr(table, "table_id", None))
+            if alias:
+                label = alias
+            elif table_id:
+                label = table_id
+            else:
+                continue
+            if label not in table_aliases:
+                table_aliases.append(label)
+        tables = ", ".join(table_aliases) if table_aliases else "none"
+
+        details = [
+            f"id={blueprint.id}",
+            f"title={title or blueprint.id}",
+            f"kind={action_kind}",
+            f"tool={primary_tool}",
+            f"tables={tables}",
+        ]
+        if description:
+            details.append(f"desc={description}")
+        return "- " + "; ".join(details)
+
+    @staticmethod
+    def _normalize_prompt_text(value: Any, limit: int | None = None) -> str:
+        if value is None:
+            return ""
+        text = " ".join(str(value).split())
+        if limit is not None and len(text) > limit:
+            return text[: max(0, limit - 3)].rstrip() + "..."
+        return text
 
     # endregion
 

@@ -3,10 +3,9 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.coordinators.base import AgentCoordinator
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.base import Tool
-from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import SkillSpecConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
@@ -193,34 +192,6 @@ class _CoordinatorOnlyProvider:
 
     def get_default_model(self) -> str:
         return "dummy"
-
-
-class _StubCoordinator(AgentCoordinator):
-    async def handle(self, *, msg: InboundMessage, session) -> OutboundMessage | None:  # type: ignore[override]
-        _ = session
-        if msg.content == "coordinator first":
-            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content="handled by coordinator")
-        return None
-
-
-@pytest.mark.asyncio
-async def test_loop_ignores_registered_coordinator_during_normal_message_routing(tmp_path) -> None:
-    provider = _CoordinatorOnlyProvider()
-    loop = AgentLoop(
-        bus=MessageBus(),
-        provider=provider,
-        workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
-    )
-    loop._coordinators.insert(0, _StubCoordinator())
-
-    response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="coordinator first")
-    )
-
-    assert response is not None
-    assert response.content == "llm-fallback"
-    assert provider.calls == 1
 
 
 @pytest.mark.asyncio
@@ -453,59 +424,7 @@ async def test_prepare_create_auto_executes_suggested_create_without_second_llm_
 
 
 @pytest.mark.asyncio
-async def test_recent_write_context_no_longer_replays_before_main_llm(tmp_path) -> None:
-    provider = _CoordinatorOnlyProvider()
-    loop = AgentLoop(
-        bus=MessageBus(),
-        provider=provider,
-        workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
-    )
-    prepare_tool = _FakePrepareCreateTool(
-        {
-            "needs_table_confirmation": False,
-            "selected_table": {"table_id": "tbl_contract", "name": "合同管理"},
-            "draft_fields": {"合同编号": "HT-001"},
-            "identity_strategy": ["合同编号"],
-            "record_lookup": {"attempted": True, "matched": 0, "records": []},
-            "operation_guess": "create_new",
-            "needs_record_confirmation": False,
-            "next_step": {
-                "tool": "bitable_create",
-                "mode": "dry_run",
-                "arguments": {"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}},
-            },
-        }
-    )
-    create_tool = _FakeCreateTool()
-    loop.tools.register(prepare_tool)
-    loop.tools.register(create_tool)
-    session = loop.sessions.get_or_create("cli:chat")
-    session.metadata["recent_write_contexts"] = [
-        {
-            "source_text": "新增合同，合同编号 HT-001，乙方 星火科技",
-            "assistant_text": "创建成功后我会回你：记录链接 + 已填字段清单。你确认后我就直接执行创建。",
-            "table_name": "合同管理",
-            "table_id": "tbl_contract",
-            "created_at": loop._now_iso(),
-            "status": "pending_followup",
-        }
-    ]
-    loop.sessions.save(session)
-
-    response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="创建记录")
-    )
-
-    assert response is not None
-    assert response.content == "llm-fallback"
-    assert provider.calls == 1
-    assert prepare_tool.calls == []
-    assert create_tool.calls == []
-
-
-@pytest.mark.asyncio
-async def test_followup_without_replayable_context_falls_back_to_normal_flow(tmp_path) -> None:
+async def test_followup_without_pending_write_falls_back_to_normal_flow(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -528,109 +447,7 @@ async def test_followup_without_replayable_context_falls_back_to_normal_flow(tmp
 
 
 @pytest.mark.asyncio
-async def test_multiple_write_contexts_no_longer_prompt_local_candidate_selection(tmp_path) -> None:
-    provider = _CoordinatorOnlyProvider()
-    loop = AgentLoop(
-        bus=MessageBus(),
-        provider=provider,
-        workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
-    )
-    session = loop.sessions.get_or_create("cli:chat")
-    session.metadata["recent_write_contexts"] = [
-        {
-            "source_text": "新增合同，合同编号 HT-001",
-            "assistant_text": "我会继续创建合同。",
-            "table_name": "合同管理",
-            "table_id": "tbl_contract",
-            "created_at": loop._now_iso(),
-            "status": "pending_followup",
-        },
-        {
-            "source_text": "更新案件，案号 (2026)京01民初123号",
-            "assistant_text": "我会继续更新案件。",
-            "table_name": "案件项目总库",
-            "table_id": "tbl_case",
-            "created_at": loop._now_iso(),
-            "status": "pending_followup",
-        },
-    ]
-    loop.sessions.save(session)
-
-    response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="继续执行")
-    )
-
-    assert response is not None
-    assert response.content == "llm-fallback"
-    assert provider.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_numeric_followup_no_longer_replays_selected_write_context(tmp_path) -> None:
-    provider = _CoordinatorOnlyProvider()
-    loop = AgentLoop(
-        bus=MessageBus(),
-        provider=provider,
-        workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
-    )
-    prepare_tool = _FakePrepareCreateTool(
-        {
-            "needs_table_confirmation": False,
-            "selected_table": {"table_id": "tbl_case", "name": "案件项目总库"},
-            "draft_fields": {"案号": "(2026)京01民初123号"},
-            "identity_strategy": ["案号"],
-            "record_lookup": {"attempted": True, "matched": 0, "records": []},
-            "operation_guess": "create_new",
-            "needs_record_confirmation": False,
-            "next_step": {
-                "tool": "bitable_create",
-                "mode": "dry_run",
-                "arguments": {"table_id": "tbl_case", "fields": {"案号": "(2026)京01民初123号"}},
-            },
-        }
-    )
-    create_tool = _FakeCreateTool()
-    loop.tools.register(prepare_tool)
-    loop.tools.register(create_tool)
-    session = loop.sessions.get_or_create("cli:chat")
-    session.metadata["recent_write_contexts"] = [
-        {
-            "source_text": "新增合同，合同编号 HT-001",
-            "assistant_text": "我会继续创建合同。",
-            "table_name": "合同管理",
-            "table_id": "tbl_contract",
-            "created_at": loop._now_iso(),
-            "status": "pending_followup",
-        },
-        {
-            "source_text": "更新案件，案号 (2026)京01民初123号",
-            "assistant_text": "我会继续更新案件。",
-            "table_name": "案件项目总库",
-            "table_id": "tbl_case",
-            "created_at": loop._now_iso(),
-            "status": "pending_followup",
-        },
-    ]
-    loop.sessions.save(session)
-
-    _ = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="继续执行")
-    )
-    response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="2")
-    )
-
-    assert response is not None
-    assert response.content == "llm-fallback"
-    assert provider.calls == 2
-    assert prepare_tool.calls == []
-    assert create_tool.calls == []
-
-
-@pytest.mark.asyncio
-async def test_write_promise_context_is_recorded_but_not_replayed_deterministically(tmp_path) -> None:
+async def test_write_promise_context_is_not_recorded(tmp_path) -> None:
     provider = _ScriptedProvider(
         [
             LLMResponse(content="收到，我现在创建。成功后我只回你 record URL。", tool_calls=[]),
@@ -664,7 +481,7 @@ async def test_write_promise_context_is_recorded_but_not_replayed_deterministica
     assert first is not None
     assert "我现在创建" in first.content
     session = loop.sessions.get_or_create("cli:chat")
-    assert session.metadata.get("recent_write_contexts")
+    assert session.metadata.get("recent_write_contexts") in ({}, None)
 
     second = await loop._process_message(
         InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="创建记录")
