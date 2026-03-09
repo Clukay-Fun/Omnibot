@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from nanobot.agent.coordinators.base import AgentCoordinator
+from nanobot.agent.object_memory import resolve_recent_object_reference
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.session.manager import Session
 
@@ -29,6 +30,19 @@ class ReferenceResolutionCoordinator(AgentCoordinator):
     async def handle(self, *, msg: InboundMessage, session: Session) -> OutboundMessage | None:
         text = msg.content.strip()
         metadata = dict(session.metadata or {})
+
+        for kind, label in (("case", "案件"), ("contract", "合同"), ("weekly_plan", "周计划")):
+            if label not in text and not (kind == "weekly_plan" and "这周那条" in text):
+                continue
+            if any(token in text for token in ("是什么", "哪一个", "是哪条", "是哪一个", "是哪条记录")):
+                resolved = resolve_recent_object_reference(metadata, kind=kind, text=text)
+                if resolved:
+                    display_label = str(resolved.get("display_label") or resolved.get("record_id") or "").strip()
+                    if display_label:
+                        content = f"刚才提到的{label}是：{display_label}。"
+                        self._record_direct_turn(session, msg, content)
+                        self._loop.sessions.save(session)
+                        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
 
         if any(token in text for token in ("刚才那个表", "上一个表", "最近那个表")) and any(
             token in text for token in ("是什么", "哪个", "是哪张")

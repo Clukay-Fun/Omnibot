@@ -904,6 +904,178 @@ tables:
 
 
 @pytest.mark.asyncio
+async def test_prepare_create_uses_recent_contract_object_for_reference_update(mock_config, mock_client, tmp_path):
+    workspace_registry = tmp_path / "skills" / "table_registry.yaml"
+    workspace_registry.parent.mkdir(parents=True, exist_ok=True)
+    workspace_registry.write_text(
+        """
+version: 1
+tables:
+  contract_registry:
+    app_token: app123
+    table_id: tbl_contract
+    display_name: 合同管理
+    aliases: [合同管理, 合同台账]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    tool = BitablePrepareCreateTool(config=mock_config, client=mock_client, workspace=tmp_path)
+    tool.set_runtime_context(
+        "feishu",
+        "ou_chat",
+        "ou_user",
+        {
+            "recent_contract_objects": [
+                {
+                    "display_label": "HT-001 / 星火科技",
+                    "identity_strategy": ["合同编号"],
+                    "identity_values": {"合同编号": "HT-001"},
+                    "record_id": "rec_contract_1",
+                }
+            ]
+        },
+    )
+    mock_client.request.side_effect = [
+        {"data": {"items": [{"table_id": "tbl_contract", "name": "合同主表"}]}},
+        {
+            "data": {
+                "items": [
+                    {"field_id": "fld_no", "field_name": "合同编号", "type": 1, "property": {}},
+                    {"field_id": "fld_status", "field_name": "合同状态", "type": 3, "property": {"options": [{"name": "已签署"}]}} ,
+                ]
+            }
+        },
+        {"data": {"items": [{"record_id": "rec_contract_1", "fields": {"合同编号": "HT-001"}}]}},
+    ]
+
+    res = json.loads(await tool.execute(request_text="把那个合同的合同状态改成已签署", app_token="app123"))
+
+    assert res["draft_fields"]["合同编号"] == "HT-001"
+    assert res["draft_fields"]["合同状态"] == "已签署"
+    assert res["operation_guess"] == "update_existing"
+    assert res["next_step"]["arguments"]["record_id"] == "rec_contract_1"
+
+
+@pytest.mark.asyncio
+async def test_prepare_create_uses_previous_contract_object_for_generic_reference_update(mock_config, mock_client, tmp_path):
+    workspace_registry = tmp_path / "skills" / "table_registry.yaml"
+    workspace_registry.parent.mkdir(parents=True, exist_ok=True)
+    workspace_registry.write_text(
+        """
+version: 1
+tables:
+  contract_registry:
+    app_token: app123
+    table_id: tbl_contract
+    display_name: 合同管理
+    aliases: [合同管理, 合同台账]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    tool = BitablePrepareCreateTool(config=mock_config, client=mock_client, workspace=tmp_path)
+    tool.set_runtime_context(
+        "feishu",
+        "ou_chat",
+        "ou_user",
+        {
+            "recent_object_focus": "contract",
+            "recent_selected_table": {"table_id": "tbl_contract", "name": "合同管理"},
+            "recent_contract_objects": [
+                {
+                    "display_label": "HT-002 / 新合同",
+                    "identity_strategy": ["合同编号"],
+                    "identity_values": {"合同编号": "HT-002"},
+                    "record_id": "rec_contract_2",
+                },
+                {
+                    "display_label": "HT-001 / 老合同",
+                    "identity_strategy": ["合同编号"],
+                    "identity_values": {"合同编号": "HT-001"},
+                    "record_id": "rec_contract_1",
+                },
+            ],
+        },
+    )
+    mock_client.request.side_effect = [
+        {"data": {"items": [{"table_id": "tbl_contract", "name": "合同主表"}]}},
+        {
+            "data": {
+                "items": [
+                    {"field_id": "fld_no", "field_name": "合同编号", "type": 1, "property": {}},
+                    {"field_id": "fld_status", "field_name": "合同状态", "type": 3, "property": {"options": [{"name": "已签署"}]}} ,
+                ]
+            }
+        },
+        {"data": {"items": [{"record_id": "rec_contract_1", "fields": {"合同编号": "HT-001"}}]}},
+    ]
+
+    res = json.loads(await tool.execute(request_text="不是这个，是前面那个，合同状态改成已签署", app_token="app123"))
+
+    assert res["selected_table"]["table_id"] == "tbl_contract"
+    assert res["draft_fields"]["合同编号"] == "HT-001"
+    assert res["next_step"]["arguments"]["record_id"] == "rec_contract_1"
+
+
+@pytest.mark.asyncio
+async def test_prepare_create_uses_recent_weekly_plan_for_append_phrase(mock_config, mock_client, tmp_path):
+    workspace_registry = tmp_path / "skills" / "table_registry.yaml"
+    workspace_registry.parent.mkdir(parents=True, exist_ok=True)
+    workspace_registry.write_text(
+        """
+version: 1
+tables:
+  weekly_plan:
+    app_token: app123
+    table_id: tbl_week
+    display_name: 团队周工作计划表
+    aliases: [周计划, 周报表, 本周工作]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    tool = BitablePrepareCreateTool(config=mock_config, client=mock_client, workspace=tmp_path)
+    tool.set_runtime_context(
+        "feishu",
+        "ou_chat",
+        "ou_user",
+        {
+            "recent_object_focus": "weekly_plan",
+            "recent_selected_table": {"table_id": "tbl_week", "name": "团队周工作计划表"},
+            "recent_weekly_plan_objects": [
+                {
+                    "display_label": "房怡康 / 本周",
+                    "identity_strategy": ["姓名", "周次"],
+                    "identity_values": {"姓名": "房怡康", "周次": "本周"},
+                    "record_id": "rec_week_1",
+                }
+            ],
+        },
+    )
+    mock_client.request.side_effect = [
+        {"data": {"items": [{"table_id": "tbl_week", "name": "团队计划主表"}]}},
+        {
+            "data": {
+                "items": [
+                    {"field_id": "fld_owner", "field_name": "姓名", "type": 11, "property": {}},
+                    {"field_id": "fld_week", "field_name": "周次", "type": 1, "property": {}},
+                    {"field_id": "fld_content", "field_name": "工作内容", "type": 1, "property": {}},
+                ]
+            }
+        },
+        {"data": {"items": [{"record_id": "rec_week_1", "fields": {"姓名": "房怡康", "周次": "本周"}}]}},
+    ]
+
+    res = json.loads(await tool.execute(request_text="那条周计划再补一句：整理合同台账", app_token="app123"))
+
+    assert res["draft_fields"]["姓名"] == "房怡康"
+    assert res["draft_fields"]["周次"] == "本周"
+    assert res["draft_fields"]["工作内容"] == "整理合同台账"
+    assert res["next_step"]["arguments"]["record_id"] == "rec_week_1"
+
+
+@pytest.mark.asyncio
 async def test_prepare_create_bubbles_field_fetch_error(mock_config, mock_client):
     tool = BitablePrepareCreateTool(config=mock_config, client=mock_client)
     mock_client.request.side_effect = [

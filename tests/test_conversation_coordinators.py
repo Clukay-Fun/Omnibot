@@ -142,6 +142,46 @@ class _FakePrepareCreateAmbiguousRecordTool(Tool):
         )
 
 
+class _FakePrepareCreateCaseUpdateTool(Tool):
+    @property
+    def name(self) -> str:
+        return "bitable_prepare_create"
+
+    @property
+    def description(self) -> str:
+        return "fake prepare create with matched case record"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return json.dumps(
+            {
+                "request_text": "更新案件，案号 (2026)京01民初123号，案件状态 已立案",
+                "needs_table_confirmation": False,
+                "selected_table": {"table_id": "tbl_case", "name": "案件项目总库"},
+                "profile": {"display_name": "案件项目总库", "aliases": ["案件项目总库", "案件库"]},
+                "draft_fields": {"案号": "(2026)京01民初123号", "案件状态": "已立案"},
+                "identity_strategy": ["案号"],
+                "record_lookup": {
+                    "attempted": True,
+                    "matched": 1,
+                    "records": [{"record_id": "rec_case_1", "fields": {"案号": "(2026)京01民初123号"}}],
+                },
+                "operation_guess": "update_existing",
+                "needs_record_confirmation": False,
+                "next_step": {
+                    "tool": "bitable_update",
+                    "mode": "dry_run",
+                    "arguments": {"table_id": "tbl_case", "record_id": "rec_case_1", "fields": {"案件状态": "已立案"}},
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
 class _FakeUpdateTool(Tool):
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -438,3 +478,49 @@ async def test_result_selection_coordinator_executes_selected_record_update_prev
     pending = refreshed.metadata.get("pending_write") or {}
     assert pending["tool"] == "bitable_update"
     assert pending["args"]["record_id"] == "rec_contract_1"
+
+
+@pytest.mark.asyncio
+async def test_prepare_create_stores_recent_case_object_history(tmp_path) -> None:
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=_ToolCallingProvider(),
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    loop.tools.register(_FakePrepareCreateCaseUpdateTool())
+    loop.tools.register(_FakeUpdateTool())
+
+    await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="更新案件，案号 (2026)京01民初123号，案件状态 已立案")
+    )
+
+    session = loop.sessions.get_or_create("feishu:ou_chat")
+    history = session.metadata.get("recent_case_objects") or []
+    assert history[0]["record_id"] == "rec_case_1"
+    assert history[0]["identity_values"]["案号"] == "(2026)京01民初123号"
+
+
+@pytest.mark.asyncio
+async def test_reference_resolution_coordinator_reads_recent_contract_history(tmp_path) -> None:
+    loop = _build_loop(tmp_path)
+    session = loop.sessions.get_or_create("feishu:ou_chat")
+    session.metadata["recent_contract_objects"] = [
+        {"display_label": "HT-001 / 星火科技", "record_id": "rec_contract_1"},
+        {"display_label": "HT-000 / 老合同", "record_id": "rec_contract_0"},
+    ]
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="刚才那个合同是什么")
+    )
+
+    assert response is not None
+    assert "HT-001 / 星火科技" in response.content
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="上一个合同是什么")
+    )
+
+    assert response is not None
+    assert "HT-000 / 老合同" in response.content

@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.coordinators.base import AgentCoordinator, CoordinatorToolResult
+from nanobot.agent.object_memory import build_object_entry, push_recent_object
 from nanobot.agent.pending_write import extract_json_object
 from nanobot.agent.tools.registry import ToolExposureContext
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -105,6 +106,17 @@ class ResultSelectionCoordinator(AgentCoordinator):
             selected = payload.get("selected_table") if isinstance(payload.get("selected_table"), dict) else None
             if selected:
                 self._set_metadata(session, recent_selected_table=dict(selected))
+            object_entry = build_object_entry(
+                selected_table=selected,
+                profile=payload.get("profile") if isinstance(payload.get("profile"), dict) else None,
+                draft_fields=payload.get("draft_fields") if isinstance(payload.get("draft_fields"), dict) else None,
+                identity_strategy=payload.get("identity_strategy") if isinstance(payload.get("identity_strategy"), list) else None,
+                record_lookup=payload.get("record_lookup") if isinstance(payload.get("record_lookup"), dict) else None,
+                operation_guess=str(payload.get("operation_guess") or ""),
+            )
+            if object_entry is not None:
+                metadata = push_recent_object(dict(session.metadata or {}), object_entry)
+                session.metadata = metadata
             if payload.get("needs_table_confirmation") and isinstance(payload.get("candidates"), list):
                 candidates = [dict(item) for item in payload.get("candidates", []) if isinstance(item, dict)]
                 if candidates:
@@ -142,6 +154,8 @@ class ResultSelectionCoordinator(AgentCoordinator):
                             "tool": "bitable_update",
                             "app_token": str(raw_args.get("app_token") or ""),
                             "table_id": str((selected or {}).get("table_id") or ""),
+                            "table_name": str((selected or {}).get("name") or ""),
+                            "profile": dict(payload.get("profile") or {}) if isinstance(payload.get("profile"), dict) else {},
                             "draft_fields": dict(payload.get("draft_fields") or {}),
                             "identity_strategy": [
                                 str(item).strip()
@@ -240,6 +254,16 @@ class ResultSelectionCoordinator(AgentCoordinator):
                 result_selection={},
                 record_selection_action={},
             )
+            object_entry = build_object_entry(
+                selected_table={"table_id": table_id, "name": str(action.get("table_name") or "")},
+                profile=dict(action.get("profile") or {}) if isinstance(action.get("profile"), dict) else None,
+                draft_fields=draft_fields,
+                identity_strategy=list(identity_strategy),
+                record_lookup={"records": [{"record_id": record_id}]},
+                operation_guess="update_existing",
+            )
+            if object_entry is not None:
+                session.metadata = push_recent_object(dict(session.metadata or {}), object_entry)
         else:
             return None
 

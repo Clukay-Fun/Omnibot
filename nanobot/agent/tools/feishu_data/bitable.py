@@ -12,6 +12,13 @@ from typing import Any, cast
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.object_memory import (
+    is_generic_recent_object_reference,
+    is_recent_object_reference,
+    object_kind_for_payload,
+    recent_object_focus,
+    resolve_recent_object_reference,
+)
 from nanobot.agent.skill_runtime.table_registry import TableRegistry
 from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
 from nanobot.agent.skill_runtime.table_profile_cache import schema_hash_for_fields
@@ -1001,6 +1008,38 @@ class BitablePrepareCreateTool(Tool):
         self._field_tool = BitableListFieldsTool(config, client)
         self._search_tool = BitableSearchTool(config, client)
         self._table_registry = TableRegistry(workspace=workspace, profile_synthesizer=profile_synthesizer)
+        self._runtime_metadata: dict[str, Any] = {}
+
+    def set_runtime_context(
+        self,
+        channel: str,
+        chat_id: str,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _ = (channel, chat_id, sender_id)
+        self._runtime_metadata = dict(metadata or {})
+
+    def set_turn_runtime(self, runtime: Any) -> None:
+        self.set_runtime_context(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
+
+    def _reference_query_hint(self, request_text: str, table_hint: str) -> str:
+        if table_hint:
+            return table_hint
+        if not is_generic_recent_object_reference(request_text):
+            return request_text
+        selected_table = self._runtime_metadata.get("recent_selected_table") if isinstance(self._runtime_metadata.get("recent_selected_table"), dict) else {}
+        table_name = str(selected_table.get("name") or selected_table.get("table_name") or "").strip()
+        if table_name:
+            return table_name
+        focus = recent_object_focus(self._runtime_metadata)
+        if focus == "case":
+            return "案件项目总库"
+        if focus == "contract":
+            return "合同管理"
+        if focus == "weekly_plan":
+            return "团队周工作计划表"
+        return request_text
 
     @staticmethod
     def _field_name_for_role(profile: dict[str, Any], *roles: str) -> str | None:
@@ -1151,6 +1190,31 @@ class BitablePrepareCreateTool(Tool):
             normalized[field_name] = value
         return normalized
 
+    def _merge_recent_object_identity(
+        self,
+        *,
+        request_text: str,
+        profile: dict[str, Any],
+        draft_fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        kind = object_kind_for_payload(profile=profile, table=None)
+        if not kind:
+            return draft_fields
+        focus = recent_object_focus(self._runtime_metadata)
+        explicit_ref = is_recent_object_reference(request_text, kind=kind)
+        generic_ref = is_generic_recent_object_reference(request_text) and focus == kind
+        if not explicit_ref and not generic_ref:
+            return draft_fields
+        resolved = resolve_recent_object_reference(self._runtime_metadata, kind=kind, text=request_text)
+        if not isinstance(resolved, dict):
+            return draft_fields
+        identity_values = resolved.get("identity_values") if isinstance(resolved.get("identity_values"), dict) else {}
+        merged = dict(draft_fields)
+        for field_name, value in identity_values.items():
+            if field_name not in merged and value not in (None, "", [], {}):
+                merged[str(field_name)] = value
+        return merged
+
     @staticmethod
     def _operation_from_lookup(
         *,
@@ -1290,7 +1354,7 @@ class BitablePrepareCreateTool(Tool):
         if not request_text:
             return json.dumps({"error": "Missing request_text."}, ensure_ascii=False)
 
-        query = table_hint or request_text
+        query = self._reference_query_hint(request_text, table_hint)
         matched_payload = json.loads(
             await self._match_tool.execute(query=query, app_token=app_token, limit=candidate_limit)
         )
@@ -1366,6 +1430,9 @@ class BitablePrepareCreateTool(Tool):
         )
         if isinstance(profile, dict) and draft_fields:
             draft_fields = self._normalize_draft_fields(draft_fields=draft_fields, profile=profile, fields=fields)
+            draft_fields = self._merge_recent_object_identity(request_text=request_text, profile=profile, draft_fields=draft_fields)
+        elif isinstance(profile, dict):
+            draft_fields = self._merge_recent_object_identity(request_text=request_text, profile=profile, draft_fields=draft_fields)
         identity_fields = self._select_identity_strategy(profile, draft_fields) if isinstance(profile, dict) else []
         missing_identity_fields = [field_name for field_name in identity_fields if field_name not in draft_fields]
         record_lookup = await self._lookup_existing_records(

@@ -141,6 +141,15 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 names = [name for name in names if name]
                 if names:
                     lines.append(f"Recent Directory Hits: {', '.join(names)}")
+            for label, objects in (
+                ("Recent Cases", runtime.recent_case_objects[:3]),
+                ("Recent Contracts", runtime.recent_contract_objects[:3]),
+                ("Recent Weekly Plans", runtime.recent_weekly_plan_objects[:3]),
+            ):
+                summaries = [str(item.get("display_label") or item.get("record_id") or "").strip() for item in objects]
+                summaries = [item for item in summaries if item]
+                if summaries:
+                    lines.append(f"{label}: {'; '.join(summaries)}")
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
     def _resolve_workspace_files(self, runtime: PromptContext) -> list[Path]:
