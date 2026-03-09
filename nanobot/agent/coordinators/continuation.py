@@ -49,11 +49,17 @@ class ContinuationCoordinator(AgentCoordinator):
         return "\n".join(lines)
 
     @staticmethod
-    def _format_selection_options(selection: dict[str, Any], items: list[dict[str, Any]], *, remaining: int = 0) -> str:
+    def _format_selection_options(
+        selection: dict[str, Any],
+        items: list[dict[str, Any]],
+        *,
+        remaining: int = 0,
+        start_index: int = 1,
+    ) -> str:
         kind = str(selection.get("kind") or "options")
         title = "继续展示候选项：" if kind == "table_candidates" else "继续展示可选项："
         lines = [title]
-        for idx, item in enumerate(items, start=1):
+        for idx, item in enumerate(items, start=start_index):
             label = str(item.get("name") or item.get("display_name") or item.get("table_id") or item.get("open_id") or "未命名项")
             lines.append(f"- {idx}. {label}")
         if remaining > 0:
@@ -74,11 +80,17 @@ class ContinuationCoordinator(AgentCoordinator):
             items = [dict(item) for item in selection.get("items", []) if isinstance(item, dict)]
             if offset < len(items):
                 next_items = items[offset : offset + page_size]
+                start_index = offset + 1
                 selection["offset"] = min(len(items), offset + page_size)
                 metadata["result_selection"] = selection
                 session.metadata = metadata
                 remaining = max(0, len(items) - int(selection["offset"]))
-                content = self._format_selection_options(selection, next_items, remaining=remaining)
+                content = self._format_selection_options(
+                    selection,
+                    next_items,
+                    remaining=remaining,
+                    start_index=start_index,
+                )
                 self._record_direct_turn(session, msg, content)
                 self._loop.sessions.save(session)
                 return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})

@@ -44,6 +44,12 @@ def safe_filename(name: str) -> str:
 
 def migrate_legacy_path(source: Path, target: Path, *, related_suffixes: tuple[str, ...] = ()) -> bool:
     """Move a legacy runtime file and optional sidecars if target does not exist."""
+
+    def _related_path(path: Path, suffix: str) -> Path:
+        if suffix.startswith(".sqlite3"):
+            return path.with_suffix(suffix)
+        return Path(f"{path}{suffix}")
+
     try:
         if source.resolve() == target.resolve():
             return False
@@ -57,8 +63,8 @@ def migrate_legacy_path(source: Path, target: Path, *, related_suffixes: tuple[s
     shutil.move(str(source), str(target))
 
     for suffix in related_suffixes:
-        legacy_path = Path(f"{source}{suffix}")
-        target_path = Path(f"{target}{suffix}")
+        legacy_path = _related_path(source, suffix)
+        target_path = _related_path(target, suffix)
         if not legacy_path.exists() or target_path.exists():
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
