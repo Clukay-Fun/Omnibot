@@ -128,6 +128,12 @@ class _BitableWriteToolBase(Tool):
         self._directory_config_cache = load_directory_config(self._workspace)
         return dict(self._directory_config_cache)
 
+    def _record_url(self, *, app_token: str, table_id: str, record_id: str) -> str:
+        domain = str(self.config.bitable.domain or "").strip().rstrip("/")
+        if not domain or not app_token or not table_id or not record_id:
+            return ""
+        return f"{domain}/base/{app_token}?table={table_id}&record={record_id}"
+
     def _ensure_person_resolver(self) -> BitablePersonResolver | None:
         directory = self._directory_config()
         if self._person_resolver is None:
@@ -347,9 +353,11 @@ class BitableCreateTool(_BitableWriteToolBase):
         try:
             res = await self.client.request("POST", path, json_body={"fields": fields})
             record = res.get("data", {}).get("record", {})
+            record_id = str(record.get("record_id") or "").strip()
             return json.dumps({
                 "success": True,
-                "record_id": record.get("record_id"),
+                "record_id": record_id,
+                "record_url": self._record_url(app_token=app_token, table_id=table_id, record_id=record_id),
                 "fields": record.get("fields", {}),
             }, ensure_ascii=False)
         except Exception as e:
@@ -455,9 +463,11 @@ class BitableUpdateTool(_BitableWriteToolBase):
         try:
             res = await self.client.request("PUT", path, json_body={"fields": fields})
             record = res.get("data", {}).get("record", {})
+            resolved_record_id = str(record.get("record_id", record_id) or "").strip()
             return json.dumps({
                 "success": True,
-                "record_id": record.get("record_id", record_id),
+                "record_id": resolved_record_id,
+                "record_url": self._record_url(app_token=app_token, table_id=table_id, record_id=resolved_record_id),
                 "fields": record.get("fields", {}),
             }, ensure_ascii=False)
         except Exception as e:

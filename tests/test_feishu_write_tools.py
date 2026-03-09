@@ -134,6 +134,7 @@ async def test_create_dry_run(mock_config, mock_client, store):
 @pytest.mark.asyncio
 async def test_create_confirm(mock_config, mock_client, store):
     """传入正确 confirm_token 时应执行实际写入。"""
+    mock_config.bitable.domain = "https://example.feishu.cn"
     tool = BitableCreateTool(config=mock_config, client=mock_client, store=store)
     mock_client.request.side_effect = [
         {"data": {"items": []}},
@@ -148,6 +149,7 @@ async def test_create_confirm(mock_config, mock_client, store):
     res = json.loads(await tool.execute(fields={"Name": "Alice"}, confirm_token=token))
     assert res["success"] is True
     assert res["record_id"] == "rec_new"
+    assert res["record_url"] == "https://example.feishu.cn/base/app123?table=tbl456&record=rec_new"
     assert mock_client.request.call_count == 2
 
 
@@ -159,6 +161,25 @@ async def test_create_invalid_token(mock_config, mock_client, store):
     res = json.loads(await tool.execute(fields={"Name": "Alice"}, confirm_token="bad_token"))
     assert "error" in res
     mock_client.request.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_confirm_returns_record_url(mock_config, mock_client, store):
+    mock_config.bitable.domain = "https://example.feishu.cn"
+    tool = BitableUpdateTool(config=mock_config, client=mock_client, store=store)
+    mock_client.request.side_effect = [
+        {"data": {"items": []}},
+        {"data": {"record": {"record_id": "rec_upd", "fields": {"Name": "Alice Updated"}}}},
+    ]
+
+    dry = json.loads(await tool.execute(record_id="rec_upd", fields={"Name": "Alice Updated"}))
+    token = dry["confirm_token"]
+
+    res = json.loads(await tool.execute(record_id="rec_upd", fields={"Name": "Alice Updated"}, confirm_token=token))
+
+    assert res["success"] is True
+    assert res["record_id"] == "rec_upd"
+    assert res["record_url"] == "https://example.feishu.cn/base/app123?table=tbl456&record=rec_upd"
 
 
 @pytest.mark.asyncio
