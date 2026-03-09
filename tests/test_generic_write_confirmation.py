@@ -202,10 +202,16 @@ def _build_loop(tmp_path, provider: _ScriptedProvider) -> AgentLoop:
 class _CoordinatorOnlyProvider:
     def __init__(self) -> None:
         self.calls = 0
+        self.last_tool_names: list[str] = []
 
     async def chat(self, **kwargs: Any) -> LLMResponse:
-        _ = kwargs
         self.calls += 1
+        tools = kwargs.get("tools") or []
+        self.last_tool_names = [
+            str(tool.get("function", {}).get("name") or "")
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
         return LLMResponse(content="llm-fallback", tool_calls=[])
 
     def get_default_model(self) -> str:
@@ -221,7 +227,7 @@ class _StubCoordinator(AgentCoordinator):
 
 
 @pytest.mark.asyncio
-async def test_loop_runs_registered_coordinator_before_llm(tmp_path) -> None:
+async def test_loop_ignores_registered_coordinator_during_normal_message_routing(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -236,12 +242,12 @@ async def test_loop_runs_registered_coordinator_before_llm(tmp_path) -> None:
     )
 
     assert response is not None
-    assert response.content == "handled by coordinator"
-    assert provider.calls == 0
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_contact_query_coordinator_short_circuits_directory_list_without_llm(tmp_path) -> None:
+async def test_directory_query_reaches_main_llm_without_coordinator_short_circuit(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -257,13 +263,14 @@ async def test_contact_query_coordinator_short_circuits_directory_list_without_l
     )
 
     assert response is not None
-    assert "房怡康" in response.content
-    assert provider.calls == 0
-    assert directory_tool.calls == [{"limit": 10}]
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+    assert provider.last_tool_names == ["bitable_directory_search"]
+    assert directory_tool.calls == []
 
 
 @pytest.mark.asyncio
-async def test_contact_query_coordinator_short_circuits_named_lookup_without_llm(tmp_path) -> None:
+async def test_named_lookup_reaches_main_llm_without_coordinator_short_circuit(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -279,9 +286,9 @@ async def test_contact_query_coordinator_short_circuits_named_lookup_without_llm
     )
 
     assert response is not None
-    assert "ou_fang" in response.content
-    assert provider.calls == 0
-    assert directory_tool.calls == [{"keyword": "房怡康", "limit": 5}]
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
+    assert directory_tool.calls == []
 
 
 @pytest.mark.asyncio
@@ -469,23 +476,8 @@ async def test_prepare_create_auto_executes_suggested_create_without_second_llm_
 
 
 @pytest.mark.asyncio
-async def test_semantic_followup_replays_recent_write_request_into_prepare_create(tmp_path) -> None:
-    provider = _ScriptedProvider(
-        [
-            LLMResponse(
-                content=json.dumps(
-                    {
-                        "action": "execute_previous_write",
-                        "confident": True,
-                        "context_index": 0,
-                        "merged_request": "",
-                    },
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            )
-        ]
-    )
+async def test_recent_write_context_no_longer_replays_before_main_llm(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -529,10 +521,10 @@ async def test_semantic_followup_replays_recent_write_request_into_prepare_creat
     )
 
     assert response is not None
-    assert "确认" in response.content
+    assert response.content == "llm-fallback"
     assert provider.calls == 1
-    assert prepare_tool.calls == [{"request_text": "新增合同，合同编号 HT-001，乙方 星火科技", "table_hint": "合同管理"}]
-    assert create_tool.calls == [{"table_id": "tbl_contract", "fields": {"合同编号": "HT-001"}}]
+    assert prepare_tool.calls == []
+    assert create_tool.calls == []
 
 
 @pytest.mark.asyncio
@@ -559,23 +551,8 @@ async def test_followup_without_replayable_context_falls_back_to_normal_flow(tmp
 
 
 @pytest.mark.asyncio
-async def test_semantic_followup_lists_candidates_when_multiple_write_contexts_exist(tmp_path) -> None:
-    provider = _ScriptedProvider(
-        [
-            LLMResponse(
-                content=json.dumps(
-                    {
-                        "action": "execute_previous_write",
-                        "confident": True,
-                        "context_index": None,
-                        "merged_request": "",
-                    },
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            )
-        ]
-    )
+async def test_multiple_write_contexts_no_longer_prompt_local_candidate_selection(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -608,41 +585,13 @@ async def test_semantic_followup_lists_candidates_when_multiple_write_contexts_e
     )
 
     assert response is not None
-    assert "你最近提到了多条待继续的写入" in response.content
-    assert "合同管理" in response.content
-    assert "案件项目总库" in response.content
+    assert response.content == "llm-fallback"
+    assert provider.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_semantic_followup_replays_selected_candidate_after_listing(tmp_path) -> None:
-    provider = _ScriptedProvider(
-        [
-            LLMResponse(
-                content=json.dumps(
-                    {
-                        "action": "execute_previous_write",
-                        "confident": True,
-                        "context_index": None,
-                        "merged_request": "",
-                    },
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            ),
-            LLMResponse(
-                content=json.dumps(
-                    {
-                        "action": "execute_previous_write",
-                        "confident": True,
-                        "context_index": 0,
-                        "merged_request": "",
-                    },
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            ),
-        ]
-    )
+async def test_numeric_followup_no_longer_replays_selected_write_context(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
@@ -697,28 +646,18 @@ async def test_semantic_followup_replays_selected_candidate_after_listing(tmp_pa
     )
 
     assert response is not None
-    assert "确认" in response.content
-    assert prepare_tool.calls[-1]["request_text"] == "更新案件，案号 (2026)京01民初123号"
-    assert create_tool.calls[-1]["table_id"] == "tbl_case"
+    assert response.content == "llm-fallback"
+    assert provider.calls == 2
+    assert prepare_tool.calls == []
+    assert create_tool.calls == []
 
 
 @pytest.mark.asyncio
-async def test_write_promise_context_is_recorded_and_replayed_on_semantic_followup(tmp_path) -> None:
+async def test_write_promise_context_is_recorded_but_not_replayed_deterministically(tmp_path) -> None:
     provider = _ScriptedProvider(
         [
             LLMResponse(content="收到，我现在创建。成功后我只回你 record URL。", tool_calls=[]),
-            LLMResponse(
-                content=json.dumps(
-                    {
-                        "action": "execute_previous_write",
-                        "confident": True,
-                        "context_index": 0,
-                        "merged_request": "",
-                    },
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            ),
+            LLMResponse(content="llm-followup", tool_calls=[]),
         ]
     )
     loop = _build_loop(tmp_path, provider)
@@ -747,15 +686,17 @@ async def test_write_promise_context_is_recorded_and_replayed_on_semantic_follow
     )
     assert first is not None
     assert "我现在创建" in first.content
+    session = loop.sessions.get_or_create("cli:chat")
+    assert session.metadata.get("recent_write_contexts")
 
     second = await loop._process_message(
         InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="创建记录")
     )
 
     assert second is not None
-    assert "确认" in second.content
-    assert prepare_tool.calls[-1]["request_text"] == "新增合同，合同编号 HT-001"
-    assert create_tool.calls[-1]["table_id"] == "tbl_contract"
+    assert second.content == "llm-followup"
+    assert prepare_tool.calls == []
+    assert create_tool.calls == []
 
 
 @pytest.mark.asyncio

@@ -16,12 +16,8 @@ from loguru import logger
 
 from nanobot.agent.coordinators import (
     AgentCoordinator,
-    ContactQueryCoordinator,
     ContinuationCoordinator,
     PendingWriteCoordinator,
-    ReferenceResolutionCoordinator,
-    ResultSelectionCoordinator,
-    WriteFollowupCoordinator,
 )
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
@@ -300,20 +296,15 @@ class AgentLoop:
         self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
         self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
+        self._pending_write_coordinator = PendingWriteCoordinator(self)
+        self._continuation_coordinator = ContinuationCoordinator(self)
         self._coordinators: list[AgentCoordinator] = self._build_coordinators()
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
         self._init_skillspec_runtime()
 
     def _build_coordinators(self) -> list[AgentCoordinator]:
-        return [
-            PendingWriteCoordinator(self),
-            WriteFollowupCoordinator(self),
-            ContactQueryCoordinator(self),
-            ContinuationCoordinator(self),
-            ResultSelectionCoordinator(self),
-            ReferenceResolutionCoordinator(self),
-        ]
+        return [self._pending_write_coordinator]
 
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
@@ -2807,16 +2798,42 @@ class AgentLoop:
                                   content="New session started.")
 
         workflow_mode = self._workflow_mode(session)
+        if raw_cmd.startswith("/skill"):
+            if workflow_mode == "plan":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="当前是 plan 模式：我只做分析和规划，不执行 skill 或工具。需要实际操作请先发 /build。",
+                )
+            if self._skillspec_runtime:
+                skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
+                if skillspec_result.handled:
+                    rendered = skillspec_result.content
+                    if self._should_rewrite_skillspec_result(skillspec_result.metadata):
+                        rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
+                    self.sessions.save(session)
+                    outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
+                    outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
+                    if skillspec_result.reply_chat_id:
+                        for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
+                            outbound_metadata.pop(key, None)
+                        outbound_metadata["_reply_in_thread"] = False
+                    outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=outbound_chat_id,
+                        content=rendered,
+                        metadata=outbound_metadata,
+                    )
         if workflow_mode != "plan":
-            pending_outbound = await self._run_coordinators(msg, session=session)
+            pending_outbound = await self._pending_write_coordinator.handle(msg=msg, session=session)
             if pending_outbound is not None:
+                self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "message")
                 return pending_outbound
-        elif raw_cmd.startswith("/skill"):
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content="当前是 plan 模式：我只做分析和规划，不执行 skill 或工具。需要实际操作请先发 /build。",
-            )
+            continuation_outbound = await self._continuation_coordinator.handle(msg=msg, session=session)
+            if continuation_outbound is not None:
+                self._log_coordinator_hit(self._continuation_coordinator.name, session.key, "message")
+                return continuation_outbound
 
         if workflow_mode != "plan" and self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
@@ -2837,27 +2854,6 @@ class AgentLoop:
                 content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
-
-        if workflow_mode != "plan" and self._skillspec_runtime:
-            skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
-            if skillspec_result.handled:
-                rendered = skillspec_result.content
-                if self._should_rewrite_skillspec_result(skillspec_result.metadata):
-                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
-                self.sessions.save(session)
-                outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
-                outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
-                if skillspec_result.reply_chat_id:
-                    for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
-                        outbound_metadata.pop(key, None)
-                    outbound_metadata["_reply_in_thread"] = False
-                outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=outbound_chat_id,
-                    content=rendered,
-                    metadata=outbound_metadata,
-                )
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
