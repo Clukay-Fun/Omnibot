@@ -4,7 +4,7 @@ import json
 import re
 from datetime import UTC, datetime, time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from nanobot.agent.tools.base import Tool
@@ -15,6 +15,9 @@ from nanobot.agent.tools.feishu_data.directory_config import load_directory_conf
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver
 from nanobot.config.schema import FeishuDataConfig
+
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 # region [写入工具]
 
@@ -111,6 +114,9 @@ class _BitableWriteToolBase(Tool):
         self._runtime_chat_id = chat_id or ""
         self._runtime_sender_id = sender_id or ""
         self._runtime_metadata = dict(metadata or {})
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self.set_runtime_context(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
 
     def _directory_config(self) -> dict[str, Any]:
         if self._directory_config_cache is not None:

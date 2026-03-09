@@ -14,7 +14,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
-from nanobot.agent.coordinators import AgentCoordinator, PendingWriteCoordinator
+from nanobot.agent.coordinators import (
+    AgentCoordinator,
+    ContactQueryCoordinator,
+    ContinuationCoordinator,
+    PendingWriteCoordinator,
+    ReferenceResolutionCoordinator,
+    ResultSelectionCoordinator,
+)
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
@@ -29,6 +36,7 @@ from nanobot.agent.skill_runtime import (
     UserMemoryStore,
 )
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.turn_runtime import TurnRuntime
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -295,7 +303,13 @@ class AgentLoop:
         self._init_skillspec_runtime()
 
     def _build_coordinators(self) -> list[AgentCoordinator]:
-        return [PendingWriteCoordinator(self)]
+        return [
+            PendingWriteCoordinator(self),
+            ContactQueryCoordinator(self),
+            ContinuationCoordinator(self),
+            ResultSelectionCoordinator(self),
+            ReferenceResolutionCoordinator(self),
+        ]
 
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
@@ -357,26 +371,19 @@ class AgentLoop:
         source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
         if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
             purpose = "bootstrap"
-        return PromptContext(
+        runtime = TurnRuntime.from_message(
+            msg,
+            session=None,
             purpose=purpose,
-            channel=msg.channel,
-            chat_id=msg.chat_id,
-            sender_id=msg.sender_id,
-            session_key=session_key or msg.session_key,
-            metadata=dict(msg.metadata or {}),
+            mode="",
         )
+        if session_key:
+            runtime.session_key = session_key
+        return runtime.to_prompt_context()
 
     @staticmethod
     def _prompt_context_from_session(session: Session) -> PromptContext:
-        metadata = dict(session.metadata or {})
-        return PromptContext(
-            purpose="chat",
-            channel=str(metadata.get("channel") or "") or None,
-            chat_id=str(metadata.get("chat_id") or "") or None,
-            sender_id=str(metadata.get("sender_id") or "") or None,
-            session_key=session.key,
-            metadata=metadata,
-        )
+        return TurnRuntime.from_session(session).to_prompt_context()
 
     @staticmethod
     def _remember_session_runtime_metadata(session: Session, msg: InboundMessage) -> None:
@@ -387,11 +394,26 @@ class AgentLoop:
         metadata["sender_id"] = msg.sender_id
         metadata["chat_type"] = str(msg_metadata.get("chat_type") or "")
 
+        for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id", "quoted_bot_summary"):
+            value = msg_metadata.get(key)
+            if isinstance(value, str):
+                value = value.strip()
+            if value not in (None, ""):
+                metadata[key] = value
+            else:
+                metadata.pop(key, None)
+
+        quoted_summary = str(metadata.get("quoted_bot_summary") or "").strip()
+        referenced_id = str(msg_metadata.get("upper_message_id") or msg_metadata.get("parent_id") or msg_metadata.get("root_id") or "").strip()
+        if quoted_summary:
+            metadata["referenced_message"] = {
+                "message_id": referenced_id,
+                "summary": quoted_summary,
+            }
+
         thread_id = str(msg_metadata.get("thread_id") or msg_metadata.get("root_id") or "").strip()
         if thread_id:
             metadata["thread_id"] = thread_id
-        else:
-            metadata.pop("thread_id", None)
 
         session.metadata = metadata
 
@@ -1505,26 +1527,28 @@ class AgentLoop:
 
     # region [工具与执行辅助方法]
 
-    def _set_tool_context(
-        self,
-        channel: str,
-        chat_id: str,
-        message_id: str | None = None,
-        sender_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
+    def _set_tool_context(self, runtime: TurnRuntime) -> None:
         """为所有需要路由信息的工具更新上下文。"""
         for name in ("message", "spawn", "cron"):
             if tool := self.tools.get(name):
+                runtime_setter = getattr(tool, "set_turn_runtime", None)
+                if callable(runtime_setter):
+                    runtime_setter(runtime)
+                    continue
                 setter = getattr(tool, "set_context", None)
                 if callable(setter):
-                    setter(channel, chat_id, *([message_id] if name == "message" else []))
+                    message_id = str(runtime.metadata.get("message_id") or "").strip() or None
+                    setter(runtime.channel, runtime.chat_id, *([message_id] if name == "message" else []))
         for tool_name in self.tools.tool_names:
             tool = self.tools.get(tool_name)
             if tool is not None:
+                runtime_setter = getattr(tool, "set_turn_runtime", None)
+                if callable(runtime_setter):
+                    runtime_setter(runtime)
+                    continue
                 runtime_setter = getattr(tool, "set_runtime_context", None)
                 if callable(runtime_setter):
-                    runtime_setter(channel, chat_id, sender_id, metadata)
+                    runtime_setter(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
 
     @staticmethod
     def _strip_think(text: str | None) -> str | None:
@@ -1620,6 +1644,7 @@ class AgentLoop:
         for coordinator in self._coordinators:
             outbound = await coordinator.handle(msg=msg, session=session)
             if outbound is not None:
+                self._log_coordinator_hit(coordinator.name, session.key, "message")
                 return outbound
         return None
 
@@ -1641,21 +1666,74 @@ class AgentLoop:
                 result=result,
             )
             if captured is not None:
+                self._log_coordinator_hit(coordinator.name, session.key, "tool_result")
                 return captured.final_content
         return None
 
     @staticmethod
+    def _log_coordinator_hit(name: str, session_key: str, source: str) -> None:
+        logger.info("Coordinator hit: {} session={} source={}", name, session_key, source)
+
+    @staticmethod
     def _tool_exposure_context_for_message(msg: InboundMessage, *, session: Session | None = None) -> ToolExposureContext:
         metadata = dict(msg.metadata or {})
+        text = msg.content.strip().lower()
         pending_write = False
         if session is not None:
             pending_write = isinstance(session.metadata.get("pending_write"), dict)
+        mode = ""
+        if msg.channel == "feishu":
+            if pending_write:
+                mode = "main_write_commit"
+            elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
+                mode = "main_write_prepare"
+            elif any(
+                token in text
+                for token in (
+                    "通讯录",
+                    "联系人",
+                    "同事",
+                    "open_id",
+                    "邮箱",
+                    "手机号",
+                    "电话",
+                    "表格",
+                    "多维表格",
+                    "bitable",
+                    "字段",
+                    "schema",
+                    "视图",
+                    "table_id",
+                    "日历",
+                    "日程",
+                    "会议",
+                    "空闲",
+                    "任务",
+                    "待办",
+                    "聊天记录",
+                    "消息历史",
+                )
+            ) or re.match(r"^\s*(?:帮我)?(?:查|找|搜)(?:一下)?\s*[\w.@\-\u4e00-\u9fff]{2,40}\s*$", msg.content):
+                mode = "main_feishu_query"
+            else:
+                mode = "main_chat_readonly"
         return ToolExposureContext(
             channel=msg.channel,
             user_text=msg.content,
             metadata=metadata,
             pending_write=pending_write,
+            mode=mode,
         )
+
+    @staticmethod
+    def _turn_runtime_for_message(
+        msg: InboundMessage,
+        *,
+        session: Session | None = None,
+        purpose: str = "chat",
+        mode: str = "",
+    ) -> TurnRuntime:
+        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, purpose), mode=mode)
 
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
@@ -1979,7 +2057,7 @@ class AgentLoop:
                     tool_started = time.perf_counter()
                     tool_heartbeat_task = _start_stage_heartbeat(f"tool:{tool_call.name}", tool_started)
                     try:
-                        result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                        result = await self.tools.execute(tool_call.name, tool_call.arguments, exposure=tool_exposure)
                     finally:
                         await _stop_stage_heartbeat(tool_heartbeat_task)
                     tool_duration_ms = int((time.perf_counter() - tool_started) * 1000)
@@ -2495,21 +2573,16 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(
-                channel,
-                chat_id,
-                msg.metadata.get("message_id"),
-                sender_id=msg.sender_id,
-                metadata=msg.metadata,
-            )
+            tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
+            turn_runtime = self._turn_runtime_for_message(msg, session=session, mode=tool_exposure.mode)
+            self._set_tool_context(turn_runtime)
             history = session.get_history(max_messages=self.memory_window)
-            prompt_context = PromptContext(purpose="chat", channel=channel, chat_id=chat_id, metadata=dict(msg.metadata or {}))
+            prompt_context = turn_runtime.to_prompt_context()
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content, channel=channel, chat_id=chat_id,
                 runtime=prompt_context,
             )
-            tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
             turn_started = time.perf_counter()
             final_content, _, all_msgs, timings = await self._run_agent_loop(
                 messages,
@@ -2667,19 +2740,15 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(
-            msg.channel,
-            msg.chat_id,
-            msg.metadata.get("message_id"),
-            sender_id=msg.sender_id,
-            metadata=msg.metadata,
-        )
+        tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
+        turn_runtime = self._turn_runtime_for_message(msg, session=session, mode=tool_exposure.mode)
+        self._set_tool_context(turn_runtime)
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
         history = session.get_history(max_messages=self.memory_window)
-        prompt_context = self._prompt_context_for_message(msg, session_key=key)
+        prompt_context = turn_runtime.to_prompt_context()
         llm_user_message = self._effective_user_message_for_llm(msg)
         initial_messages = self.context.build_messages(
             history=history,
@@ -2698,7 +2767,6 @@ class AgentLoop:
             ))
 
         turn_started = time.perf_counter()
-        tool_exposure = self._tool_exposure_context_for_message(msg, session=session)
         final_content, tools_used, all_msgs, timings = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,

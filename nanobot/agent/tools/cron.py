@@ -1,10 +1,13 @@
 """用于调度提醒和定时任务的 cron 工具。"""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
+
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 # region [定时任务工具实现]
 
@@ -20,6 +23,9 @@ class CronTool(Tool):
         """设置当前会话上下文用于消息投递。"""
         self._channel = channel
         self._chat_id = chat_id
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self.set_context(runtime.channel, runtime.chat_id)
 
     @property
     def name(self) -> str:

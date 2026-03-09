@@ -21,6 +21,10 @@ class AgentCoordinator:
     def __init__(self, agent: AgentLoop | None = None) -> None:
         self._agent = agent
 
+    @property
+    def name(self) -> str:
+        return self.__class__.__name__
+
     async def handle(self, *, msg: InboundMessage, session: Session) -> OutboundMessage | None:
         _ = (msg, session)
         return None

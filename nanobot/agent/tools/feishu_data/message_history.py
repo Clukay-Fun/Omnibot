@@ -1,13 +1,16 @@
 """Feishu IM message history tool with user OAuth support."""
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.config.schema import FeishuDataConfig
 from nanobot.oauth.feishu import FeishuReauthorizationRequired, FeishuUserTokenManager
+
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
 
 
 class MessageHistoryListTool(Tool):
@@ -37,6 +40,9 @@ class MessageHistoryListTool(Tool):
         self._runtime_chat_id = chat_id or ""
         self._runtime_sender_id = sender_id or ""
         self._runtime_metadata = dict(metadata or {})
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self.set_runtime_context(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
 
     @property
     def name(self) -> str:

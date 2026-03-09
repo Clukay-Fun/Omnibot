@@ -84,6 +84,15 @@ class PendingWriteCoordinator(AgentCoordinator):
         if not payload or payload.get("dry_run") is not True or not payload.get("confirm_token"):
             return None
         preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        if preview.get("table_id"):
+            metadata = dict(session.metadata or {})
+            previous = metadata.get("recent_selected_table") if isinstance(metadata.get("recent_selected_table"), dict) else {}
+            metadata["recent_selected_table"] = {
+                **dict(previous),
+                "table_id": str(preview.get("table_id") or ""),
+                "table_name": str(previous.get("table_name") or previous.get("name") or "").strip(),
+            }
+            session.metadata = metadata
         pending = {
             "tool": tool_name,
             "token": str(payload.get("confirm_token") or ""),
