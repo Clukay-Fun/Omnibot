@@ -352,15 +352,20 @@ class AgentLoop:
     def _now_iso() -> str:
         return datetime.now().isoformat()
 
-    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+    @staticmethod
+    def _prompt_purpose_for_message(msg: InboundMessage) -> str:
         purpose = "chat"
         source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
         if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
             purpose = "bootstrap"
+        return purpose
+
+    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+        purpose = self._prompt_purpose_for_message(msg)
         runtime = TurnRuntime.from_message(
             msg,
             session=None,
-            purpose=purpose,
+            purpose=cast(Any, purpose),
             mode="",
         )
         if session_key:
@@ -1735,10 +1740,11 @@ class AgentLoop:
         msg: InboundMessage,
         *,
         session: Session | None = None,
-        purpose: str = "chat",
+        purpose: str | None = None,
         mode: str = "",
     ) -> TurnRuntime:
-        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, purpose), mode=mode)
+        resolved_purpose = purpose or AgentLoop._prompt_purpose_for_message(msg)
+        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, resolved_purpose), mode=mode)
 
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
@@ -2135,6 +2141,10 @@ class AgentLoop:
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     if pending_preview is not None:
+                        if prepared_followup is None:
+                            messages = self.context.add_tool_result(
+                                messages, tool_call.id, tool_call.name, result
+                            )
                         final_content = pending_preview
                         messages = self.context.add_assistant_message(messages, final_content)
                         break

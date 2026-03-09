@@ -27,12 +27,27 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _DATE_ONLY_FORMATS = ("%Y/%m/%d", "%Y-%m-%d", "%Y.%m.%d")
 _DATE_TIME_FORMATS = ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y.%m.%d %H:%M")
 _DATE_FIELD_RE = re.compile(r"(日|日期|date|deadline)$", re.IGNORECASE)
+_AMOUNT_FIELD_RE = re.compile(r"(金额|amount|price|fee|cost)$", re.IGNORECASE)
+_OPTION_FIELD_RE = re.compile(r"(状态|status|阶段|priority|优先级|类型|category)$", re.IGNORECASE)
+_PERSON_FIELD_RE = re.compile(r"(人员|成员|负责人|owner|assignee|律师|lawyer)$", re.IGNORECASE)
 _PERSON_FIELD_TYPES = {11}
 _SELF_PERSON_ALIASES = {"我", "本人", "我本人", "自己"}
 
 
 def _looks_like_date_field(field_name: str) -> bool:
     return bool(_DATE_FIELD_RE.search(field_name.strip()))
+
+
+def _looks_like_amount_field(field_name: str) -> bool:
+    return bool(_AMOUNT_FIELD_RE.search(field_name.strip()))
+
+
+def _looks_like_option_field(field_name: str) -> bool:
+    return bool(_OPTION_FIELD_RE.search(field_name.strip()))
+
+
+def _looks_like_person_field(field_name: str) -> bool:
+    return bool(_PERSON_FIELD_RE.search(field_name.strip()))
 
 
 def _to_utc_millis(dt: datetime) -> int:
@@ -223,10 +238,9 @@ class _BitableWriteToolBase(Tool):
         normalized = _normalize_fields_for_write(fields)
         if not isinstance(normalized, dict):
             return normalized
-        if not self._runtime_open_id() and not self._directory_config() and self._user_token_manager is None:
-            schema_map = await self._field_schema_map(app_token=app_token, table_id=table_id)
-        else:
-            schema_map = await self._field_schema_map(app_token=app_token, table_id=table_id)
+        if not self._needs_field_schema_lookup(normalized):
+            return normalized
+        schema_map = await self._field_schema_map(app_token=app_token, table_id=table_id)
         if not schema_map:
             return normalized
 
@@ -257,6 +271,25 @@ class _BitableWriteToolBase(Tool):
             else:
                 result[field_name] = value
         return result
+
+    def _needs_field_schema_lookup(self, fields: dict[str, Any]) -> bool:
+        if not self.config.bitable.field_mapping:
+            return True
+        for raw_name, value in fields.items():
+            field_name = str(raw_name).strip()
+            if not field_name or _looks_like_date_field(field_name):
+                continue
+            if _looks_like_amount_field(field_name) or _looks_like_option_field(field_name):
+                return True
+            if _looks_like_person_field(field_name):
+                return True
+            if isinstance(value, str):
+                text = value.strip()
+                if text in _SELF_PERSON_ALIASES or text.startswith("ou_"):
+                    return True
+            if isinstance(value, (dict, list)) and self._runtime_open_id():
+                return True
+        return False
 
 
 class BitableCreateTool(_BitableWriteToolBase):
