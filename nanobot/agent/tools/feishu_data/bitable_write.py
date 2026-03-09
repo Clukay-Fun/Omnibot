@@ -13,8 +13,10 @@ from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.directory_config import load_directory_config
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
-from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver
+from nanobot.agent.tools.feishu_data.person_resolver import BitablePersonResolver, PersonResolutionAmbiguousError
+from nanobot.agent.tools.feishu_data.value_normalization import normalize_amount_value, normalize_date_string, normalize_option_value
 from nanobot.config.schema import FeishuDataConfig
+from nanobot.oauth.feishu import FeishuUserTokenManager
 
 if TYPE_CHECKING:
     from nanobot.agent.turn_runtime import TurnRuntime
@@ -90,11 +92,13 @@ class _BitableWriteToolBase(Tool):
         store: ConfirmTokenStore,
         *,
         workspace: Path | None = None,
+        user_token_manager: FeishuUserTokenManager | None = None,
     ):
         self.config = config
         self.client = client
         self.store = store
         self._workspace = workspace
+        self._user_token_manager = user_token_manager
         self._field_tool = BitableListFieldsTool(config, client)
         self._runtime_channel = ""
         self._runtime_chat_id = ""
@@ -126,24 +130,28 @@ class _BitableWriteToolBase(Tool):
 
     def _ensure_person_resolver(self) -> BitablePersonResolver | None:
         directory = self._directory_config()
-        if not directory.get("app_token") or not directory.get("table_id"):
-            return None
         if self._person_resolver is None:
-            self._person_resolver = BitablePersonResolver(self.config, client=self.client, directory=directory)
+            self._person_resolver = BitablePersonResolver(
+                self.config,
+                client=self.client,
+                directory=directory,
+                user_token_manager=self._user_token_manager,
+            )
+        if self._person_resolver is None:
+            return None
         return self._person_resolver
 
-    async def _field_type_map(self, *, app_token: str, table_id: str) -> dict[str, int]:
+    async def _field_schema_map(self, *, app_token: str, table_id: str) -> dict[str, dict[str, Any]]:
         payload = json.loads(await self._field_tool.execute(app_token=app_token, table_id=table_id))
         if not isinstance(payload, dict) or payload.get("error"):
             return {}
-        mapping: dict[str, int] = {}
+        mapping: dict[str, dict[str, Any]] = {}
         for item in payload.get("fields", []):
             if not isinstance(item, dict):
                 continue
             field_name = str(item.get("field_name") or "").strip()
-            field_type = item.get("type")
-            if field_name and isinstance(field_type, int):
-                mapping[field_name] = field_type
+            if field_name:
+                mapping[field_name] = dict(item)
         return mapping
 
     def _runtime_open_id(self) -> str:
@@ -183,16 +191,25 @@ class _BitableWriteToolBase(Tool):
         resolver = self._ensure_person_resolver()
         if resolver is None:
             return []
-        resolved_open_id: str | None = await resolver.resolve(text)
+        resolved_open_id: str | None = await resolver.resolve(text, actor_open_id=self._runtime_open_id() or None)
         if isinstance(resolved_open_id, str) and resolved_open_id:
             return [resolved_open_id]
         return []
 
     async def _normalize_person_field_value(self, field_name: str, value: Any) -> Any:
-        open_ids = await self._resolve_person_open_ids(value)
+        try:
+            open_ids = await self._resolve_person_open_ids(value)
+        except PersonResolutionAmbiguousError as exc:
+            choices = ", ".join(
+                f"{str(item.get('display_name') or item.get('open_id') or 'unknown')}({str(item.get('open_id') or '').strip()})"
+                for item in exc.candidates[:5]
+            )
+            raise ValueError(
+                f"人员字段“{field_name}”命中多个飞书成员：{choices}。请补充更具体的姓名、邮箱、手机号，或直接传 open_id。"
+            ) from exc
         if not open_ids:
             raise ValueError(
-                f"人员字段“{field_name}”无法解析为 open_id。请配置 workspace/feishu/bitable_rules.yaml 的 directory，或直接传 open_id。"
+                f"人员字段“{field_name}”无法解析为 open_id。请提供更具体的姓名、邮箱、手机号，或直接传 open_id。"
             )
         return [{"id": open_id} for open_id in open_ids]
 
@@ -200,17 +217,37 @@ class _BitableWriteToolBase(Tool):
         normalized = _normalize_fields_for_write(fields)
         if not isinstance(normalized, dict):
             return normalized
-        if not self._runtime_open_id() and not self._directory_config():
-            return normalized
-        type_map = await self._field_type_map(app_token=app_token, table_id=table_id)
-        if not type_map:
+        if not self._runtime_open_id() and not self._directory_config() and self._user_token_manager is None:
+            schema_map = await self._field_schema_map(app_token=app_token, table_id=table_id)
+        else:
+            schema_map = await self._field_schema_map(app_token=app_token, table_id=table_id)
+        if not schema_map:
             return normalized
 
         result: dict[str, Any] = {}
         for key, value in normalized.items():
             field_name = str(key)
-            if type_map.get(field_name) in _PERSON_FIELD_TYPES:
+            field_schema = schema_map.get(field_name) if isinstance(schema_map.get(field_name), dict) else {}
+            field_type = field_schema.get("type")
+            property_payload = field_schema.get("property") if isinstance(field_schema.get("property"), dict) else {}
+            options_raw = property_payload.get("options") if isinstance(property_payload.get("options"), list) else []
+            option_names = [
+                str(item.get("name") or item.get("text") or item.get("id") or "").strip()
+                if isinstance(item, dict)
+                else str(item).strip()
+                for item in options_raw
+            ]
+            option_names = [item for item in option_names if item]
+            if field_type in _PERSON_FIELD_TYPES:
                 result[field_name] = await self._normalize_person_field_value(field_name, value)
+            elif field_type == 2:
+                normalized_amount = normalize_amount_value(value)
+                result[field_name] = normalized_amount
+            elif field_type == 5 or _looks_like_date_field(field_name):
+                normalized_date = normalize_date_string(value)
+                result[field_name] = _normalize_date_field_value(normalized_date)
+            elif option_names:
+                result[field_name] = normalize_option_value(value, option_names)
             else:
                 result[field_name] = value
         return result
@@ -229,8 +266,9 @@ class BitableCreateTool(_BitableWriteToolBase):
         client: FeishuDataClient,
         store: ConfirmTokenStore,
         workspace: Path | None = None,
+        user_token_manager: FeishuUserTokenManager | None = None,
     ):
-        super().__init__(config, client, store, workspace=workspace)
+        super().__init__(config, client, store, workspace=workspace, user_token_manager=user_token_manager)
 
     @property
     def name(self) -> str:
@@ -330,8 +368,9 @@ class BitableUpdateTool(_BitableWriteToolBase):
         client: FeishuDataClient,
         store: ConfirmTokenStore,
         workspace: Path | None = None,
+        user_token_manager: FeishuUserTokenManager | None = None,
     ):
-        super().__init__(config, client, store, workspace=workspace)
+        super().__init__(config, client, store, workspace=workspace, user_token_manager=user_token_manager)
 
     @property
     def name(self) -> str:
@@ -437,8 +476,9 @@ class BitableDeleteTool(_BitableWriteToolBase):
         client: FeishuDataClient,
         store: ConfirmTokenStore,
         workspace: Path | None = None,
+        user_token_manager: FeishuUserTokenManager | None = None,
     ):
-        super().__init__(config, client, store, workspace=workspace)
+        super().__init__(config, client, store, workspace=workspace, user_token_manager=user_token_manager)
 
     @property
     def name(self) -> str:

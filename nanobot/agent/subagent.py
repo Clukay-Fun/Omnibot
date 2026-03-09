@@ -135,6 +135,8 @@ class SubagentManager:
                     workspace=self.workspace,
                     state_db_path=self.state_db_path,
                     sqlite_options=self.sqlite_options,
+                    provider=self.provider,
+                    model=self.model,
                 ):
                     tools.register(tool)
 

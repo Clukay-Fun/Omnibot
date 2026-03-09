@@ -1494,6 +1494,8 @@ class AgentLoop:
                 workspace=self.workspace,
                 state_db_path=self._state_db_path,
                 sqlite_options=self._sqlite_options,
+                provider=self.provider,
+                model=self.model,
             ):
                 self.tools.register(tool)
 
@@ -1669,6 +1671,29 @@ class AgentLoop:
                 self._log_coordinator_hit(coordinator.name, session.key, "tool_result")
                 return captured.final_content
         return None
+
+    @staticmethod
+    def _prepared_write_followup(tool_name: str, result: str) -> dict[str, Any] | None:
+        if tool_name != "bitable_prepare_create":
+            return None
+        try:
+            payload = json.loads(result)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("needs_table_confirmation") or payload.get("needs_record_confirmation"):
+            return None
+        next_step = payload.get("next_step")
+        if not isinstance(next_step, dict):
+            return None
+        followup_tool = str(next_step.get("tool") or "").strip()
+        arguments = next_step.get("arguments")
+        if followup_tool not in {"bitable_create", "bitable_update", "bitable_delete"}:
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        return {"tool": followup_tool, "arguments": dict(arguments)}
 
     @staticmethod
     def _log_coordinator_hit(name: str, session_key: str, source: str) -> None:
@@ -2076,6 +2101,45 @@ class AgentLoop:
                         if pending_preview is not None
                         else self._short_text(result, limit=200)
                     )
+                    prepared_followup = self._prepared_write_followup(tool_call.name, result)
+                    if prepared_followup is not None:
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                        followup_tool = str(prepared_followup.get("tool") or "").strip()
+                        followup_args = dict(prepared_followup.get("arguments") or {})
+                        if followup_tool and followup_args:
+                            template = self._runtime_text.prompt_text(
+                                "progress", "tool_done", "{tool} 完成，继续思考中..."
+                            )
+                            await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
+                            followup_started = time.perf_counter()
+                            followup_heartbeat_task = _start_stage_heartbeat(f"tool:{followup_tool}", followup_started)
+                            try:
+                                followup_result = await self.tools.execute(
+                                    followup_tool,
+                                    followup_args,
+                                    exposure=tool_exposure,
+                                )
+                            finally:
+                                await _stop_stage_heartbeat(followup_heartbeat_task)
+                            timings.append(
+                                {
+                                    "stage": f"tool:{followup_tool}",
+                                    "duration_ms": int((time.perf_counter() - followup_started) * 1000),
+                                }
+                            )
+                            pending_preview = self._capture_coordinator_tool_result(
+                                session=session,
+                                tool_name=followup_tool,
+                                raw_args=followup_args,
+                                result=followup_result,
+                            )
+                            result_preview = (
+                                "已生成写入预览，等待用户确认。"
+                                if pending_preview is not None
+                                else self._short_text(followup_result, limit=200)
+                            )
                     if result_preview:
                         template = self._runtime_text.prompt_text(
                             "progress", "tool_result", "{tool} 结果：{result}"
@@ -2092,6 +2156,10 @@ class AgentLoop:
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
                     if pending_preview is not None:
                         final_content = pending_preview
+                        messages = self.context.add_assistant_message(messages, final_content)
+                        break
+                    if prepared_followup is not None:
+                        final_content = result_preview or "已完成写入预处理。"
                         messages = self.context.add_assistant_message(messages, final_content)
                         break
                     messages = self.context.add_tool_result(

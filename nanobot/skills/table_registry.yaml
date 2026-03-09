@@ -3,6 +3,8 @@ tables:
   case_registry:
     app_token: app_case_mgmt_001
     table_id: tbl_case_registry_001
+    display_name: 案件项目总库
+    aliases: [案件项目总库, 案件库, 项目总库, 案件]
     field_aliases:
       case_id: 项目ID
       case_no: 案号
@@ -29,6 +31,8 @@ tables:
   contract_registry:
     app_token: app_contract_ops_001
     table_id: tbl_contract_registry_001
+    display_name: 合同管理
+    aliases: [合同管理, 合同台账, 合同库, 合同]
     field_aliases:
       contract_id: 合同ID
       case_id: 项目ID
@@ -39,3 +43,15 @@ tables:
       status: 合同状态
       expiry_date: 到期时间
       renewal_deadline: 续签截止时间
+
+  weekly_plan:
+    app_token: app_weekly_plan_001
+    table_id: tbl_weekly_plan_001
+    display_name: 团队周工作计划表
+    aliases: [团队周工作计划表, 周工作计划, 周计划, 周报表]
+    field_aliases:
+      owner: 姓名
+      week: 周次
+      content: 工作内容
+      status: 完成状态
+      completed_at: 完成时间
