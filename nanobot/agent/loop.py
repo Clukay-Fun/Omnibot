@@ -86,6 +86,7 @@ class AgentLoop:
     _BOOTSTRAP_INTERNAL_TRIGGER_PREFIX = "[Bootstrap Internal Trigger]"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
+    _WORKFLOW_MODE_METADATA_KEY = "workflow_mode"
     _MEMORY_WRITE_TURN_THRESHOLD = 3
     _MEMORY_TOPIC_END_KEYWORDS = (
         "先这样",
@@ -1706,10 +1707,13 @@ class AgentLoop:
         metadata = dict(msg.metadata or {})
         text = msg.content.strip().lower()
         pending_write = False
+        workflow_mode = AgentLoop._workflow_mode(session)
         if session is not None:
             pending_write = isinstance(session.metadata.get("pending_write"), dict)
         mode = ""
-        if msg.channel == "feishu":
+        if workflow_mode == "plan":
+            mode = "workflow_plan"
+        elif msg.channel == "feishu":
             if pending_write:
                 mode = "main_write_commit"
             elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
@@ -2353,17 +2357,46 @@ class AgentLoop:
     @staticmethod
     def _default_commands_help_text() -> str:
         return (
-            "可用命令\n"
+            "全局命令\n"
             "- /help 或 /commands：查看命令总览\n"
             "- /status：查看当前偏好与授权状态\n"
+            "- /plan：切换到计划模式（只分析/规划，不执行 skill 或工具）\n"
+            "- /build：切换到构建模式（允许执行 skill 和工具）\n"
             "- /setup：查看初始化引导\n"
             "- /connect 或 /oauth：连接飞书 OAuth\n"
             "- /session：查看会话子命令帮助\n"
             "- /new：开启新会话\n"
             "- /stop：停止当前任务\n"
-            "- 继续 / 展开：查看分页剩余内容\n"
-            "- 确认 <token> / 取消 <token>：确认或取消写入"
+            "\n上下文命令\n"
+            "- 继续 / 展开：仅当当前有分页结果时，查看剩余内容\n"
+            "- 确认 <token> / 取消 <token>：仅当当前有写入预览时，确认或取消写入"
         )
+
+    @classmethod
+    def _workflow_mode(cls, session: Session | None) -> str:
+        if session is None:
+            return "build"
+        value = str((session.metadata or {}).get(cls._WORKFLOW_MODE_METADATA_KEY) or "build").strip().lower()
+        return value if value in {"plan", "build"} else "build"
+
+    @classmethod
+    def _set_workflow_mode(cls, session: Session, mode: str) -> None:
+        metadata = dict(session.metadata or {})
+        metadata[cls._WORKFLOW_MODE_METADATA_KEY] = "plan" if mode == "plan" else "build"
+        session.metadata = metadata
+
+    @classmethod
+    def _workflow_mode_label(cls, mode: str) -> str:
+        return "计划（只读）" if mode == "plan" else "构建（可执行）"
+
+    def _handle_workflow_mode_command(self, *, msg: InboundMessage, session: Session, mode: str) -> OutboundMessage:
+        self._set_workflow_mode(session, mode)
+        self.sessions.save(session)
+        if mode == "plan":
+            content = "已切换到 plan 模式。接下来我只做分析、规划和方案讨论，不执行 skill、工具或写入。需要实际操作时发 /build。"
+        else:
+            content = "已切换到 build 模式。接下来我可以执行 skill、工具调用和写入流程。"
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     @staticmethod
     def _default_session_help_text() -> str:
@@ -2376,6 +2409,8 @@ class AgentLoop:
         )
 
     def _build_status_text(self, msg: InboundMessage) -> str:
+        session = self.sessions.get_or_create(msg.session_key)
+        workflow_mode = self._workflow_mode(session)
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         preferences = cast(dict[str, Any], profile["preferences"])
         skillspec = cast(dict[str, Any], profile["skillspec"])
@@ -2421,6 +2456,7 @@ class AgentLoop:
 
         return (
             "📌 当前设置\n\n"
+            f"工作模式：{self._workflow_mode_label(workflow_mode)}\n"
             f"怎么称呼您：{display_name}\n"
             f"回复风格：{style_label}\n"
             f"录入数据时：{confirm_label}\n"
@@ -2707,6 +2743,10 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd == "/plan":
+            return self._handle_workflow_mode_command(msg=msg, session=session, mode="plan")
+        if cmd == "/build":
+            return self._handle_workflow_mode_command(msg=msg, session=session, mode="build")
         if cmd == "/step":
             return OutboundMessage(
                 channel=msg.channel,
@@ -2747,11 +2787,19 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
-        pending_outbound = await self._run_coordinators(msg, session=session)
-        if pending_outbound is not None:
-            return pending_outbound
+        workflow_mode = self._workflow_mode(session)
+        if workflow_mode != "plan":
+            pending_outbound = await self._run_coordinators(msg, session=session)
+            if pending_outbound is not None:
+                return pending_outbound
+        elif raw_cmd.startswith("/skill"):
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="当前是 plan 模式：我只做分析和规划，不执行 skill 或工具。需要实际操作请先发 /build。",
+            )
 
-        if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
+        if workflow_mode != "plan" and self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
                 rendered = continuation.content
@@ -2771,7 +2819,7 @@ class AgentLoop:
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
 
-        if self._skillspec_runtime:
+        if workflow_mode != "plan" and self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
                 rendered = skillspec_result.content

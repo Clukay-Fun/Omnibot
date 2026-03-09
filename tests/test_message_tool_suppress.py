@@ -3,11 +3,13 @@
 import json
 import re
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
@@ -34,6 +36,38 @@ class _BootstrapProvider:
         return "test-model"
 
 
+class _WorkflowProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.last_tools = None
+
+    async def chat(self, **kwargs):
+        self.calls += 1
+        self.last_tools = kwargs.get("tools")
+        return LLMResponse(content="mode-aware-reply", tool_calls=[])
+
+    def get_default_model(self) -> str:
+        return "test-model"
+
+
+class _DummyTool(Tool):
+    @property
+    def name(self) -> str:
+        return "dummy_tool"
+
+    @property
+    def description(self) -> str:
+        return "dummy"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: Any) -> str:
+        _ = kwargs
+        return "ok"
+
+
 class TestMessageToolSuppressLogic:
     """Final reply suppressed only when message tool sends to the same target."""
 
@@ -42,7 +76,7 @@ class TestMessageToolSuppressLogic:
         loop = _make_loop(tmp_path)
         tool_call = ToolCallRequest(
             id="call1", name="message",
-            arguments={"content": "Hello", "channel": "feishu", "chat_id": "chat123"},
+            arguments={"content": "Hello", "channel": "cli", "chat_id": "chat123"},
         )
         calls = iter([
             LLMResponse(content="", tool_calls=[tool_call]),
@@ -56,7 +90,7 @@ class TestMessageToolSuppressLogic:
         if isinstance(mt, MessageTool):
             mt.set_send_callback(AsyncMock(side_effect=lambda m: sent.append(m)))
 
-        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send")
+        msg = InboundMessage(channel="cli", sender_id="user1", chat_id="chat123", content="Send")
         result = await loop._process_message(msg)
 
         assert len(sent) == 1
@@ -81,13 +115,13 @@ class TestMessageToolSuppressLogic:
         if isinstance(mt, MessageTool):
             mt.set_send_callback(AsyncMock(side_effect=lambda m: sent.append(m)))
 
-        msg = InboundMessage(channel="feishu", sender_id="user1", chat_id="chat123", content="Send email")
+        msg = InboundMessage(channel="cli", sender_id="user1", chat_id="chat123", content="Send email")
         result = await loop._process_message(msg)
 
         assert len(sent) == 1
         assert sent[0].channel == "email"
         assert result is not None  # not suppressed
-        assert result.channel == "feishu"
+        assert result.channel == "cli"
 
     @pytest.mark.asyncio
     async def test_not_suppress_when_no_message_tool_used(self, tmp_path: Path) -> None:
@@ -127,9 +161,111 @@ class TestAgentSlashCommands:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "当前设置" in response.content
+        assert "全局命令" in response.content
         assert "/setup" in response.content
-        assert "回复风格" in response.content
+        assert "上下文命令" in response.content
+        assert "/plan" in response.content
+        assert "/build" in response.content
+
+    @pytest.mark.asyncio
+    async def test_plan_command_switches_session_to_plan_mode(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+
+        response = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/plan")
+        )
+
+        assert response is not None
+        assert "plan 模式" in response.content
+        session = loop.sessions.get_or_create("cli:chat")
+        assert session.metadata["workflow_mode"] == "plan"
+
+    @pytest.mark.asyncio
+    async def test_status_shows_current_workflow_mode(self, tmp_path: Path) -> None:
+        loop = _make_loop(tmp_path)
+        session = loop.sessions.get_or_create("cli:chat")
+        session.metadata["workflow_mode"] = "plan"
+        loop.sessions.save(session)
+
+        response = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/status")
+        )
+
+        assert response is not None
+        assert "工作模式：计划（只读）" in response.content
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_blocks_skillspec_execution(self, tmp_path: Path) -> None:
+        skillspec_root = tmp_path / "skillspec"
+        skillspec_root.mkdir(parents=True, exist_ok=True)
+        (skillspec_root / "query_test.yaml").write_text(
+            """
+meta: {id: query_test, version: "0.1", description: 查询测试}
+params: {type: object, properties: {query: {type: string}}}
+action:
+  kind: query
+  table: {app_token: app_x, table_id: tbl_x}
+response: {}
+error: {}
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        provider = _WorkflowProvider()
+        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=True))
+        session = loop.sessions.get_or_create("cli:chat")
+        session.metadata["workflow_mode"] = "plan"
+        loop.sessions.save(session)
+
+        response = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/skill query_test 关键词")
+        )
+
+        assert response is not None
+        assert "plan 模式" in response.content
+        assert provider.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_keeps_chat_but_exposes_no_tools(self, tmp_path: Path) -> None:
+        provider = _WorkflowProvider()
+        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=False))
+        loop.tools.register(_DummyTool())
+        session = loop.sessions.get_or_create("cli:chat")
+        session.metadata["workflow_mode"] = "plan"
+        loop.sessions.save(session)
+
+        response = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我规划一下合同录入流程")
+        )
+
+        assert response is not None
+        assert response.content == "mode-aware-reply"
+        assert provider.calls == 1
+        assert provider.last_tools == []
+
+    @pytest.mark.asyncio
+    async def test_build_command_restores_tool_access(self, tmp_path: Path) -> None:
+        provider = _WorkflowProvider()
+        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=False))
+        loop.tools.register(_DummyTool())
+        session = loop.sessions.get_or_create("cli:chat")
+        session.metadata["workflow_mode"] = "plan"
+        loop.sessions.save(session)
+
+        switch = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/build")
+        )
+        assert switch is not None
+        assert "build 模式" in switch.content
+
+        response = await loop._process_message(
+            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我继续")
+        )
+
+        assert response is not None
+        assert response.content == "mode-aware-reply"
+        assert provider.calls == 1
+        assert provider.last_tools != []
 
 
 @pytest.mark.asyncio

@@ -123,6 +123,9 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         if runtime is not None:
+            workflow_mode = str(runtime.metadata.get("workflow_mode") or "").strip()
+            if workflow_mode:
+                lines.append(f"Workflow Mode: {workflow_mode}")
             thread_id = str(runtime.metadata.get("thread_id") or runtime.metadata.get("root_id") or "").strip()
             if thread_id:
                 lines.append(f"Thread ID: {thread_id}")

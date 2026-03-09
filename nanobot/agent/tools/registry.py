@@ -267,6 +267,8 @@ class ToolRegistry:
     def _allowed_tool_names(cls, exposure: ToolExposureContext | None, tool_names: set[str]) -> set[str]:
         if exposure is None:
             return set(tool_names)
+        if exposure.mode == "workflow_plan":
+            return set()
         if exposure.mode.startswith("subagent_") or exposure.mode in {"feishu_research", "code_research", "write_apply"}:
             return cls._select_subagent_tools(exposure, tool_names)
         if exposure.channel != "feishu":
