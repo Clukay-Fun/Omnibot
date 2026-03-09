@@ -64,7 +64,7 @@ action:
   pagination_mode: data
 response:
   output_policy:
-    max_items: 5
+    max_items: 20
     include_total: true
     include_next_page_token: true
   view:

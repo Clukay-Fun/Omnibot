@@ -40,6 +40,10 @@ class SkillSpecMatcher:
         - 根据阶梯级的选择规则逐次降级匹配出目标触发动作。
     """
     _CASE_SEARCH_SPEC_ID = "case_search"
+    _CASE_QUERY_LIMIT_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"(?:列出|显示|返回|给我|只要|只看|前|top)\s*(\d{1,3})\s*(?:条|个|项|行|条记录|records?)", re.IGNORECASE),
+        re.compile(r"(\d{1,3})\s*(?:条|个|项|行)\s*(?:就行|即可|够了|就好|给我)?", re.IGNORECASE),
+    )
 
     def __init__(
         self,
@@ -189,7 +193,9 @@ class SkillSpecMatcher:
         功能:
             - 根据字典在句首和句尾剔除类似"帮忙查找"、"的数据"等修饰残渣，精辟提炼中心字块。
         """
-        segment = re.split(r"[，,。！？!?\n]", text.strip(), maxsplit=1)[0].strip()
+        source = text.strip()
+        limit = self._extract_case_query_limit(source)
+        segment = re.split(r"[，,。！？!?\n]", source, maxsplit=1)[0].strip()
         if self._case_query_prefixes:
             prefix_pattern = "|".join(re.escape(token) for token in self._case_query_prefixes if token)
             if prefix_pattern:
@@ -199,7 +205,22 @@ class SkillSpecMatcher:
             if suffix_pattern:
                 segment = re.sub(rf"(?:的)?(?:{suffix_pattern})\s*$", "", segment)
         segment = re.sub(r"\s+", " ", segment).strip()
+        if limit is not None:
+            segment = f"page_size={limit} {segment}".strip()
         return segment
+
+    @classmethod
+    def _extract_case_query_limit(cls, text: str) -> int | None:
+        for pattern in cls._CASE_QUERY_LIMIT_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            try:
+                limit = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            return max(1, limit)
+        return None
 
     def _select_explicit(self, text: str) -> MatchSelection | None:
         """

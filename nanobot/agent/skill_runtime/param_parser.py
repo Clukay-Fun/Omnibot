@@ -19,6 +19,10 @@ class SkillSpecParamParser:
         - 管理解析过程中的字符跨度消除，并填补默认值参数。
     """
     _KEY_VALUE_RE = re.compile(r"([a-zA-Z_][\w\-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|\S+)")
+    _NATURAL_LIMIT_PATTERNS = (
+        re.compile(r"(?:列出|显示|返回|给我|只要|只看|前|top)\s*(\d{1,3})\s*(?:条|个|项|行|条记录|records?)", re.IGNORECASE),
+        re.compile(r"(\d{1,3})\s*(?:条|个|项|行)\s*(?:就行|即可|够了|就好|给我)?", re.IGNORECASE),
+    )
 
     def parse(self, text: str, *, param_schema: dict[str, Any]) -> dict[str, Any]:
         """
@@ -43,6 +47,15 @@ class SkillSpecParamParser:
 
         remainder = self._remove_spans(content, consumed).strip()
         properties = self._properties(param_schema)
+        remainder, inferred_limit = self._extract_natural_limit(remainder)
+
+        if inferred_limit is not None:
+            inferred_limit = self._clamp_limit_to_schema(inferred_limit, properties)
+            if "page_size" in properties and "page_size" not in params:
+                params["page_size"] = inferred_limit
+            if "limit" in properties and "limit" not in params:
+                params["limit"] = inferred_limit
+
         has_query = "query" in properties
         if remainder and has_query and "query" not in params:
             params["query"] = remainder
@@ -105,5 +118,35 @@ class SkillSpecParamParser:
             except ValueError:
                 return value
         return value
+
+    @classmethod
+    def _extract_natural_limit(cls, text: str) -> tuple[str, int | None]:
+        if not text:
+            return text, None
+        for pattern in cls._NATURAL_LIMIT_PATTERNS:
+            match = pattern.search(text)
+            if not match:
+                continue
+            try:
+                limit = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            cleaned = cls._remove_spans(text, [match.span()]).strip(" ，,。；;:：")
+            cleaned = re.sub(r"(?:请)?给我$", "", cleaned).strip(" ，,。；;:：")
+            cleaned = re.sub(r"(?:就行|即可|就好|够了)$", "", cleaned).strip(" ，,。；;:：")
+            return cleaned, limit
+        return text, None
+
+    @staticmethod
+    def _clamp_limit_to_schema(limit: int, properties: dict[str, Any]) -> int:
+        limit = max(1, limit)
+        for name in ("page_size", "limit"):
+            schema = properties.get(name)
+            if not isinstance(schema, dict):
+                continue
+            maximum = schema.get("maximum")
+            if isinstance(maximum, int):
+                limit = min(limit, maximum)
+        return limit
 
 #endregion

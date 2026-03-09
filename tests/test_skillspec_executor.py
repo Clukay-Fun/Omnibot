@@ -310,6 +310,22 @@ def test_param_parser_extracts_key_value_and_query() -> None:
     assert params["query"] == "这是关键词"
 
 
+def test_param_parser_extracts_natural_language_limit() -> None:
+    parser = SkillSpecParamParser()
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "page_size": {"type": "integer", "default": 20, "maximum": 100},
+        },
+    }
+
+    params = parser.parse("查找刘达的案件，列出1条给我", param_schema=schema)
+
+    assert params["query"] == "查找刘达的案件"
+    assert params["page_size"] == 1
+
+
 @pytest.mark.asyncio
 async def test_executor_routes_query_with_permission_filter(tmp_path: Path) -> None:
     registry = _build_registry(

@@ -68,7 +68,7 @@ action:
               when: params.owner
 response:
   output_policy:
-    max_items: 5
+    max_items: 20
     include_total: true
     include_source: true
   view:

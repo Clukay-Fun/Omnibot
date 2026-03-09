@@ -15,7 +15,8 @@
 - **SkillSpec 大模型前置路由系统**：
   - 摒弃了僵化的关键字匹配，重构为基于大语言模型原生 Tool Calling 的意图识别路由机制。
   - 将业务拆解为简单的声明式 YAML (`skillspec`)，即可低代码扩展专属于你的飞书业务数据查询与提醒技能。
-- **无感知的飞书新用户引导**：内置友好的 `/setup` 引导流程，以交互式卡片的形式一键完成团队与角色配置。
+- **无感知的飞书新用户引导**：首次会话发送一次富文本上手提示，不阻塞正常对话；可随时 `/setup` 重看。
+- **Workspace 可覆盖运行文案**：在 `workspace/runtime_texts.yaml` 中覆盖 onboarding / routing / 卡片文案；未覆盖部分自动回退到代码默认值。
 
 ---
 
@@ -27,11 +28,22 @@
 channels:
   feishu:
     enabled: true
-    app_id: "cli_xxx"         # 飞书自建应用 App ID
-    app_secret: "xxx"         # 飞书自建应用 App Secret
+    onboarding_blocking: false  # false=首次引导不阻塞，true=引导优先
+    onboarding_guide_once: true # true=每位用户只提示一次
     react_enabled: false      # 是否自动回复表情反馈 (收到/处理中)
     reply_to_message: true    # 是否使用引用回复
     reply_in_thread: false    # 默认是否在 Thread 中回复（话题群会自动强制启用）
+
+    # 审计保留与清理
+    audit_cleanup_interval_seconds: 21600
+    audit_event_retention_days: 365
+    audit_message_index_retention_days: 365
+
+    # 记忆写回策略（单聊/群聊分档）
+    memory_flush_threshold_private: 3
+    memory_flush_threshold_group: 5
+    memory_force_flush_on_topic_end: true
+    memory_topic_end_keywords: ["先这样", "结束", "结论", "收尾", "done"]
 
     # 🚀 流式互动卡片 (Card 2.0)
     stream_card_enabled: true
@@ -46,9 +58,55 @@ channels:
     activation_topic_policy: always       # 话题响应策略
     activation_admin_open_ids: []         # 特权管理员的 Open ID 列表
     activation_admin_prefix_bypass: "/bot" # 管理员强行越权响应的前缀
+
+integrations:
+  feishu:
+    auth:
+      app_id: ""           # 建议用环境变量注入
+      app_secret: ""       # 建议用环境变量注入
+      encrypt_key: ""      # 建议用环境变量注入
+      verification_token: "" # 建议用环境变量注入
+    storage:
+      state_db_path: ""    # 可为空；默认 ~/.nanobot/state/feishu/state.sqlite3
+      sqlite_journal_mode: "WAL"
+      sqlite_synchronous: "NORMAL"
+      sqlite_busy_timeout_ms: 5000
+      sqlite_backup_dir: ""
+      sqlite_backup_interval_hours: 24
+      sqlite_backup_retention_days: 7
+    oauth:
+      enabled: true
+      public_base_url: "https://bot.example.com"
+      callback_path: "/oauth/feishu/callback"
+      enforce_https_public_base_url: true
+      allowed_redirect_domains: ["bot.example.com"]
+
+tools:
+  feishu_data:
+    feature_flags:
+      calendar_enabled: true
+      task_enabled: true
+      bitable_admin_enabled: true
+      message_history_enabled: true
+
+agents:
+  skillspec:
+    query_rewrite_enabled: false  # 查询结果默认不做二次简化改写
 ```
 
 > **流式最佳实践**：推荐配置 `stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120` 和 `stream_card_print_frequency_ms=50` 以获得最丝滑的视觉体验。
+
+可选地，你也可以编辑 `~/.nanobot/workspace/runtime_texts.yaml` 来覆盖 onboarding 等运行期文案；只写需要改的键，未写部分会继续使用内置默认值。
+
+推荐通过环境变量注入敏感配置（避免明文入库）：
+
+```bash
+export NANOBOT_INTEGRATIONS__FEISHU__AUTH__APP_ID="cli_xxx"
+export NANOBOT_INTEGRATIONS__FEISHU__AUTH__APP_SECRET="xxx"
+export NANOBOT_INTEGRATIONS__FEISHU__AUTH__ENCRYPT_KEY="xxx"
+export NANOBOT_INTEGRATIONS__FEISHU__AUTH__VERIFICATION_TOKEN="xxx"
+export NANOBOT_INTEGRATIONS__FEISHU__STORAGE__STATE_DB_PATH="/var/lib/nanobot/feishu/state.sqlite3"
+```
 
 ## 🛠️ 内置指令 (Commands)
 
@@ -94,3 +152,9 @@ Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将
 
 - **持续集成**：默认采用 GitHub Actions 建立专门服务于飞书 SDK 交互兼容的 `.github/workflows/ci.yml` 验证环境体系，并启用 Ruff 强制代码风格审查（超过 300+ pytest 并发跑通认证）。
 - **流程规范**：标准化打包分发流经由 `.github/workflows/release.yml` 处理释放流程并投递到 GitHub Release 或 PyPI 以供版本追踪与回退；需严格遵循 `RELEASE_CHECKLIST.md` 内容清单控制发行质量。
+
+## 📘 生产运维手册
+
+- 生产配置、联调脚本、灰度/回滚、监控告警详见 `OPERATIONS_FEISHU.md`。
+- 生产环境变量模板详见 `ops/env/feishu-production.env.example`。
+- 本地联调环境变量模板详见 `ops/env/feishu-local.env.example`。

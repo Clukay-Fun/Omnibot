@@ -1,6 +1,7 @@
 """用于组装智能体提示词的上下文构建器。"""
 
 import base64
+import json
 import mimetypes
 import platform
 import time
@@ -16,11 +17,14 @@ from nanobot.agent.skills import SkillsLoader
 class ContextBuilder:
     """构建智能体的上下文（系统提示词 + 消息历史记录）。"""
 
-    COMMON_FILES = ["AGENTS.md", "TOOLS.md", "IDENTITY.md"]
+    SHARED_COMMON_FILES = ["AGENTS.md", "TOOLS.md"]
+    PERSONA_COMMON_FILES = ["IDENTITY.md"]
     PRIVATE_CHAT_FILES = ["SOUL.md", "USER.md"]
     GROUP_CHAT_FILES = ["SOUL.md"]
     BOOTSTRAP_FILES = ["BOOTSTRAP.md"]
     HEARTBEAT_FILES = ["HEARTBEAT.md"]
+    _LLM_TABLE_METADATA_LIMIT = 8
+    _LLM_FIELD_METADATA_LIMIT = 12
 
     # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
@@ -42,6 +46,10 @@ class ContextBuilder:
         bootstrap = self._load_bootstrap_files(runtime)
         if bootstrap:
             parts.append(bootstrap)
+
+        bootstrap_mode = self._build_bootstrap_mode_instructions(runtime)
+        if bootstrap_mode:
+            parts.append(bootstrap_mode)
 
         memory = self.memory.get_memory_context(runtime)
         if memory:
@@ -81,6 +89,7 @@ You are nanobot, a helpful AI assistant.
 Your workspace is at: {workspace_path}
 - Main-session long-term memory: {workspace_path}/MEMORY.md (write important facts here)
 - Legacy memory compatibility path: {workspace_path}/memory/MEMORY.md
+- Private Feishu persona root: {workspace_path}/memory/feishu/users/<open_id>/{{BOOTSTRAP,SOUL,USER,IDENTITY,MEMORY}}.md
 - Feishu user memory: {workspace_path}/memory/feishu/users/<open_id>/MEMORY.md
 - Feishu group memory: {workspace_path}/memory/feishu/chats/<chat_id>/MEMORY.md
 - Feishu thread memory: {workspace_path}/memory/feishu/threads/<chat_id>__<thread_id>/MEMORY.md
@@ -111,29 +120,80 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         return ContextBuilder._RUNTIME_CONTEXT_TAG + "\n" + "\n".join(lines)
 
-    def _resolve_workspace_files(self, runtime: PromptContext) -> list[str]:
-        files = list(self.COMMON_FILES)
+    def _resolve_workspace_files(self, runtime: PromptContext) -> list[Path]:
+        files = [self.workspace / filename for filename in self.SHARED_COMMON_FILES if (self.workspace / filename).exists()]
+
+        if runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                self.memory.ensure_feishu_user_persona_files(open_id)
+
+        for filename in self.PERSONA_COMMON_FILES:
+            path = self.memory.resolve_persona_markdown_path(filename, runtime)
+            if path is not None and path.exists():
+                files.append(path)
+
         if runtime.purpose == "bootstrap":
-            files.extend(self.BOOTSTRAP_FILES)
+            file_names = list(self.BOOTSTRAP_FILES)
+            if runtime.is_feishu and runtime.is_group:
+                file_names.extend(self.GROUP_CHAT_FILES)
+            else:
+                file_names.extend(self.PRIVATE_CHAT_FILES)
         elif runtime.purpose == "heartbeat":
-            files.extend(self.HEARTBEAT_FILES)
+            file_names = self.HEARTBEAT_FILES
         elif runtime.is_feishu and runtime.is_group:
-            files.extend(self.GROUP_CHAT_FILES)
+            file_names = self.GROUP_CHAT_FILES
         else:
-            files.extend(self.PRIVATE_CHAT_FILES)
+            file_names = self.PRIVATE_CHAT_FILES
+
+        for filename in file_names:
+            if runtime.is_feishu and runtime.is_private and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md"}:
+                path = self.memory.resolve_persona_markdown_path(filename, runtime)
+            else:
+                path = self.workspace / filename
+            if path is not None and path.exists():
+                files.append(path)
         return files
 
     def _load_bootstrap_files(self, runtime: PromptContext) -> str:
         """从工作区加载所有引导文件（bootstrap files）。"""
         parts = []
 
-        for filename in self._resolve_workspace_files(runtime):
-            file_path = self.workspace / filename
+        for file_path in self._resolve_workspace_files(runtime):
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
-                parts.append(f"## {filename}\n\n{content}")
+                parts.append(f"## {file_path.name}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
+
+    @staticmethod
+    def _build_bootstrap_mode_instructions(runtime: PromptContext) -> str:
+        if runtime.purpose != "bootstrap":
+            return ""
+
+        lines = [
+            "# Bootstrap Mode",
+            "- Treat `BOOTSTRAP.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, and `MEMORY.md` as the source of truth.",
+            "- Generate a natural conversational reply from those files instead of mechanically summarizing them.",
+            "- Keep the reply usable as a real conversation turn, not a separate onboarding notice unless the files clearly call for that format.",
+            "- Do not skip the bootstrap conversation just because the user's message is short, generic, or only a greeting.",
+            "- Do not jump straight to a generic help offer like 'How can I help?' before bootstrap is addressed.",
+        ]
+
+        if runtime.metadata.get("_bootstrap_proactive"):
+            lines.append(
+                "- The user has just opened this private chat and has not sent a real message yet. Start the conversation proactively according to the current bootstrap files."
+            )
+        elif runtime.metadata.get("_bootstrap_reentry"):
+            lines.append(
+                "- The user explicitly asked to revisit setup. Re-open the conversation naturally based on the current bootstrap files."
+            )
+        else:
+            lines.append(
+                "- The user already sent a real first message. Reply to that actual message directly, but bootstrap still comes first and must be woven into the normal answer."
+            )
+
+        return "\n".join(lines)
 
     # endregion
 
@@ -191,8 +251,45 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         tool_call_id: str, tool_name: str, result: str,
     ) -> list[dict[str, Any]]:
         """将工具调用结果追加到消息列表中。"""
-        messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result})
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "content": self._compact_tool_result_for_llm(tool_name, result),
+            }
+        )
         return messages
+
+    @classmethod
+    def _compact_tool_result_for_llm(cls, tool_name: str, result: str) -> str:
+        if tool_name not in {"bitable_list_tables", "bitable_list_fields"}:
+            return result
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+
+        if tool_name == "bitable_list_tables":
+            tables = [item for item in payload.get("tables", []) if isinstance(item, dict)]
+            if len(tables) <= cls._LLM_TABLE_METADATA_LIMIT:
+                return result
+            compact_payload = dict(payload)
+            compact_payload["tables"] = tables[: cls._LLM_TABLE_METADATA_LIMIT]
+            compact_payload["truncated_for_llm"] = True
+            compact_payload["llm_table_limit"] = cls._LLM_TABLE_METADATA_LIMIT
+            return json.dumps(compact_payload, ensure_ascii=False)
+
+        fields = [item for item in payload.get("fields", []) if isinstance(item, dict)]
+        if len(fields) <= cls._LLM_FIELD_METADATA_LIMIT:
+            return result
+        compact_payload = dict(payload)
+        compact_payload["fields"] = fields[: cls._LLM_FIELD_METADATA_LIMIT]
+        compact_payload["truncated_for_llm"] = True
+        compact_payload["llm_field_limit"] = cls._LLM_FIELD_METADATA_LIMIT
+        return json.dumps(compact_payload, ensure_ascii=False)
 
     def add_assistant_message(
         self, messages: list[dict[str, Any]],

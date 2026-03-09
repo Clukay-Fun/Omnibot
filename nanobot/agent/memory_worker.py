@@ -28,6 +28,7 @@ class MemoryTurnTask:
     created_at: str = ""
     scopes: tuple[MemoryScope, ...] = ()
     force_flush: bool = False
+    flush_threshold: int | None = None
 
 
 class MemoryWriteWorker:
@@ -95,6 +96,10 @@ class MemoryWriteWorker:
         if not entry:
             return
 
+        flush_threshold = self._flush_threshold
+        if task.flush_threshold is not None:
+            flush_threshold = max(1, int(task.flush_threshold))
+
         touched_paths: set[Path] = set()
         for scope in task.scopes:
             path = self._scope_path(scope, task)
@@ -102,7 +107,7 @@ class MemoryWriteWorker:
                 continue
             self._scope_buffers[path].append(entry)
             touched_paths.add(path)
-            if len(self._scope_buffers[path]) >= self._flush_threshold:
+            if len(self._scope_buffers[path]) >= flush_threshold:
                 self._flush_scope(path)
 
         if task.force_flush:

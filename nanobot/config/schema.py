@@ -63,9 +63,20 @@ class FeishuConfig(Base):
     activation_admin_open_ids: list[str] = Field(default_factory=list)
     activation_admin_prefix_bypass: str = ""
     onboarding_enabled: bool = True
+    onboarding_blocking: bool = False
+    onboarding_guide_once: bool = True
     onboarding_reentry_commands: list[str] = Field(default_factory=lambda: ["/setup", "重新设置"])
     onboarding_role_options: list[str] = Field(default_factory=lambda: ["律师", "助理", "实习生"])
     onboarding_team_options: list[str] = Field(default_factory=lambda: ["诉讼组", "合同组", "招投标组", "综合组"])
+    audit_cleanup_interval_seconds: float = 6 * 60 * 60
+    audit_event_retention_days: int = 365
+    audit_message_index_retention_days: int = 365
+    memory_flush_threshold_private: int = 3
+    memory_flush_threshold_group: int = 5
+    memory_force_flush_on_topic_end: bool = True
+    memory_topic_end_keywords: list[str] = Field(
+        default_factory=lambda: ["先这样", "结束", "结论", "收尾", "done"]
+    )
 
 
 class FeishuSharedAuthConfig(Base):
@@ -93,6 +104,18 @@ class FeishuSharedBitableConfig(Base):
     field_mapping: dict[str, str] = Field(default_factory=dict)
 
 
+class FeishuSharedStorageConfig(Base):
+    """Shared Feishu SQLite storage settings."""
+
+    state_db_path: str = ""
+    sqlite_journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"] = "WAL"
+    sqlite_synchronous: Literal["OFF", "NORMAL", "FULL", "EXTRA"] = "NORMAL"
+    sqlite_busy_timeout_ms: int = 5000
+    sqlite_backup_dir: str = ""
+    sqlite_backup_interval_hours: int = 24
+    sqlite_backup_retention_days: int = 7
+
+
 class FeishuOAuthConfig(Base):
     """Server-side Feishu OAuth callback and token lifecycle configuration."""
 
@@ -104,6 +127,8 @@ class FeishuOAuthConfig(Base):
     scopes: list[str] = Field(default_factory=list)
     state_ttl_seconds: int = 600
     refresh_ahead_seconds: int = 300
+    enforce_https_public_base_url: bool = True
+    allowed_redirect_domains: list[str] = Field(default_factory=list)
     success_html_title: str = "Feishu Authorization Completed"
     failure_html_title: str = "Feishu Authorization Failed"
 
@@ -114,6 +139,7 @@ class FeishuIntegrationConfig(Base):
     auth: FeishuSharedAuthConfig = Field(default_factory=FeishuSharedAuthConfig)
     api: FeishuSharedAPIConfig = Field(default_factory=FeishuSharedAPIConfig)
     bitable: FeishuSharedBitableConfig = Field(default_factory=FeishuSharedBitableConfig)
+    storage: FeishuSharedStorageConfig = Field(default_factory=FeishuSharedStorageConfig)
     oauth: FeishuOAuthConfig = Field(default_factory=FeishuOAuthConfig)
 
 
@@ -323,6 +349,7 @@ class SkillSpecConfig(Base):
     embedding_min_score: float = 0.15
     route_log_enabled: bool = False
     route_log_top_k: int = 3
+    query_rewrite_enabled: bool = False
 
 
 class AgentsConfig(Base):
@@ -453,6 +480,15 @@ class FeishuDataDocConfig(Base):
     search: FeishuDataDocSearchConfig = Field(default_factory=FeishuDataDocSearchConfig)
 
 
+class FeishuDataFeatureFlagsConfig(Base):
+    """Feature flags for optional Feishu data tools."""
+
+    calendar_enabled: bool = True
+    task_enabled: bool = True
+    bitable_admin_enabled: bool = True
+    message_history_enabled: bool = True
+
+
 class FeishuDataConfig(Base):
     """Feishu data tools configuration."""
 
@@ -465,6 +501,7 @@ class FeishuDataConfig(Base):
     cache: FeishuDataCacheConfig = Field(default_factory=FeishuDataCacheConfig)
     bitable: FeishuDataBitableConfig = Field(default_factory=FeishuDataBitableConfig)
     doc: FeishuDataDocConfig = Field(default_factory=FeishuDataDocConfig)
+    feature_flags: FeishuDataFeatureFlagsConfig = Field(default_factory=FeishuDataFeatureFlagsConfig)
     confirm_token_ttl_seconds: int = 300
 
 
@@ -537,6 +574,29 @@ class Config(BaseSettings):
             default_table_id=shared.default_table_id or legacy.default_table_id,
             default_view_id=shared.default_view_id if shared.default_view_id is not None else legacy.default_view_id,
             field_mapping=shared.field_mapping or legacy.field_mapping,
+        )
+
+    def resolve_feishu_state_db_path(self) -> Path:
+        """Resolve Feishu state sqlite path using shared storage config."""
+        raw_path = str(self.integrations.feishu.storage.state_db_path or "").strip()
+        if not raw_path:
+            from nanobot.utils.helpers import get_state_path
+
+            return get_state_path() / "feishu" / "state.sqlite3"
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            return path
+        return (self.workspace_path / path).resolve()
+
+    def resolve_feishu_sqlite_options(self):
+        """Build SQLite connection options for Feishu runtime stores."""
+        from nanobot.storage.sqlite_store import SQLiteConnectionOptions
+
+        storage = self.integrations.feishu.storage
+        return SQLiteConnectionOptions(
+            journal_mode=storage.sqlite_journal_mode,
+            synchronous=storage.sqlite_synchronous,
+            busy_timeout_ms=storage.sqlite_busy_timeout_ms,
         )
 
     def apply_shared_integration_defaults(self) -> "Config":

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Nanobot Feishu SQLite backup every 24h
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=nanobot-sqlite-backup.service
+
+[Install]
+WantedBy=timers.target

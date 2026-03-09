@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ExecToolConfig, FeishuDataConfig
+    from nanobot.storage.sqlite_store import SQLiteConnectionOptions
 
 from loguru import logger
 
@@ -39,6 +40,8 @@ class SubagentManager:
         exec_config: ExecToolConfig | None = None,
         restrict_to_workspace: bool = False,
         feishu_data_config: FeishuDataConfig | None = None,
+        state_db_path: Path | None = None,
+        sqlite_options: "SQLiteConnectionOptions | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
         self.provider = provider
@@ -52,6 +55,8 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.feishu_data_config = feishu_data_config
+        self.state_db_path = state_db_path
+        self.sqlite_options = sqlite_options
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -120,7 +125,12 @@ class SubagentManager:
 
             if self.feishu_data_config and self.feishu_data_config.enabled:
                 from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-                for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
+                for tool in build_feishu_data_tools(
+                    self.feishu_data_config,
+                    workspace=self.workspace,
+                    state_db_path=self.state_db_path,
+                    sqlite_options=self.sqlite_options,
+                ):
                     tools.register(tool)
 
             system_prompt = self._build_subagent_prompt()

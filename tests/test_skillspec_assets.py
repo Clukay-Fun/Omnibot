@@ -47,7 +47,7 @@ def test_query_skill_files_follow_v01_shape() -> None:
             continue
 
         assert payload["action"]["pagination_mode"] == "data"
-        assert payload["response"]["output_policy"]["max_items"] == 5
+        assert payload["response"]["output_policy"]["max_items"] >= 5
         if "cross_query" in payload["action"]:
             has_cross_query = True
 

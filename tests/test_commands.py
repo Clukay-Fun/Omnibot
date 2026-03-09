@@ -50,8 +50,10 @@ except ModuleNotFoundError:
     sys.modules["prompt_toolkit.history"] = history_stub
     sys.modules["prompt_toolkit.patch_stdout"] = patch_stdout_stub
 
+import nanobot.cli.commands as commands_module
+
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
-from nanobot.cli.commands import app
+from nanobot.cli.commands import _build_feishu_oauth_stack, app
 from nanobot.config.schema import Config
 from nanobot.oauth import (
     FeishuOAuthClient,
@@ -74,7 +76,7 @@ def mock_paths():
     """Mock config/workspace paths for test isolation."""
     with patch("nanobot.config.loader.get_config_path") as mock_cp, \
          patch("nanobot.config.loader.save_config") as mock_sc, \
-         patch("nanobot.config.loader.load_config") as mock_lc, \
+         patch("nanobot.config.loader.load_config") as _mock_lc, \
          patch("nanobot.utils.helpers.get_workspace_path") as mock_ws:
 
         base_dir = Path("./test_onboard_data")
@@ -235,6 +237,24 @@ def test_sync_workspace_templates_removes_legacy_runtime_dirs(tmp_path: Path) ->
         assert not (tmp_path / legacy).exists()
 
 
+def test_build_cron_service_migrates_legacy_data_dir_store(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    class _FakeCronService:
+        def __init__(self, store_path: Path, *, legacy_store_paths=None):
+            captured["store_path"] = store_path
+            captured["legacy_store_paths"] = list(legacy_store_paths or [])
+
+    monkeypatch.setattr(commands_module, "CronService", _FakeCronService, raising=False)
+
+    service = commands_module._build_cron_service()
+
+    assert isinstance(service, _FakeCronService)
+    assert captured["store_path"] == tmp_path / ".nanobot" / "state" / "cron" / "jobs.json"
+    assert captured["legacy_store_paths"] == [tmp_path / ".nanobot" / "cron" / "jobs.json"]
+
+
 def test_config_supports_feishu_oauth_server_settings() -> None:
     config = Config.model_validate(
         {
@@ -258,6 +278,115 @@ def test_config_supports_feishu_oauth_server_settings() -> None:
     assert oauth.callback_path == "/oauth/feishu/callback"
     assert oauth.state_ttl_seconds == 900
     assert oauth.refresh_ahead_seconds == 180
+
+
+def test_config_resolves_feishu_storage_path_and_sqlite_options(tmp_path: Path) -> None:
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path)}},
+            "integrations": {
+                "feishu": {
+                    "storage": {
+                        "stateDbPath": "runtime/feishu-state.sqlite3",
+                        "sqliteJournalMode": "WAL",
+                        "sqliteSynchronous": "FULL",
+                        "sqliteBusyTimeoutMs": 9000,
+                    }
+                }
+            },
+        }
+    )
+
+    state_path = config.resolve_feishu_state_db_path()
+    options = config.resolve_feishu_sqlite_options()
+
+    assert state_path == (tmp_path / "runtime" / "feishu-state.sqlite3").resolve()
+    assert options.journal_mode == "WAL"
+    assert options.synchronous == "FULL"
+    assert options.busy_timeout_ms == 9000
+
+
+def test_config_resolves_default_feishu_state_db_outside_workspace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path / "workspace")}},
+        }
+    )
+
+    state_path = config.resolve_feishu_state_db_path()
+
+    assert state_path == tmp_path / ".nanobot" / "state" / "feishu" / "state.sqlite3"
+
+
+def test_build_oauth_stack_rejects_non_https_public_base_url(tmp_path: Path) -> None:
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path)}},
+            "integrations": {
+                "feishu": {
+                    "auth": {"appId": "cli_app", "appSecret": "sec"},
+                    "oauth": {
+                        "enabled": True,
+                        "publicBaseUrl": "http://bot.example.com",
+                        "enforceHttpsPublicBaseUrl": True,
+                    },
+                }
+            },
+        }
+    )
+
+    assert _build_feishu_oauth_stack(config) is None
+
+
+def test_build_oauth_stack_rejects_host_not_in_allowlist(tmp_path: Path) -> None:
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path)}},
+            "integrations": {
+                "feishu": {
+                    "auth": {"appId": "cli_app", "appSecret": "sec"},
+                    "oauth": {
+                        "enabled": True,
+                        "publicBaseUrl": "https://bot.example.com",
+                        "allowedRedirectDomains": ["corp.example.com"],
+                    },
+                }
+            },
+        }
+    )
+
+    assert _build_feishu_oauth_stack(config) is None
+
+
+def test_build_oauth_stack_uses_configured_state_db_path(tmp_path: Path) -> None:
+    db_path = tmp_path / "db" / "oauth-state.sqlite3"
+    config = Config.model_validate(
+        {
+            "agents": {"defaults": {"workspace": str(tmp_path)}},
+            "integrations": {
+                "feishu": {
+                    "auth": {"appId": "cli_app", "appSecret": "sec"},
+                    "storage": {
+                        "stateDbPath": str(db_path),
+                        "sqliteBusyTimeoutMs": 4321,
+                    },
+                    "oauth": {
+                        "enabled": True,
+                        "publicBaseUrl": "https://bot.example.com",
+                        "allowedRedirectDomains": ["bot.example.com"],
+                    },
+                }
+            },
+        }
+    )
+
+    stack = _build_feishu_oauth_stack(config)
+    assert stack is not None
+    assert stack.store.db_path == db_path
+    timeout = int(stack.store._conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    assert timeout == 4321
+    stack.store.close()
 
 
 class _FakeSyncHTTPFactory:

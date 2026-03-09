@@ -82,11 +82,15 @@ class ChannelManager:
         if self.config.channels.feishu.enabled:
             try:
                 from nanobot.channels.feishu import FeishuChannel
+                feishu_state_db_path = self.config.resolve_feishu_state_db_path()
+                feishu_sqlite_options = self.config.resolve_feishu_sqlite_options()
                 self.channels["feishu"] = FeishuChannel(
                     self.config.channels.feishu,
                     self.bus,
                     workspace=self.config.workspace_path,
                     feishu_data_config=self.config.tools.feishu_data,
+                    state_db_path=feishu_state_db_path,
+                    sqlite_options=feishu_sqlite_options,
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:

@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -27,7 +28,8 @@ from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig, FeishuDataConfig
 from nanobot.cron.service import CronService
 from nanobot.storage.audit import AuditSink
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path, sync_workspace_templates
 
 try:
     import lark_oapi as lark
@@ -86,6 +88,8 @@ class _FeishuStreamState:
     card_id: str | None = None
     thinking_text: str = ""
     answer_text: str = ""
+    answer_has_real_content: bool = False
+    last_sent_answer_len: int = 0
     thinking_collapsed: bool = False
     reply_in_thread: bool = False
     last_update_at: float = 0.0
@@ -94,9 +98,15 @@ class _FeishuStreamState:
 
 _STREAM_THINKING_ELEMENT_ID = "thinking_text"
 _STREAM_ANSWER_ELEMENT_ID = "answer_text"
+_LONG_ANSWER_COALESCE_START = 600
+_LONG_ANSWER_MIN_DELTA = 120
 
 _MENTION_MARKER_RE = re.compile(r"@_user_\d+")
 _AT_TAG_RE = re.compile(r"<at\b[^>]*>.*?</at>", re.IGNORECASE | re.DOTALL)
+_BENIGN_LARK_WS_ERRORS = (
+    "receive message loop exit, err: no close frame received or sent",
+)
+_LARK_LOG_FILTER_INSTALLED = False
 
 # 消息类型展示映射
 MSG_TYPE_MAP = {
@@ -124,6 +134,21 @@ def _safe_dig(source: Any, *keys: str, default: Any = None) -> Any:
         if current is None:
             return default
     return current
+
+
+class _SuppressBenignLarkWsErrors(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(snippet in message for snippet in _BENIGN_LARK_WS_ERRORS)
+
+
+def _configure_lark_logger() -> None:
+    global _LARK_LOG_FILTER_INSTALLED
+    if _LARK_LOG_FILTER_INSTALLED:
+        return
+    lark_logger = logging.getLogger("Lark")
+    lark_logger.addFilter(_SuppressBenignLarkWsErrors())
+    _LARK_LOG_FILTER_INSTALLED = True
 
 
 def _safe_json_loads(value: Any) -> Any:
@@ -444,6 +469,11 @@ class FeishuChannel(BaseChannel):
     """
 
     name = "feishu"
+    _OPTIONAL_NOOP_EVENT_REGISTRATIONS: tuple[tuple[str, ...], ...] = (
+        ("register_p2_im_chat_access_event_bot_p2p_chat_entered_v1",),
+        ("register_p2_task_task_updated_v1",),
+        ("register_p2_task_task_update_tenant_v1",),
+    )
 
     def __init__(
         self,
@@ -451,10 +481,13 @@ class FeishuChannel(BaseChannel):
         bus: MessageBus,
         workspace: Path | None = None,
         feishu_data_config: FeishuDataConfig | None = None,
+        state_db_path: Path | None = None,
+        sqlite_options: SQLiteConnectionOptions | None = None,
     ):
         super().__init__(config, bus)
         self.config: FeishuConfig = config
         self.workspace = workspace or Path.home() / ".nanobot" / "workspace"
+        sync_workspace_templates(self.workspace, silent=True)
         self.feishu_data_config = feishu_data_config or FeishuDataConfig()
         self._runtime_text = RuntimeTextCatalog.load(self.workspace)
         self._memory = MemoryStore(self.workspace)
@@ -471,6 +504,12 @@ class FeishuChannel(BaseChannel):
         self._thinking_active = self._runtime_text.prompt_text("progress", "thinking_active", "思考中")
         self._thinking_placeholder_markdown = self._runtime_text.prompt_text(
             "progress", "thinking_placeholder_markdown", "> 思考中"
+        )
+        self._thinking_done_placeholder_markdown = self._runtime_text.prompt_text(
+            "progress", "thinking_done_placeholder_markdown", "> 思考完成"
+        )
+        self._answer_placeholder_text = self._runtime_text.prompt_text(
+            "progress", "answer_placeholder", "🐈努力回答中..."
         )
         generic_lines = self._runtime_text.prompt_lines(
             "progress",
@@ -490,7 +529,14 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
-        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        default_state_db_path = get_state_path() / "feishu" / "state.sqlite3"
+        resolved_state_db_path = state_db_path or default_state_db_path
+        migrate_legacy_path(
+            self.workspace / "memory" / "feishu" / "state.sqlite3",
+            resolved_state_db_path,
+            related_suffixes=("-wal", "-shm", ".bak"),
+        )
+        self._sqlite = SQLiteStore(resolved_state_db_path, options=sqlite_options)
         self._audit_sink = AuditSink(
             self._sqlite,
             cleanup_interval_seconds=float(
@@ -510,8 +556,15 @@ class FeishuChannel(BaseChannel):
         self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []
-        self._cron_service = CronService(self.workspace / "cron_jobs.json")
-        self._reminder_runtime = ReminderRuntime(self.workspace / "reminders.json")
+        runtime_state_root = get_state_path()
+        self._cron_service = CronService(
+            runtime_state_root / "feishu" / "cron" / "jobs.json",
+            legacy_store_paths=[self.workspace / "cron_jobs.json"],
+        )
+        self._reminder_runtime = ReminderRuntime(
+            runtime_state_root / "reminders.json",
+            legacy_store_paths=[self.workspace / "reminders.json"],
+        )
         self._bitable_engine = BitableReminderRuleEngine(
             self.workspace,
             reminder_runtime=self._reminder_runtime,
@@ -699,6 +752,8 @@ class FeishuChannel(BaseChannel):
             logger.error("Feishu app_id and app_secret not configured")
             return
 
+        _configure_lark_logger()
+
         self._running = True
         self._loop = asyncio.get_running_loop()
         await self._audit_sink.start()
@@ -719,11 +774,7 @@ class FeishuChannel(BaseChannel):
             self._on_message_sync
         )
 
-        event_handler_builder = self._register_optional_event(
-            event_handler_builder,
-            ["register_p2_im_chat_access_event_bot_p2p_chat_entered_v1"],
-            lambda _event: None,
-        )
+        event_handler_builder = self._register_optional_noop_events(event_handler_builder)
         event_handler_builder = self._register_optional_event(
             event_handler_builder,
             ["register_p2_card_action_trigger"],
@@ -731,7 +782,7 @@ class FeishuChannel(BaseChannel):
         )
         event_handler_builder = self._register_optional_event(
             event_handler_builder,
-            ["register_p2_im_message_read_v1"],
+            ["register_p2_im_message_message_read_v1", "register_p2_im_message_read_v1"],
             self._on_message_read_sync,
         )
         event_handler_builder = self._register_optional_event(
@@ -818,6 +869,15 @@ class FeishuChannel(BaseChannel):
         })
         self._persist_event_registration_report()
         return builder
+
+    def _register_optional_noop_events(self, builder: Any) -> Any:
+        def _noop(_event: Any) -> None:
+            _ = _event
+
+        registered_builder = builder
+        for names in self._OPTIONAL_NOOP_EVENT_REGISTRATIONS:
+            registered_builder = self._register_optional_event(registered_builder, list(names), _noop)
+        return registered_builder
 
     def _add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
         """用于添加表情回应（运行在线程池中）的同步辅助方法。"""
@@ -1392,7 +1452,7 @@ class FeishuChannel(BaseChannel):
 
         detail_lines = self._extract_specific_thinking_lines(thinking_text)
         if not detail_lines:
-            return ""
+            return self._thinking_done_placeholder_markdown if collapsed else self._thinking_placeholder_markdown
 
         prefix = "> "
         quoted_lines = [f"{prefix}{summary}"]
@@ -1427,6 +1487,23 @@ class FeishuChannel(BaseChannel):
         """判断是否包含可展示的具体思考内容。"""
         return bool(self._extract_specific_thinking_lines(thinking_text))
 
+    def _is_answer_placeholder(self, answer_text: str | None) -> bool:
+        normalized = str(answer_text or "").strip()
+        return bool(normalized) and normalized == self._answer_placeholder_text
+
+    def _has_real_answer_content(self, answer_text: str | None) -> bool:
+        normalized = str(answer_text or "").strip()
+        return bool(normalized) and not self._is_answer_placeholder(normalized)
+
+    def _render_stream_thinking_content(self, thinking_text: str, collapsed: bool, answer_text: str) -> str:
+        if not self.config.stream_card_show_thinking:
+            return ""
+        if self._has_specific_thinking_content(thinking_text):
+            return self._format_thinking_block(thinking_text, collapsed)
+        if str(answer_text or "").strip():
+            return ""
+        return self._format_thinking_block(thinking_text, collapsed)
+
     def _build_streaming_body_elements(self, thinking_content: str, answer_content: str) -> list[dict[str, Any]]:
         """构造流式卡片 body elements。"""
         if not self.config.stream_card_show_thinking:
@@ -1438,11 +1515,7 @@ class FeishuChannel(BaseChannel):
                 }
             ]
 
-        # 始终保留 thinking 元素，避免后续 CardKit 增量更新找不到 element_id。
-        if not thinking_content.strip():
-            thinking_content = self._thinking_placeholder_markdown
-
-        return [
+        elements = [
             {
                 "tag": "markdown",
                 "element_id": _STREAM_THINKING_ELEMENT_ID,
@@ -1450,18 +1523,17 @@ class FeishuChannel(BaseChannel):
             },
             {
                 "tag": "markdown",
-                "content": "---",
-            },
-            {
-                "tag": "markdown",
                 "element_id": _STREAM_ANSWER_ELEMENT_ID,
                 "content": answer_content,
             },
         ]
+        if thinking_content.strip():
+            elements.insert(1, {"tag": "markdown", "content": "---"})
+        return elements
 
     def _build_streaming_initial_card_content(self, thinking_text: str, answer_text: str, collapsed: bool) -> str:
         """构造首条 Card 2.0 流式卡片。"""
-        thinking_content = self._format_thinking_block(thinking_text, collapsed)
+        thinking_content = self._render_stream_thinking_content(thinking_text, collapsed, answer_text)
         answer_content = self._normalize_markdown_headings(answer_text)
         print_frequency_ms = max(30, int(self.config.stream_card_print_frequency_ms))
         print_step = max(1, int(self.config.stream_card_print_step))
@@ -1499,7 +1571,7 @@ class FeishuChannel(BaseChannel):
 
     def _build_streaming_update_card_content(self, thinking_text: str, answer_text: str, collapsed: bool) -> str:
         """构造 Card 2.0 更新内容（用于消息级回退更新）。"""
-        thinking_content = self._format_thinking_block(thinking_text, collapsed)
+        thinking_content = self._render_stream_thinking_content(thinking_text, collapsed, answer_text)
         answer_content = self._normalize_markdown_headings(answer_text)
         card = {
             "schema": "2.0",
@@ -1621,6 +1693,8 @@ class FeishuChannel(BaseChannel):
             stream_uuid=uuid4().hex,
             thinking_text=thinking_text,
             answer_text=answer_text,
+            answer_has_real_content=self._has_real_answer_content(answer_text),
+            last_sent_answer_len=len(str(answer_text or "")),
             thinking_collapsed=thinking_collapsed,
             reply_in_thread=reply_in_thread,
             last_update_at=now,
@@ -1644,12 +1718,21 @@ class FeishuChannel(BaseChannel):
     ) -> bool:
         """更新单个流式卡片，优先 CardKit 2.0，失败退化到 IM message.update。"""
         updates: list[tuple[str, str]] = []
+        if update_answer and not state.answer_has_real_content:
+            updates.append((
+                _STREAM_ANSWER_ELEMENT_ID,
+                self._normalize_markdown_headings(state.answer_text),
+            ))
         if update_thinking:
             updates.append((
                 _STREAM_THINKING_ELEMENT_ID,
-                self._format_thinking_block(state.thinking_text, state.thinking_collapsed),
+                self._render_stream_thinking_content(
+                    state.thinking_text,
+                    state.thinking_collapsed,
+                    state.answer_text,
+                ),
             ))
-        if update_answer:
+        if update_answer and state.answer_has_real_content:
             updates.append((
                 _STREAM_ANSWER_ELEMENT_ID,
                 self._normalize_markdown_headings(state.answer_text),
@@ -1757,7 +1840,12 @@ class FeishuChannel(BaseChannel):
             min_update_seconds = max(0, int(self.config.stream_card_min_update_ms)) / 1000
             now = time.monotonic()
             state.updated_at = now
-            if phase == "answer" and min_update_seconds > 0 and (now - state.last_update_at) < min_update_seconds:
+            if (
+                phase == "answer"
+                and min_update_seconds > 0
+                and state.answer_has_real_content
+                and (now - state.last_update_at) < min_update_seconds
+            ):
                 return True
 
             if not show_thinking and phase in {"thinking", "thinking_done"}:
@@ -1789,6 +1877,14 @@ class FeishuChannel(BaseChannel):
                     update_thinking = True
             else:
                 answer_text = msg.content
+                incoming_answer_len = len(str(answer_text or ""))
+                if (
+                    state.answer_has_real_content
+                    and state.last_sent_answer_len >= _LONG_ANSWER_COALESCE_START
+                    and incoming_answer_len - state.last_sent_answer_len < _LONG_ANSWER_MIN_DELTA
+                ):
+                    state.updated_at = now
+                    return True
                 if (
                     show_thinking
                     and self._has_specific_thinking_content(state.thinking_text)
@@ -1811,6 +1907,8 @@ class FeishuChannel(BaseChannel):
                 now = time.monotonic()
                 state.last_update_at = now
                 state.updated_at = now
+                state.answer_has_real_content = self._has_real_answer_content(state.answer_text)
+                state.last_sent_answer_len = len(str(state.answer_text or ""))
                 self._remember_bot_message(state.bot_message_id, content=state.answer_text or state.thinking_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
                 return True
 
@@ -1849,6 +1947,8 @@ class FeishuChannel(BaseChannel):
                 state.bot_message_id = fallback_message_id
                 state.updated_at = now
                 state.last_update_at = now
+                state.answer_has_real_content = self._has_real_answer_content(state.answer_text)
+                state.last_sent_answer_len = len(str(state.answer_text or ""))
                 state.stream_uuid = uuid4().hex
                 state.sequence = 0
                 state.card_id = None
@@ -1884,6 +1984,8 @@ class FeishuChannel(BaseChannel):
             now = time.monotonic()
             state.last_update_at = now
             state.updated_at = now
+            state.answer_has_real_content = self._has_real_answer_content(state.answer_text)
+            state.last_sent_answer_len = len(str(state.answer_text or ""))
             self._remember_bot_message(state.bot_message_id, content=state.answer_text, chat_id=msg.chat_id, source_message_id=state.source_message_id)
             return True
 
@@ -1922,6 +2024,8 @@ class FeishuChannel(BaseChannel):
             state.bot_message_id = fallback_message_id
             state.updated_at = now
             state.last_update_at = now
+            state.answer_has_real_content = self._has_real_answer_content(state.answer_text)
+            state.last_sent_answer_len = len(str(state.answer_text or ""))
             state.stream_uuid = uuid4().hex
             state.sequence = 0
             state.card_id = None
@@ -2049,8 +2153,13 @@ class FeishuChannel(BaseChannel):
             await self._handle_message(
                 sender_id=user_open_id,
                 chat_id=user_open_id,
-                content="/setup",
-                metadata={"source_event_type": "p2p_chat_create", "_bootstrap": True},
+                content="",
+                metadata={
+                    "source_event_type": "p2p_chat_create",
+                    "chat_type": "p2p",
+                    "_bootstrap": True,
+                    "_bootstrap_proactive": True,
+                },
             )
             return
         await self.send(OutboundMessage(

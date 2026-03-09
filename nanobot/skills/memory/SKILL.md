@@ -8,7 +8,8 @@ always: true
 
 ## Structure
 
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
+- `MEMORY.md` — Shared long-term facts for non-Feishu chats and Feishu group chats.
+- `memory/feishu/users/<open_id>/MEMORY.md` — Private Feishu user's long-term facts.
 - `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep. Each entry starts with [YYYY-MM-DD HH:MM].
 
 ## Search Past Events

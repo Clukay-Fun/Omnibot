@@ -11,6 +11,7 @@ from nanobot.agent.tools.feishu_data.calendar_tools import (
 )
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
+from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
 from nanobot.config.schema import FeishuDataConfig
 
 
@@ -84,3 +85,26 @@ async def test_calendar_delete_requires_calendar_id(config: FeishuDataConfig, cl
 
     assert "calendar_id" in result["error"]
     client.request.assert_not_called()
+
+
+def test_registry_feature_flags_disable_optional_feishu_tools() -> None:
+    config = FeishuDataConfig(
+        enabled=True,
+        app_id="id",
+        app_secret="secret",
+        feature_flags={
+            "calendar_enabled": False,
+            "task_enabled": False,
+            "bitable_admin_enabled": False,
+            "message_history_enabled": False,
+        },
+    )
+
+    tool_names = {tool.name for tool in build_feishu_data_tools(config)}
+
+    assert "bitable_search" in tool_names
+    assert "doc_search" in tool_names
+    assert "calendar_list" not in tool_names
+    assert "task_create" not in tool_names
+    assert "bitable_app_create" not in tool_names
+    assert "message_history_list" not in tool_names

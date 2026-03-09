@@ -17,6 +17,13 @@ from loguru import logger
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
+from nanobot.agent.pending_write import (
+    PENDING_WRITE_METADATA_KEY,
+    coerce_pending_write_result,
+    extract_json_object,
+    extract_pending_write_command,
+    format_pending_write_preview,
+)
 from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.agent.skill_runtime import (
@@ -40,7 +47,8 @@ from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session, SessionManager
 from nanobot.storage.audit import AuditSink
-from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
+from nanobot.utils.helpers import get_state_path, migrate_legacy_path, sync_workspace_templates
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -70,7 +78,9 @@ class AgentLoop:
     _TOOL_RESULT_MAX_CHARS = 500
     _ANSWER_PLACEHOLDER_DELAY_MS = 250
     _ONBOARDING_SETUP_FALLBACK_COMMANDS = ("/setup", "重新设置")
+    _ONBOARDING_GUIDE_PROMPTED_KEY = "guide_prompted_at"
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
+    _BOOTSTRAP_INTERNAL_TRIGGER_PREFIX = "[Bootstrap Internal Trigger]"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
     _MEMORY_WRITE_TURN_THRESHOLD = 3
@@ -111,6 +121,8 @@ class AgentLoop:
         skillspec_render_primary_timeout_seconds: float = 12.0,
         skillspec_render_retry_timeout_seconds: float = 6.0,
         feishu_oauth_service: "FeishuOAuthService | None" = None,
+        state_db_path: Path | None = None,
+        sqlite_options: SQLiteConnectionOptions | None = None,
     ):
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
@@ -127,6 +139,7 @@ class AgentLoop:
         self._skillspec_embedding_provider_config = skillspec_embedding_provider_config or ProviderConfig()
         self.provider = provider
         self.workspace = workspace
+        sync_workspace_templates(self.workspace, silent=True)
         self.model = model or provider.get_default_model()
         self.max_iterations = max_iterations
         self.temperature = temperature
@@ -149,11 +162,24 @@ class AgentLoop:
         )
 
         self.context = ContextBuilder(workspace)
-        self.sessions = session_manager or SessionManager(workspace)
-        self._sqlite = SQLiteStore(self.workspace / "memory" / "feishu" / "state.sqlite3")
+        self._memory_store = self.context.memory
+        legacy_state_db_path = self.workspace / "memory" / "feishu" / "state.sqlite3"
+        self._state_db_path = state_db_path or (get_state_path() / "feishu" / "state.sqlite3")
+        migrate_legacy_path(legacy_state_db_path, self._state_db_path, related_suffixes=("-wal", "-shm", ".bak"))
+        self._sqlite_options = sqlite_options
+        self.sessions = session_manager or SessionManager(
+            workspace,
+            state_db_path=self._state_db_path,
+            sqlite_options=self._sqlite_options,
+        )
+        self._sqlite = SQLiteStore(self._state_db_path, options=self._sqlite_options)
         audit_cleanup_interval_seconds = AuditSink.DEFAULT_CLEANUP_INTERVAL_SECONDS
         audit_event_retention_days = AuditSink.DEFAULT_EVENT_AUDIT_RETENTION_DAYS
         audit_message_index_retention_days = AuditSink.DEFAULT_FEISHU_MESSAGE_INDEX_RETENTION_DAYS
+        self._memory_flush_threshold_private = self._MEMORY_WRITE_TURN_THRESHOLD
+        self._memory_flush_threshold_group = self._MEMORY_WRITE_TURN_THRESHOLD
+        self._memory_force_flush_on_topic_end = True
+        self._memory_topic_end_keywords = tuple(self._MEMORY_TOPIC_END_KEYWORDS)
         if self.channels_config is not None:
             feishu_cfg = getattr(self.channels_config, "feishu", None)
             if feishu_cfg is not None:
@@ -170,15 +196,55 @@ class AgentLoop:
                         audit_message_index_retention_days,
                     )
                 )
+                self._memory_flush_threshold_private = max(
+                    1,
+                    int(
+                        getattr(
+                            feishu_cfg,
+                            "memory_flush_threshold_private",
+                            self._memory_flush_threshold_private,
+                        )
+                    ),
+                )
+                self._memory_flush_threshold_group = max(
+                    1,
+                    int(
+                        getattr(
+                            feishu_cfg,
+                            "memory_flush_threshold_group",
+                            self._memory_flush_threshold_group,
+                        )
+                    ),
+                )
+                self._memory_force_flush_on_topic_end = bool(
+                    getattr(
+                        feishu_cfg,
+                        "memory_force_flush_on_topic_end",
+                        self._memory_force_flush_on_topic_end,
+                    )
+                )
+                configured_keywords = getattr(feishu_cfg, "memory_topic_end_keywords", None)
+                if isinstance(configured_keywords, list):
+                    cleaned_keywords = tuple(
+                        item.strip()
+                        for item in configured_keywords
+                        if isinstance(item, str) and item.strip()
+                    )
+                    if cleaned_keywords:
+                        self._memory_topic_end_keywords = cleaned_keywords
         self._audit_sink = AuditSink(
             self._sqlite,
             cleanup_interval_seconds=audit_cleanup_interval_seconds,
             event_audit_retention_days=audit_event_retention_days,
             feishu_message_index_retention_days=audit_message_index_retention_days,
         )
+        memory_base_threshold = min(
+            self._memory_flush_threshold_private,
+            self._memory_flush_threshold_group,
+        )
         self._memory_worker = MemoryWriteWorker(
             self.workspace,
-            flush_threshold=self._MEMORY_WRITE_TURN_THRESHOLD,
+            flush_threshold=memory_base_threshold,
         )
         self._workers_started = False
         self.tools = ToolRegistry()
@@ -200,6 +266,8 @@ class AgentLoop:
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             feishu_data_config=feishu_data_config,
+            state_db_path=self._state_db_path,
+            sqlite_options=self._sqlite_options,
         )
 
         self._running = False
@@ -224,6 +292,8 @@ class AgentLoop:
             if feishu_cfg is not None:
                 self._stream_warmup_chars = max(1, int(getattr(feishu_cfg, "stream_answer_warmup_chars", 24)))
                 self._stream_warmup_ms = max(0, int(getattr(feishu_cfg, "stream_answer_warmup_ms", 300)))
+        self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
+        self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
@@ -258,7 +328,10 @@ class AgentLoop:
             embedding_min_score=self.skillspec_config.embedding_min_score,
             route_log_enabled=self.skillspec_config.route_log_enabled,
             route_log_top_k=self.skillspec_config.route_log_top_k,
-            reminder_runtime=ReminderRuntime(self.workspace / "reminders.json"),
+            reminder_runtime=ReminderRuntime(
+                get_state_path() / "reminders.json",
+                legacy_store_paths=[self.workspace / "reminders.json"],
+            ),
             runtime_text=self._runtime_text,
             table_registry=TableRegistry(workspace=self.workspace),
         )
@@ -294,6 +367,35 @@ class AgentLoop:
             session_key=session_key or msg.session_key,
             metadata=dict(msg.metadata or {}),
         )
+
+    @staticmethod
+    def _prompt_context_from_session(session: Session) -> PromptContext:
+        metadata = dict(session.metadata or {})
+        return PromptContext(
+            purpose="chat",
+            channel=str(metadata.get("channel") or "") or None,
+            chat_id=str(metadata.get("chat_id") or "") or None,
+            sender_id=str(metadata.get("sender_id") or "") or None,
+            session_key=session.key,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _remember_session_runtime_metadata(session: Session, msg: InboundMessage) -> None:
+        metadata = dict(session.metadata or {})
+        msg_metadata = dict(msg.metadata or {})
+        metadata["channel"] = msg.channel
+        metadata["chat_id"] = msg.chat_id
+        metadata["sender_id"] = msg.sender_id
+        metadata["chat_type"] = str(msg_metadata.get("chat_type") or "")
+
+        thread_id = str(msg_metadata.get("thread_id") or msg_metadata.get("root_id") or "").strip()
+        if thread_id:
+            metadata["thread_id"] = thread_id
+        else:
+            metadata.pop("thread_id", None)
+
+        session.metadata = metadata
 
     def _feishu_onboarding_config(self) -> Any | None:
         if not self.channels_config:
@@ -704,13 +806,209 @@ class AgentLoop:
             return user_name
         return "你"
 
-    def _build_onboarding_guide_message(self, profile: dict[str, Any] | None = None) -> str:
-        lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+    def _resolve_onboarding_name_example(self, profile: dict[str, Any] | None = None) -> str:
         preferred_name = self._resolve_profile_display_name(profile)
-        rendered_lines = [line.replace("{preferred_name}", preferred_name) for line in lines]
+        return preferred_name if preferred_name != "你" else "小律"
+
+    @staticmethod
+    def _workspace_template_path(filename: str) -> Path:
+        return Path(__file__).resolve().parent.parent / "templates" / filename
+
+    def _read_workspace_or_template_file(self, filename: str, runtime: PromptContext | None = None) -> str:
+        if runtime is not None and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"}:
+            path = self._memory_store.resolve_persona_markdown_path(filename, runtime)
+            if path is not None:
+                try:
+                    if path.exists():
+                        return path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+
+        for path in (self.workspace / filename, self._workspace_template_path(filename)):
+            try:
+                if path.exists():
+                    return path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+        return ""
+
+    def _build_bootstrap_identity_summary(self, runtime: PromptContext | None = None) -> str:
+        bootstrap_text = self._read_workspace_or_template_file("BOOTSTRAP.md", runtime)
+        topics = re.findall(r"\d+\.\s+\*\*(.*?)\*\*", bootstrap_text)
+        normalized_topics = [topic.strip().lower() for topic in topics if topic.strip()]
+        if any("name" in topic for topic in normalized_topics):
+            return "名字 / 类型 / 语气 / emoji"
+        return "名字 / 语气 / 行为偏好"
+
+    def _build_bootstrap_action_summary(self, runtime: PromptContext | None = None) -> str:
+        soul_text = self._read_workspace_or_template_file("SOUL.md", runtime)
+        lower_soul = soul_text.lower()
+        parts: list[str] = []
+        if "concise" in lower_soul or "简洁" in soul_text:
+            parts.append("默认简洁直接")
+        if "accuracy" in lower_soul or "准确" in soul_text:
+            parts.append("先保证准确")
+        if "privacy" in lower_soul or "隐私" in soul_text:
+            parts.append("重视隐私")
+        if "ask before external actions" in lower_soul or "外部动作" in soul_text:
+            parts.append("外部动作先确认")
+        if not parts:
+            parts.extend(["默认简洁直接", "重视准确与隐私", "外部动作先确认"])
+        return "、".join(parts[:3])
+
+    @staticmethod
+    def _extract_markdown_list_items(text: str, pattern: str, *, limit: int | None = None) -> list[str]:
+        items = [match.strip() for match in re.findall(pattern, text, flags=re.MULTILINE) if match.strip()]
+        return items[:limit] if limit is not None else items
+
+    @staticmethod
+    def _extract_first_blockquote(text: str) -> str:
+        quotes = [match.strip() for match in re.findall(r"^>\s*(.+)$", text, flags=re.MULTILINE) if match.strip()]
+        return quotes[0] if quotes else ""
+
+    @staticmethod
+    def _extract_section_bullets(text: str, section_titles: tuple[str, ...], *, limit: int = 3) -> list[str]:
+        targets = {title.lower() for title in section_titles}
+        current_section = ""
+        bullets: list[str] = []
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("## "):
+                current_section = line[3:].strip().lower()
+                continue
+            if current_section in targets and re.match(r"^[-*]\s+", line):
+                bullets.append(re.sub(r"^[-*]\s+", "", line).strip())
+                if len(bullets) >= limit:
+                    return bullets
+        if bullets:
+            return bullets[:limit]
+        fallback = [
+            re.sub(r"^[-*]\s+", "", line.strip()).strip()
+            for line in text.splitlines()
+            if re.match(r"^\s*[-*]\s+", line)
+        ]
+        return [item for item in fallback if item][:limit]
+
+    def _build_dynamic_onboarding_guide_lines(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> list[str]:
+        preferred_name = self._resolve_onboarding_name_example(profile)
+        bootstrap_text = self._read_workspace_or_template_file("BOOTSTRAP.md", runtime)
+        soul_text = self._read_workspace_or_template_file("SOUL.md", runtime)
+
+        bootstrap_items = self._extract_markdown_list_items(
+            bootstrap_text,
+            r"^\d+\.\s+(.+)$",
+            limit=4,
+        )
+        bootstrap_quote = self._extract_first_blockquote(bootstrap_text)
+        update_targets = self._extract_markdown_list_items(
+            bootstrap_text,
+            r"^[-*]\s+(`[^`]+`.+)$",
+            limit=4,
+        )
+        soul_items = self._extract_section_bullets(
+            soul_text,
+            ("Response Defaults", "Boundaries", "Core Values"),
+            limit=4,
+        )
+
+        lines = [
+            "### 👋 BOOTSTRAP 确认",
+            "我会先按当前 `BOOTSTRAP.md` / `SOUL.md` 的内容继续，不阻塞对话。",
+            "",
+        ]
+
+        if bootstrap_items:
+            lines.append("当前 `BOOTSTRAP.md` 里优先确认：")
+            lines.extend(f"- {item}" for item in bootstrap_items)
+            lines.append("")
+        else:
+            lines.extend([
+                "默认先确认两类事：",
+                f"- 人格：{self._build_bootstrap_identity_summary(runtime)}",
+                f"- 行动方式：{self._build_bootstrap_action_summary(runtime)}",
+                "",
+            ])
+
+        if bootstrap_quote:
+            lines.append("当前建议开场原文：")
+            lines.append(f"> {bootstrap_quote}")
+            lines.append("")
+
+        if update_targets:
+            lines.append("确认后会更新：")
+            lines.extend(f"- {item}" for item in update_targets)
+            lines.append("")
+
+        if soul_items:
+            lines.append("当前 `SOUL.md` 强调：")
+            lines.extend(f"- {item}" for item in soul_items)
+            lines.append("")
+
+        lines.extend(
+            [
+                f"直接回复你想改的点即可；例如名字改成“{preferred_name}”、调整语气、边界或写入确认方式。",
+                "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
+            ]
+        )
+        return lines
+
+    def _build_onboarding_guide_message(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> str:
+        if runtime is not None and runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                self._memory_store.ensure_feishu_user_persona_files(open_id)
+        preferred_name = self._resolve_onboarding_name_example(profile)
+        bootstrap_identity = self._build_bootstrap_identity_summary(runtime)
+        bootstrap_action = self._build_bootstrap_action_summary(runtime)
+        if self._runtime_text.has_prompt_override("onboarding", "guide_lines"):
+            lines = self._runtime_text.prompt_lines("onboarding", "guide_lines", [])
+        else:
+            lines = self._build_dynamic_onboarding_guide_lines(profile, runtime)
+        rendered_lines = [
+            line.replace("{preferred_name}", preferred_name)
+            .replace("{bootstrap_identity}", bootstrap_identity)
+            .replace("{bootstrap_action}", bootstrap_action)
+            for line in lines
+        ]
         return "\n".join(rendered_lines)
 
-    def _build_onboarding_completed_card(self, profile: dict[str, Any] | None = None) -> str:
+    def _build_onboarding_guide_outbound(
+        self,
+        msg: InboundMessage,
+        *,
+        stage: str,
+        intro_text: str,
+        profile: dict[str, Any] | None = None,
+    ) -> OutboundMessage:
+        metadata = dict(msg.metadata or {})
+        metadata["onboarding"] = True
+        metadata["onboarding_stage"] = stage
+        metadata["_reply_in_thread"] = False
+        metadata["_disable_reply_to_message"] = True
+        content = intro_text.strip()
+        guide = self._build_onboarding_guide_message(profile, runtime=self._prompt_context_for_message(msg))
+        if guide:
+            content = f"{content}\n\n{guide}" if content else guide
+        return OutboundMessage(
+            channel=msg.channel,
+            chat_id=msg.chat_id,
+            content=content,
+            metadata=metadata,
+        )
+
+    def _build_onboarding_completed_card(
+        self,
+        profile: dict[str, Any] | None = None,
+        runtime: PromptContext | None = None,
+    ) -> str:
         onboarding_tpl = self._runtime_text.template("onboarding_form")
         card = {
             "config": {"wide_screen_mode": True},
@@ -724,11 +1022,81 @@ class AgentLoop:
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": self._build_onboarding_guide_message(profile).replace("\n", "  \n"),
+                    "content": self._build_onboarding_guide_message(profile, runtime=runtime).replace("\n", "  \n"),
                 }
             ],
         }
         return json.dumps(card, ensure_ascii=False)
+
+    @staticmethod
+    def _is_private_feishu_message(msg: InboundMessage) -> bool:
+        if msg.channel != "feishu":
+            return False
+        return str((msg.metadata or {}).get("chat_type") or "") != "group"
+
+    def _mark_bootstrap_defaulted(self, profile: dict[str, Any], *, step: str) -> None:
+        onboarding = cast(dict[str, Any], profile["onboarding"])
+        now_iso = self._now_iso()
+        onboarding.update(
+            {
+                "status": "completed",
+                "step": step,
+                "started_at": onboarding.get("started_at") or now_iso,
+                "completed_at": onboarding.get("completed_at") or now_iso,
+                "updated_at": now_iso,
+                self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+            }
+        )
+
+    def _prepare_private_bootstrap_turn(
+        self,
+        msg: InboundMessage,
+        profile: dict[str, Any],
+        *,
+        step: str,
+        proactive: bool = False,
+        reentry: bool = False,
+    ) -> None:
+        self._mark_bootstrap_defaulted(profile, step=step)
+        self._user_memory_store.write(msg.channel, msg.sender_id, profile)
+
+        metadata = dict(msg.metadata or {})
+        metadata["_bootstrap"] = True
+        metadata["_bootstrap_inline"] = not proactive and not reentry
+        if proactive:
+            metadata["_bootstrap_proactive"] = True
+            metadata["_disable_reply_to_message"] = True
+        if reentry:
+            metadata["_bootstrap_reentry"] = True
+            metadata["_disable_reply_to_message"] = True
+        msg.metadata = metadata
+
+    def _bootstrap_internal_prompt(self, msg: InboundMessage) -> str:
+        metadata = msg.metadata or {}
+        if metadata.get("_bootstrap_proactive"):
+            return (
+                f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+                "The user has just opened this private chat and has not sent a real message yet. "
+                "Start the conversation proactively according to the current bootstrap files."
+            )
+        if metadata.get("_bootstrap_reentry"):
+            return (
+                f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+                "The user explicitly asked to revisit setup. Re-open the conversation naturally based on the current bootstrap files."
+            )
+        return (
+            f"{self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX}\n"
+            "This is the first real user message in a brand-new private chat. Bootstrap is not optional here. "
+            "Respond to the user's actual message, but the reply must begin the bootstrap conversation according to the current bootstrap files. "
+            "Do not skip directly to a generic help offer.\n\n"
+            f"Actual user message:\n{msg.content}"
+        )
+
+    def _effective_user_message_for_llm(self, msg: InboundMessage) -> str:
+        metadata = msg.metadata or {}
+        if metadata.get("_bootstrap"):
+            return self._bootstrap_internal_prompt(msg)
+        return msg.content
 
     def _build_onboarding_card_outbound(
         self,
@@ -790,17 +1158,69 @@ class AgentLoop:
         action_key, action_value, form_value = self._extract_onboarding_action(msg)
         normalized_action_key = action_key.strip().lower()
         callback_message_id = str((msg.metadata or {}).get("message_id") or "").strip()
+        prompt_once = bool(getattr(feishu_cfg, "onboarding_guide_once", True))
+        prompted_at = str(onboarding.get(self._ONBOARDING_GUIDE_PROMPTED_KEY) or "").strip()
+
+        if self._is_private_feishu_message(msg) and not is_card_action:
+            metadata = msg.metadata or {}
+            source_event_type = str(metadata.get("source_event_type") or "")
+            if metadata.get("_bootstrap_proactive") or source_event_type == "p2p_chat_create":
+                self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_proactive", proactive=True)
+                return None
+            if is_reentry:
+                self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_reentry", reentry=True)
+                return None
+            if status == "completed":
+                return None
+            if prompt_once and prompted_at:
+                return None
+            self._prepare_private_bootstrap_turn(msg, profile, step="bootstrap_default")
+            return None
 
         if is_reentry:
-            onboarding.update({"status": "pending", "step": "identity", "updated_at": self._now_iso()})
+            now_iso = self._now_iso()
+            if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+                onboarding.update(
+                    {
+                        "status": "pending",
+                        "step": "identity",
+                        "started_at": onboarding.get("started_at") or now_iso,
+                        "updated_at": now_iso,
+                        self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                    }
+                )
+            else:
+                onboarding.update(
+                    {
+                        "status": "completed",
+                        "step": "bootstrap_default",
+                        "started_at": onboarding.get("started_at") or now_iso,
+                        "completed_at": now_iso,
+                        "updated_at": now_iso,
+                        self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                    }
+                )
             self._user_memory_store.write(msg.channel, msg.sender_id, profile)
-            return self._build_onboarding_card_outbound(
+            if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+                return self._build_onboarding_card_outbound(
+                    msg,
+                    card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                    stage="single",
+                    intro_text=self._runtime_text.prompt_text(
+                        "onboarding",
+                        "intro_reentry",
+                        "Welcome back, let's set up again quickly.",
+                    ),
+                )
+            return self._build_onboarding_guide_outbound(
                 msg,
-                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
-                stage="single",
+                stage="guide_reentry",
                 intro_text=self._runtime_text.prompt_text(
-                    "onboarding", "intro_reentry", "Welcome back, let's set up again quickly."
+                    "onboarding",
+                    "intro_reentry",
+                    "已重新打开上手提示。",
                 ),
+                profile=profile,
             )
 
         onboarding_action_keys = {
@@ -824,7 +1244,10 @@ class AgentLoop:
             if status == "completed":
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding",
@@ -934,7 +1357,10 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding", "intro_submit_done", "Setup completed."
@@ -955,7 +1381,10 @@ class AgentLoop:
                 self._user_memory_store.write(msg.channel, msg.sender_id, profile)
                 return self._build_onboarding_card_outbound(
                     msg,
-                    card_payload=self._build_onboarding_completed_card(profile),
+                    card_payload=self._build_onboarding_completed_card(
+                        profile,
+                        runtime=self._prompt_context_for_message(msg),
+                    ),
                     stage="completed",
                     intro_text=self._runtime_text.prompt_text(
                         "onboarding", "intro_skip_done", "Skipped setup. Preferences will be learned in dialogue."
@@ -968,24 +1397,57 @@ class AgentLoop:
         if status == "completed":
             return None
 
-        onboarding.update(
-            {
-                "status": "pending",
-                "step": "identity",
-                "started_at": onboarding.get("started_at") or self._now_iso(),
-                "updated_at": self._now_iso(),
-            }
-        )
+        if prompt_once and prompted_at:
+            return None
+
+        now_iso = self._now_iso()
+        if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+            onboarding.update(
+                {
+                    "status": "pending",
+                    "step": "identity",
+                    "started_at": onboarding.get("started_at") or now_iso,
+                    "updated_at": now_iso,
+                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                }
+            )
+        else:
+            onboarding.update(
+                {
+                    "status": "completed",
+                    "step": "bootstrap_default",
+                    "started_at": onboarding.get("started_at") or now_iso,
+                    "completed_at": now_iso,
+                    "updated_at": now_iso,
+                    self._ONBOARDING_GUIDE_PROMPTED_KEY: now_iso,
+                }
+            )
         self._user_memory_store.write(msg.channel, msg.sender_id, profile)
 
-        return self._build_onboarding_card_outbound(
+        guide_outbound = self._build_onboarding_guide_outbound(
             msg,
-            card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
-            stage="single",
+            stage="guide",
             intro_text=self._runtime_text.prompt_text(
-                "onboarding", "intro_first", "Welcome, please complete setup first."
+                "onboarding",
+                "intro_first",
+                "我先发你一条快速上手提示，不影响继续提问。",
             ),
+            profile=profile,
         )
+        if bool(getattr(feishu_cfg, "onboarding_blocking", False)):
+            return self._build_onboarding_card_outbound(
+                msg,
+                card_payload=self._build_onboarding_single_card(feishu_cfg, profile),
+                stage="single",
+                intro_text=self._runtime_text.prompt_text(
+                    "onboarding",
+                    "intro_first",
+                    "Welcome, please complete setup first.",
+                ),
+            )
+
+        await self.bus.publish_outbound(guide_outbound)
+        return None
 
     def _register_default_tools(self) -> None:
         """注册默认工具集。"""
@@ -1007,7 +1469,12 @@ class AgentLoop:
 
         if self.feishu_data_config and self.feishu_data_config.enabled:
             from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
-            for tool in build_feishu_data_tools(self.feishu_data_config, workspace=self.workspace):
+            for tool in build_feishu_data_tools(
+                self.feishu_data_config,
+                workspace=self.workspace,
+                state_db_path=self._state_db_path,
+                sqlite_options=self._sqlite_options,
+            ):
                 self.tools.register(tool)
 
     # endregion
@@ -1151,6 +1618,212 @@ class AgentLoop:
     ) -> str | None:
         return fallback_text
 
+    @staticmethod
+    def _pending_write(session: Session) -> dict[str, Any]:
+        value = session.metadata.get(PENDING_WRITE_METADATA_KEY)
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _set_pending_write(session: Session, payload: dict[str, Any]) -> None:
+        metadata = dict(session.metadata or {})
+        metadata[PENDING_WRITE_METADATA_KEY] = payload
+        session.metadata = metadata
+
+    @staticmethod
+    def _clear_pending_write(session: Session) -> None:
+        metadata = dict(session.metadata or {})
+        metadata.pop(PENDING_WRITE_METADATA_KEY, None)
+        session.metadata = metadata
+
+    @staticmethod
+    def _record_direct_turn(session: Session, msg: InboundMessage, assistant_content: str) -> None:
+        session.add_message("user", msg.content)
+        session.add_message("assistant", assistant_content)
+
+    @staticmethod
+    def _pending_write_args_from_payload(
+        *,
+        tool_name: str,
+        raw_args: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        args = dict(raw_args)
+        args.pop("confirm_token", None)
+        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        if isinstance(preview.get("fields"), dict):
+            args["fields"] = dict(preview["fields"])
+        for key in ("table_id", "record_id"):
+            value = preview.get(key)
+            if value not in (None, ""):
+                args[key] = value
+        if tool_name == "bitable_delete" and "record_id" in raw_args:
+            args.setdefault("record_id", raw_args.get("record_id"))
+        return args
+
+    def _store_pending_write_from_result(
+        self,
+        *,
+        session: Session,
+        tool_name: str,
+        raw_args: dict[str, Any],
+        result: str,
+    ) -> str | None:
+        payload = extract_json_object(result)
+        if not payload or payload.get("dry_run") is not True or not payload.get("confirm_token"):
+            return None
+        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        pending = {
+            "tool": tool_name,
+            "token": str(payload.get("confirm_token") or ""),
+            "args": self._pending_write_args_from_payload(tool_name=tool_name, raw_args=raw_args, payload=payload),
+            "preview": preview,
+            "created_at": self._now_iso(),
+        }
+        self._set_pending_write(session, pending)
+        return format_pending_write_preview(preview)
+
+    async def _load_pending_write_schema(self, pending: dict[str, Any]) -> list[dict[str, Any]]:
+        tool_name = str(pending.get("tool") or "")
+        if tool_name not in {"bitable_create", "bitable_update"}:
+            return []
+        if not self.tools.has("bitable_list_fields"):
+            return []
+        args = pending.get("args") if isinstance(pending.get("args"), dict) else {}
+        if not isinstance(args, dict):
+            return []
+        tool_args: dict[str, Any] = {"compact": True}
+        if args.get("app_token"):
+            tool_args["app_token"] = args["app_token"]
+        if args.get("table_id"):
+            tool_args["table_id"] = args["table_id"]
+        result = await self.tools.execute("bitable_list_fields", tool_args)
+        payload = extract_json_object(result)
+        if not payload:
+            return []
+        fields = payload.get("fields")
+        return [item for item in fields if isinstance(item, dict)][:12] if isinstance(fields, list) else []
+
+    async def _interpret_pending_write_reply(self, *, msg: InboundMessage, pending: dict[str, Any]) -> dict[str, Any]:
+        schema_fields = await self._load_pending_write_schema(pending)
+        prompt = (
+            "你是写入确认协调器。只输出 JSON，不要调用工具。\n"
+            "根据当前待写入预览和用户最新一句话，判断 action：confirm / cancel / modify / ignore。\n"
+            "规则：\n"
+            "1. 只有明确确认且没有修改字段时，action 才能是 confirm。\n"
+            "2. 用户补充或修改字段时，action=modify，并返回 fields_patch 对象。\n"
+            "3. 用户取消时，action=cancel。\n"
+            "4. 如果这句话和当前待写入无关，action=ignore。\n"
+            "5. fields_patch 只写需要变更的字段；日期优先保留 YYYY-MM-DD，不要自己造毫秒时间戳。\n\n"
+            f"当前待写入：{json.dumps(pending.get('preview') or {}, ensure_ascii=False)}\n"
+            f"可用字段：{json.dumps(schema_fields, ensure_ascii=False)}\n"
+            f"用户消息：{msg.content}\n\n"
+            '只返回 JSON，例如：{"action":"modify","fields_patch":{"人员":"房怡康"}}'
+        )
+        try:
+            response = await asyncio.wait_for(
+                self.provider.chat(
+                    messages=[
+                        {"role": "system", "content": "You are a strict JSON-only write confirmation coordinator."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    tools=None,
+                    model=self.model,
+                    temperature=0,
+                    max_tokens=300,
+                    reasoning_effort=None,
+                ),
+                timeout=min(self._llm_timeout_seconds, self._skillspec_render_primary_timeout_seconds),
+            )
+        except Exception:
+            return {"action": "ignore"}
+        payload = extract_json_object(self._strip_think(response.content) or response.content)
+        return payload or {"action": "ignore"}
+
+    async def _try_handle_pending_write(self, msg: InboundMessage, *, session: Session) -> OutboundMessage | None:
+        pending = self._pending_write(session)
+        if not pending:
+            return None
+
+        command, token, extra_text = extract_pending_write_command(msg)
+        pending_token = str(pending.get("token") or "")
+        if token and token != pending_token:
+            content = "当前没有匹配的待确认写入。请按最新预览直接回复“确认”或“取消”。"
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+        if command == "cancel":
+            self._clear_pending_write(session)
+            content = "已取消这次待写入操作。"
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+        if command == "confirm" and not extra_text:
+            args = dict(pending.get("args") or {})
+            tool_name = str(pending.get("tool") or "")
+            args["confirm_token"] = pending_token
+            result = await self.tools.execute(tool_name, args)
+            self._clear_pending_write(session)
+            payload = extract_json_object(result)
+            content = coerce_pending_write_result(payload) if payload else result
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+        decision = await self._interpret_pending_write_reply(msg=msg, pending=pending)
+        action = str(decision.get("action") or "ignore").strip().lower()
+        if action == "ignore":
+            return None
+        if action == "cancel":
+            self._clear_pending_write(session)
+            content = "已取消这次待写入操作。"
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+        if action == "confirm":
+            args = dict(pending.get("args") or {})
+            tool_name = str(pending.get("tool") or "")
+            args["confirm_token"] = pending_token
+            result = await self.tools.execute(tool_name, args)
+            self._clear_pending_write(session)
+            payload = extract_json_object(result)
+            content = coerce_pending_write_result(payload) if payload else result
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+        if action != "modify":
+            return None
+
+        patch = decision.get("fields_patch") if isinstance(decision.get("fields_patch"), dict) else {}
+        tool_name = str(pending.get("tool") or "")
+        args = dict(pending.get("args") or {})
+        fields = dict(args.get("fields") or {}) if isinstance(args.get("fields"), dict) else None
+        if not tool_name or fields is None:
+            content = "当前待写入操作不支持直接补字段，请先取消后重新发起。"
+            self._record_direct_turn(session, msg, content)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+        fields.update(patch)
+        args["fields"] = fields
+        args.pop("confirm_token", None)
+        result = await self.tools.execute(tool_name, args)
+        content = self._store_pending_write_from_result(session=session, tool_name=tool_name, raw_args=args, result=result)
+        if content is None:
+            payload = extract_json_object(result)
+            rendered = coerce_pending_write_result(payload) if payload else result
+            self._clear_pending_write(session)
+            self._record_direct_turn(session, msg, rendered)
+            self.sessions.save(session)
+            return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=rendered, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+        refreshed_preview = dict(session.metadata.get(PENDING_WRITE_METADATA_KEY) or {}).get("preview")
+        rendered = format_pending_write_preview(refreshed_preview if isinstance(refreshed_preview, dict) else {}, refreshed=True)
+        self._record_direct_turn(session, msg, rendered)
+        self.sessions.save(session)
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=rendered, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
         if not content:
@@ -1256,6 +1929,18 @@ class AgentLoop:
         logger.warning("Skillspec LLM render exhausted retries for {}, fallback to raw result", msg.session_key)
         return raw_content
 
+    @staticmethod
+    def _skillspec_kind(metadata: dict[str, Any] | None) -> str:
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get("skillspec_kind") or "").strip().lower()
+
+    def _should_rewrite_skillspec_result(self, metadata: dict[str, Any] | None) -> bool:
+        kind = self._skillspec_kind(metadata)
+        if kind == "query" and not bool(getattr(self.skillspec_config, "query_rewrite_enabled", False)):
+            return False
+        return True
+
     # endregion
 
     # region [核心调度与执行循环]
@@ -1265,6 +1950,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         session_key: str = "unknown",
+        session: Session | None = None,
     ) -> tuple[str | None, list[str], list[dict], list[dict[str, int | str | bool]]]:
         """运行智能体迭代循环。返回 (final_content, tools_used, messages)。"""
         messages = initial_messages
@@ -1314,6 +2000,7 @@ class AgentLoop:
             stream_started_at = time.monotonic()
             announced_tool_names: set[str] = set()
             answer_placeholder_task: asyncio.Task[None] | None = None
+            answer_placeholder_emitted = False
 
             async def _on_delta(delta: str) -> None:
                 nonlocal streamed_content, published_stream
@@ -1323,7 +2010,14 @@ class AgentLoop:
 
                 if not published_stream and iteration == 1:
                     elapsed_ms = int((time.monotonic() - stream_started_at) * 1000)
-                    if len(streamed_content) < self._stream_warmup_chars or elapsed_ms < self._stream_warmup_ms:
+                    warmup_chars = self._stream_warmup_chars
+                    warmup_ms = self._stream_warmup_ms
+                    if not thinking_detail_emitted and not announced_tool_names:
+                        warmup_chars = self._plain_stream_warmup_chars
+                        warmup_ms = self._plain_stream_warmup_ms
+                    if not answer_placeholder_emitted and (
+                        len(streamed_content) < warmup_chars or elapsed_ms < warmup_ms
+                    ):
                         return
 
                 await _emit_progress(streamed_content, phase="answer")
@@ -1340,11 +2034,13 @@ class AgentLoop:
                 thinking_detail_emitted = True
 
             async def _emit_answer_placeholder() -> None:
+                nonlocal answer_placeholder_emitted
                 if not on_progress:
                     return
                 await asyncio.sleep(self._ANSWER_PLACEHOLDER_DELAY_MS / 1000)
                 if published_stream or thinking_detail_emitted:
                     return
+                answer_placeholder_emitted = True
                 await _emit_progress(self._answer_placeholder_text, phase="answer")
 
             if on_progress and iteration == 1:
@@ -1457,7 +2153,19 @@ class AgentLoop:
                         "stage": f"tool:{tool_call.name}",
                         "duration_ms": tool_duration_ms,
                     })
-                    result_preview = self._short_text(result, limit=200)
+                    pending_preview = None
+                    if session is not None:
+                        pending_preview = self._store_pending_write_from_result(
+                            session=session,
+                            tool_name=tool_call.name,
+                            raw_args=tool_call.arguments,
+                            result=result,
+                        )
+                    result_preview = (
+                        "已生成写入预览，等待用户确认。"
+                        if pending_preview is not None
+                        else self._short_text(result, limit=200)
+                    )
                     if result_preview:
                         template = self._runtime_text.prompt_text(
                             "progress", "tool_result", "{tool} 结果：{result}"
@@ -1475,6 +2183,13 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if pending_preview is not None:
+                        final_content = pending_preview
+                        messages = self.context.add_assistant_message(messages, final_content)
+                        break
+
+                if final_content is not None:
+                    break
 
                 await _emit_progress(
                     self._runtime_text.prompt_text("progress", "data_ready", "已获取数据，正在整理答案..."),
@@ -1653,7 +2368,32 @@ class AgentLoop:
 
     def _build_commands_help_text(self) -> str:
         """返回命令总览（简短说明）。"""
-        return self._runtime_text.prompt_text("help", "commands_help_text", "").strip()
+        return self._runtime_text.prompt_text("help", "commands_help_text", self._default_commands_help_text()).strip()
+
+    @staticmethod
+    def _default_commands_help_text() -> str:
+        return (
+            "可用命令\n"
+            "- /help 或 /commands：查看命令总览\n"
+            "- /status：查看当前偏好与授权状态\n"
+            "- /setup：查看初始化引导\n"
+            "- /connect 或 /oauth：连接飞书 OAuth\n"
+            "- /session：查看会话子命令帮助\n"
+            "- /new：开启新会话\n"
+            "- /stop：停止当前任务\n"
+            "- 继续 / 展开：查看分页剩余内容\n"
+            "- 确认 <token> / 取消 <token>：确认或取消写入"
+        )
+
+    @staticmethod
+    def _default_session_help_text() -> str:
+        return (
+            "会话命令\n"
+            "- /session：查看帮助\n"
+            "- /session new [标题]：在群话题中新建会话\n"
+            "- /session list：列出当前聊天下会话\n"
+            "- /session del <id|main>：删除指定会话"
+        )
 
     def _build_status_text(self, msg: InboundMessage) -> str:
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
@@ -1811,7 +2551,11 @@ class AgentLoop:
         base_key = f"{msg.channel}:{msg.chat_id}"
 
         if sub in ("", "help"):
-            content = self._runtime_text.prompt_text("help", "session_help_text", "").strip()
+            content = self._runtime_text.prompt_text(
+                "help",
+                "session_help_text",
+                self._default_session_help_text(),
+            ).strip()
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
         if sub == "new":
@@ -1934,7 +2678,7 @@ class AgentLoop:
                 runtime=prompt_context,
             )
             turn_started = time.perf_counter()
-            final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key)
+            final_content, _, all_msgs, timings = await self._run_agent_loop(messages, session_key=key, session=session)
             turn_new = all_msgs[1 + len(history):]
             total_ms = int((time.perf_counter() - turn_started) * 1000)
             final_content = self._render_with_template(
@@ -1954,6 +2698,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        self._remember_session_runtime_metadata(session, msg)
         base_key = f"{msg.channel}:{msg.chat_id}"
         self._consume_one_pending_topic_title(base_key, key)
 
@@ -1981,6 +2726,12 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd == "/step":
+            return OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=self._build_status_text(msg),
+            )
         if cmd in {"/connect", "/oauth"}:
             return self._handle_connect_command(msg)
         if cmd.startswith("/session"):
@@ -1994,6 +2745,7 @@ class AgentLoop:
                     if snapshot:
                         temp = Session(key=session.key)
                         temp.messages = list(snapshot)
+                        temp.metadata = dict(session.metadata or {})
                         if not await self._consolidate_memory(temp, archive_all=True):
                             return OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
@@ -2014,10 +2766,16 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
+        pending_outbound = await self._try_handle_pending_write(msg, session=session)
+        if pending_outbound is not None:
+            return pending_outbound
+
         if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
-                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
+                rendered = continuation.content
+                if self._should_rewrite_skillspec_result(continuation.metadata):
+                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
                 self.sessions.save(session)
                 return OutboundMessage(
                     channel=msg.channel,
@@ -2035,7 +2793,9 @@ class AgentLoop:
         if self._skillspec_runtime:
             skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
             if skillspec_result.handled:
-                rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
+                rendered = skillspec_result.content
+                if self._should_rewrite_skillspec_result(skillspec_result.metadata):
+                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
                 self.sessions.save(session)
                 outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
                 outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
@@ -2082,9 +2842,10 @@ class AgentLoop:
 
         history = session.get_history(max_messages=self.memory_window)
         prompt_context = self._prompt_context_for_message(msg, session_key=key)
+        llm_user_message = self._effective_user_message_for_llm(msg)
         initial_messages = self.context.build_messages(
             history=history,
-            current_message=msg.content,
+            current_message=llm_user_message,
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
             runtime=prompt_context,
@@ -2103,6 +2864,7 @@ class AgentLoop:
             initial_messages,
             on_progress=on_progress or _bus_progress,
             session_key=key,
+            session=session,
         )
 
         if final_content is None:
@@ -2154,6 +2916,8 @@ class AgentLoop:
             elif role == "user":
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     continue
+                if isinstance(content, str) and content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
+                    continue
                 if isinstance(content, list):
                     entry["content"] = [
                         {"type": "text", "text": "[image]"} if (
@@ -2167,8 +2931,11 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
         """委托给 MemoryStore.consolidate()，成功时返回 True。"""
-        return await MemoryStore(self.workspace).consolidate(
-            session, self.provider, self.model,
+        return await self._memory_store.consolidate(
+            session,
+            self.provider,
+            self.model,
+            runtime=self._prompt_context_from_session(session),
             archive_all=archive_all, memory_window=self.memory_window,
         )
 
@@ -2185,8 +2952,10 @@ class AgentLoop:
             scopes.append("chat")
             if thread_id:
                 scopes.append("thread")
+            flush_threshold = self._memory_flush_threshold_group
         else:
             scopes.append("user")
+            flush_threshold = self._memory_flush_threshold_private
 
         if not scopes:
             return
@@ -2203,17 +2972,19 @@ class AgentLoop:
             message_id=str(metadata.get("message_id") or "") or None,
             scopes=tuple(scopes),
             force_flush=force_flush,
+            flush_threshold=flush_threshold,
         )
         await self._memory_worker.enqueue(task)
 
-    @classmethod
-    def _should_force_memory_flush(cls, content: str, thread_id: str | None) -> bool:
+    def _should_force_memory_flush(self, content: str, thread_id: str | None) -> bool:
+        if not self._memory_force_flush_on_topic_end:
+            return False
         if not thread_id:
             return False
         text = " ".join(content.lower().split())
         if not text:
             return False
-        for keyword in cls._MEMORY_TOPIC_END_KEYWORDS:
+        for keyword in self._memory_topic_end_keywords:
             token = keyword.lower()
             if token == "done":
                 if re.search(r"\bdone\b", text):

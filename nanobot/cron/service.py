@@ -6,12 +6,13 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Sequence
 
 from loguru import logger
 
 from nanobot.cron.types import CronJob, CronJobState, CronPayload, CronSchedule, CronStore
 from nanobot.storage.sqlite_store import SQLiteStore
+from nanobot.utils.helpers import migrate_legacy_path
 
 
 def _now_ms() -> int:
@@ -67,11 +68,19 @@ class CronService:
     def __init__(
         self,
         store_path: Path,
-        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None
+        on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
+        *,
+        legacy_store_paths: Sequence[Path] | None = None,
     ):
         self.store_path = store_path
         self.on_job = on_job  # Callback to execute job, returns response text
         self._store: CronStore | None = None
+        for legacy_path in legacy_store_paths or ():
+            migrate_legacy_path(
+                legacy_path,
+                self.store_path,
+                related_suffixes=(".migrated", ".bak", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm", ".sqlite3.bak"),
+            )
         self._sqlite = SQLiteStore(self.store_path.with_suffix(".sqlite3"))
         self._timer_task: asyncio.Task | None = None
         self._running = False

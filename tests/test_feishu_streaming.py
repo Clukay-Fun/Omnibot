@@ -9,6 +9,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel
 from nanobot.config.schema import FeishuConfig
+from nanobot.utils.helpers import get_state_path
 
 
 class _FakeResponse:
@@ -416,6 +417,51 @@ async def test_thinking_updates_are_not_throttled() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streaming_skips_tiny_long_answer_progress_updates() -> None:
+    channel, client = _build_channel(min_update_ms=0)
+    first = "A" * 700
+    second = "A" * 730
+    third = "A" * 860
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content=first,
+            metadata={"_progress": True, "_progress_phase": "answer", "message_id": "src-long-answer"},
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content=second,
+            metadata={"_progress": True, "_progress_phase": "answer", "message_id": "src-long-answer"},
+        )
+    )
+
+    answer_updates = [
+        call for call in client.cardkit.v1.card_element.content_calls if getattr(call, "element_id", None) == "answer_text"
+    ]
+    assert answer_updates == []
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content=third,
+            metadata={"_progress": True, "_progress_phase": "answer", "message_id": "src-long-answer"},
+        )
+    )
+
+    answer_updates = [
+        call for call in client.cardkit.v1.card_element.content_calls if getattr(call, "element_id", None) == "answer_text"
+    ]
+    assert len(answer_updates) == 1
+    assert channel._stream_states["src-long-answer"].answer_text == third
+
+
+@pytest.mark.asyncio
 async def test_streaming_final_fallback_creates_new_card_when_updates_fail() -> None:
     channel, client = _build_channel(
         card_update_success=False,
@@ -626,6 +672,13 @@ def test_streaming_card_payload_does_not_use_action_tag() -> None:
     assert "action" not in tags
 
 
+def test_feishu_channel_uses_isolated_cron_store_from_gateway() -> None:
+    channel, _ = _build_channel()
+
+    assert channel._cron_service.store_path == get_state_path() / "feishu" / "cron" / "jobs.json"
+    assert channel._cron_service.store_path != get_state_path() / "cron" / "jobs.json"
+
+
 def test_thinking_block_uses_quoted_subtle_style() -> None:
     channel, _ = _build_channel()
 
@@ -647,12 +700,26 @@ def test_thinking_block_hides_generic_placeholder_when_specific_detail_exists() 
     assert "调用 bitable_search" in block
 
 
-def test_thinking_block_is_empty_when_only_generic_placeholder_exists() -> None:
+def test_thinking_block_uses_placeholders_when_only_generic_lines_exist() -> None:
     channel, _ = _build_channel()
 
-    block = channel._format_thinking_block("思考中\n思考完成", collapsed=False)
+    expanded = channel._format_thinking_block("思考中\n思考完成", collapsed=False)
+    collapsed = channel._format_thinking_block("思考中\n思考完成", collapsed=True)
 
-    assert block == ""
+    assert "思考中" in expanded
+    assert "思考完成" in collapsed
+
+
+def test_streaming_initial_answer_card_hides_thinking_placeholder_when_no_details() -> None:
+    channel, _ = _build_channel(show_thinking=True)
+
+    payload = channel._build_streaming_initial_card_content("", "最终回复", True)
+    card = json.loads(payload)
+    elements = card["body"]["elements"]
+    thinking = elements[0]["content"]
+
+    assert thinking == ""
+    assert not any(element.get("content") == "---" for element in elements)
 
 
 @pytest.mark.asyncio
@@ -683,6 +750,34 @@ async def test_streaming_ignores_generic_thinking_placeholder_before_answer() ->
     assert _sent_message_count(client) == 1
     assert "src-generic-think" not in channel._stream_states
     assert all(getattr(call, "element_id", None) != "thinking_text" for call in client.cardkit.v1.card_element.content_calls)
+
+
+@pytest.mark.asyncio
+async def test_streaming_first_real_answer_bypasses_throttle_after_placeholder() -> None:
+    channel, client = _build_channel(min_update_ms=10_000)
+
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="🐈努力回答中...",
+            metadata={"_progress": True, "_progress_phase": "answer", "message_id": "src-placeholder-throttle"},
+        )
+    )
+    await channel.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_user",
+            content="这里是正式答案",
+            metadata={"_progress": True, "_progress_phase": "answer", "message_id": "src-placeholder-throttle"},
+        )
+    )
+
+    answer_updates = [
+        call for call in client.cardkit.v1.card_element.content_calls if getattr(call, "element_id", None) == "answer_text"
+    ]
+    assert answer_updates
+    assert channel._stream_states["src-placeholder-throttle"].answer_text == "这里是正式答案"
 
 
 @pytest.mark.asyncio
@@ -834,10 +929,10 @@ def test_streaming_body_keeps_thinking_element_even_when_empty() -> None:
 
     elements = channel._build_streaming_body_elements("", "最终回复")
 
-    assert len(elements) == 3
+    assert len(elements) == 2
     assert elements[0]["element_id"] == "thinking_text"
-    assert "思考中" in elements[0]["content"]
-    assert elements[2]["element_id"] == "answer_text"
+    assert elements[0]["content"] == ""
+    assert elements[1]["element_id"] == "answer_text"
 
 
 @pytest.mark.asyncio

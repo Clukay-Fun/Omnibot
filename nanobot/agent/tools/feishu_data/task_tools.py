@@ -1,6 +1,7 @@
 """Feishu Task v2 tools."""
 
 import json
+import time
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
@@ -116,14 +117,34 @@ class TaskUpdateTool(_TaskBaseTool):
         task_id = str(kwargs.get("task_id") or "").strip()
         if not task_id:
             return json.dumps({"error": "Missing task_id."}, ensure_ascii=False)
-        body = _clean(
+        task_payload = _clean(
             {
                 "summary": kwargs.get("summary"),
                 "description": kwargs.get("description"),
-                "status": kwargs.get("status"),
                 "due": kwargs.get("due"),
             }
         )
+        status = str(kwargs.get("status") or "").strip().lower()
+        if status:
+            if status in {"completed", "complete", "done"}:
+                task_payload["completed_at"] = str(int(time.time() * 1000))
+            elif status in {"todo", "open", "pending", "in_progress", "in-progress"}:
+                task_payload["completed_at"] = "0"
+            else:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Unsupported status. Use completed/done or todo/in_progress, "
+                            "or update explicit fields instead."
+                        )
+                    },
+                    ensure_ascii=False,
+                )
+
+        update_fields = list(task_payload.keys())
+        if not update_fields:
+            return json.dumps({"error": "At least one update field is required."}, ensure_ascii=False)
+        body = {"task": task_payload, "update_fields": update_fields}
         try:
             data = await self.client.request("PATCH", FeishuEndpoints.task_v2_task(task_id), json_body=body)
             return json.dumps({"task": data.get("data", {})}, ensure_ascii=False)

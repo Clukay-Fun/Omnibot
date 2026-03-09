@@ -1,11 +1,13 @@
 """飞书多维表格只读工具：提供对 Bitable 数据的查询等功能。"""
 
 import asyncio
+import difflib
 import json
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from loguru import logger
 
@@ -247,11 +249,25 @@ class BitableSearchTool(Tool):
                 "record_id": rec_id,
                 "table_id": table_id,
                 "fields": mapped,
-                "fields_text": {str(k): str(v) for k, v in mapped.items()},
+                "fields_text": {str(k): self._to_display_text(v) for k, v in mapped.items()},
                 "record_url": url,
             })
 
         return normalized
+
+    @classmethod
+    def _to_display_text(cls, value: Any) -> str:
+        if isinstance(value, list):
+            items = [cls._to_display_text(item) for item in value]
+            cleaned = [item for item in items if item and item != "{}" and item != "[]"]
+            return " / ".join(cleaned) if cleaned else "[]"
+        if isinstance(value, dict):
+            for key in ("text", "name", "title", "value"):
+                nested = value.get(key)
+                if nested not in (None, ""):
+                    return cls._to_display_text(nested)
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
 
     async def _search_table(
         self,
@@ -264,7 +280,13 @@ class BitableSearchTool(Tool):
         searchable_fields: list[str],
     ) -> dict[str, Any]:
         path = FeishuEndpoints.bitable_records_search(app_token, table_id)
-        params = {"page_size": page_size}
+        client_side_keyword_filter = bool(keyword and not searchable_fields)
+        scan_page_size = page_size
+        if client_side_keyword_filter:
+            scan_page_size = max(page_size, self._fallback_scan_page_size)
+            if self.config.bitable.search.max_records > 0:
+                scan_page_size = min(scan_page_size, self.config.bitable.search.max_records)
+        params = {"page_size": scan_page_size}
 
         logger.info(
             f"Bitable search: app={app_token}, table={table_id}, keyword={keyword}, filter={payload.get('filter')}"
@@ -283,10 +305,12 @@ class BitableSearchTool(Tool):
             )
             duration = time.time() - started
             logger.info(f"Bitable search completed in {duration:.2f}s, table={table_id}, found {len(normalized)} items")
+            records = normalized[:page_size] if client_side_keyword_filter else normalized
+            total = len(normalized) if client_side_keyword_filter else response.get("data", {}).get("total", len(normalized))
             return {
                 "table_id": table_id,
-                "records": normalized,
-                "total": response.get("data", {}).get("total", len(normalized)),
+                "records": records,
+                "total": total,
             }
         except FeishuDataAPIError as e:
             if e.code == 1254018:
@@ -497,6 +521,79 @@ class BitableSearchTool(Tool):
         return json.dumps(response_payload, ensure_ascii=False)
 
 
+_MATCH_TEXT_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+", re.IGNORECASE)
+
+
+def _normalize_match_text(text: str) -> str:
+    parts = [part.lower() for part in _MATCH_TEXT_RE.findall(str(text or ""))]
+    return "".join(parts)
+
+
+def _tokenize_match_text(text: str) -> list[str]:
+    return [part.lower() for part in _MATCH_TEXT_RE.findall(str(text or "")) if part.strip()]
+
+
+def _char_ngrams(text: str, size: int = 2) -> set[str]:
+    if len(text) < size:
+        return {text} if text else set()
+    return {text[index:index + size] for index in range(len(text) - size + 1)}
+
+
+def _score_table_candidate(query: str, table_name: str) -> tuple[float, list[str]]:
+    normalized_query = _normalize_match_text(query)
+    normalized_name = _normalize_match_text(table_name)
+    if not normalized_query or not normalized_name:
+        return 0.0, []
+
+    reasons: list[str] = []
+    score = difflib.SequenceMatcher(None, normalized_query, normalized_name).ratio() * 2.0
+    if normalized_name in normalized_query:
+        score += 1.5
+        reasons.append("normalized_substring")
+    elif normalized_query in normalized_name:
+        score += 1.0
+        reasons.append("query_substring")
+
+    query_tokens = set(_tokenize_match_text(query))
+    table_tokens = set(_tokenize_match_text(table_name))
+    overlap = query_tokens & table_tokens
+    if overlap:
+        score += len(overlap) * 0.6
+        reasons.append(f"token_overlap={len(overlap)}")
+
+    ngram_query = _char_ngrams(normalized_query)
+    ngram_name = _char_ngrams(normalized_name)
+    if ngram_query and ngram_name:
+        ngram_overlap = len(ngram_query & ngram_name) / max(1, len(ngram_query | ngram_name))
+        if ngram_overlap > 0:
+            score += ngram_overlap * 1.2
+            reasons.append(f"ngram_overlap={ngram_overlap:.2f}")
+
+    return round(score, 4), reasons
+
+
+def _rank_table_candidates(query: str, tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for table in tables:
+        table_name = str(table.get("name") or "").strip()
+        table_id = str(table.get("table_id") or "").strip()
+        if not table_name or not table_id:
+            continue
+        score, reasons = _score_table_candidate(query, table_name)
+        if score <= 0:
+            continue
+        ranked.append(
+            {
+                "table_id": table_id,
+                "name": table_name,
+                "score": score,
+                "reasons": reasons,
+            }
+        )
+    ranked.sort(key=lambda item: (-float(item.get("score") or 0.0), len(str(item.get("name") or "")), str(item.get("name") or "")))
+    return ranked
+
+
 class BitableListTablesTool(Tool):
     """
     列出飞书多维表格 (Bitable) App 下的所有数据表。
@@ -519,8 +616,8 @@ class BitableListTablesTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "List all tables in a Feishu Bitable app. "
-            "Returns table IDs and names."
+            "List tables in a Feishu Bitable app. "
+            "Supports keyword filtering and compact top-N matching results."
         )
 
     @property
@@ -531,12 +628,29 @@ class BitableListTablesTool(Tool):
                 "app_token": {
                     "type": "string",
                     "description": "Bitable App Token. Defaults to config."
+                },
+                "keyword": {
+                    "type": "string",
+                    "description": "Optional table-name keyword filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max matched tables to return. Defaults to 10.",
+                },
+                "compact": {
+                    "type": "boolean",
+                    "description": "Return compact payload with totals and truncation markers. Defaults to true.",
                 }
             }
         }
 
     async def execute(self, **kwargs: Any) -> str:
         app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
+        keyword = str(kwargs.get("keyword") or "").strip()
+        raw_limit = kwargs.get("limit")
+        limit = max(1, int(raw_limit)) if raw_limit not in (None, "") else 0
+        compact = kwargs.get("compact")
+        compact = True if compact is None else bool(compact)
         if not app_token:
             return json.dumps({
                 "error": "Missing app_token. Provide it as a parameter or configure a default.",
@@ -545,19 +659,41 @@ class BitableListTablesTool(Tool):
 
         cache_key = f"tables:{app_token}"
         cached = self._table_cache.get(cache_key)
+        all_tables: list[dict[str, Any]]
         if cached is not None:
-            return json.dumps(cached, ensure_ascii=False)
+            all_tables = [item for item in cached.get("tables", []) if isinstance(item, dict)]
+        else:
+            path = FeishuEndpoints.bitable_tables(app_token)
+            try:
+                res = await self.client.request("GET", path)
+                items = res.get("data", {}).get("items", [])
+                all_tables = [
+                    {"table_id": t.get("table_id"), "name": t.get("name", "")}
+                    for t in items
+                ]
+                self._table_cache.set(cache_key, {"tables": all_tables})
+            except Exception as e:
+                return json.dumps({"error": str(e), "tables": []}, ensure_ascii=False)
 
-        path = FeishuEndpoints.bitable_tables(app_token)
         try:
-            res = await self.client.request("GET", path)
-            items = res.get("data", {}).get("items", [])
-            tables = [
-                {"table_id": t.get("table_id"), "name": t.get("name", "")}
-                for t in items
-            ]
-            payload = {"tables": tables}
-            self._table_cache.set(cache_key, payload)
+            tables = all_tables
+            if keyword:
+                keyword_lower = keyword.lower()
+                tables = [table for table in all_tables if keyword_lower in str(table.get("name") or "").lower()]
+            matched = len(tables)
+            truncated = limit > 0 and matched > limit
+            if limit > 0:
+                tables = tables[:limit]
+            payload: dict[str, Any] = {"tables": tables}
+            if compact:
+                payload.update(
+                    {
+                        "keyword": keyword,
+                        "total": len(all_tables),
+                        "matched": matched,
+                        "truncated": truncated,
+                    }
+                )
             return json.dumps(payload, ensure_ascii=False)
         except Exception as e:
             return json.dumps({"error": str(e), "tables": []}, ensure_ascii=False)
@@ -596,12 +732,17 @@ class BitableListFieldsTool(Tool):
                     "type": "string",
                     "description": "Table ID. Defaults to config.",
                 },
+                "compact": {
+                    "type": "boolean",
+                    "description": "Return compact field property summary. Defaults to false.",
+                },
             },
         }
 
     async def execute(self, **kwargs: Any) -> str:
         app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
         table_id = kwargs.get("table_id") or self.config.bitable.default_table_id
+        compact = bool(kwargs.get("compact")) if kwargs.get("compact") is not None else False
         if not app_token or not table_id:
             return json.dumps(
                 {
@@ -611,7 +752,7 @@ class BitableListFieldsTool(Tool):
                 ensure_ascii=False,
             )
 
-        cache_key = f"fields:{app_token}:{table_id}"
+        cache_key = f"fields:{app_token}:{table_id}:{int(compact)}"
         cached = self._field_cache.get(cache_key)
         if cached is not None:
             return json.dumps(cached, ensure_ascii=False)
@@ -620,7 +761,7 @@ class BitableListFieldsTool(Tool):
         try:
             response = await self.client.request("GET", path)
             items = response.get("data", {}).get("items", [])
-            fields = [self._serialize_field(item) for item in items if isinstance(item, dict)]
+            fields = [self._serialize_field(item, compact=compact) for item in items if isinstance(item, dict)]
             payload = {
                 "app_token": app_token,
                 "table_id": table_id,
@@ -641,13 +782,267 @@ class BitableListFieldsTool(Tool):
             )
 
     @staticmethod
-    def _serialize_field(field: dict[str, Any]) -> dict[str, Any]:
+    def _serialize_field(field: dict[str, Any], *, compact: bool = False) -> dict[str, Any]:
+        raw_property = field.get("property")
+        property_payload: dict[str, Any] = cast(dict[str, Any], raw_property) if isinstance(raw_property, dict) else {}
+        property_result: dict[str, Any] = (
+            BitableListFieldsTool._compact_field_property(property_payload) if compact else property_payload
+        )
         return {
             "field_id": field.get("field_id") or field.get("id"),
             "field_name": field.get("field_name") or field.get("name") or "",
             "type": field.get("type"),
-            "property": field.get("property") if isinstance(field.get("property"), dict) else {},
+            "property": property_result,
         }
+
+    @staticmethod
+    def _compact_field_property(property_payload: dict[str, Any]) -> dict[str, Any]:
+        compact: dict[str, Any] = {}
+        if not property_payload:
+            return compact
+
+        for key in ("multiple", "formatter", "date_formatter", "time_formatter", "auto_fill"):
+            value = property_payload.get(key)
+            if isinstance(value, (str, int, float, bool)):
+                compact[key] = value
+
+        options = property_payload.get("options")
+        if isinstance(options, list):
+            option_names = []
+            for item in options:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("text") or item.get("id") or "").strip()
+                    if name:
+                        option_names.append(name)
+                else:
+                    name = str(item).strip()
+                    if name:
+                        option_names.append(name)
+            compact["option_count"] = len(option_names)
+            compact["options_preview"] = option_names[:5]
+
+        return compact
+
+
+class BitableMatchTableTool(Tool):
+    """根据自然语言请求召回最可能的多维表格候选。"""
+
+    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
+        self.config = config
+        self._list_tables_tool = BitableListTablesTool(config, client)
+
+    @property
+    def name(self) -> str:
+        return "bitable_match_table"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Resolve the most likely Feishu Bitable table candidates from natural-language intent. "
+            "Use this before bitable_create when the user describes a target table semantically instead of giving an exact table_id."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language description of the target table.",
+                },
+                "app_token": {
+                    "type": "string",
+                    "description": "Bitable App Token. Defaults to config.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max candidates to return. Defaults to 5.",
+                },
+            },
+            "required": ["query"],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        query = str(kwargs.get("query") or "").strip()
+        app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
+        limit = max(1, int(kwargs.get("limit") or 5))
+        if not query:
+            return json.dumps({"error": "Missing query.", "candidates": []}, ensure_ascii=False)
+
+        tables_payload = json.loads(await self._list_tables_tool.execute(app_token=app_token, compact=True))
+        if tables_payload.get("error"):
+            return json.dumps(
+                {
+                    "query": query,
+                    "error": tables_payload["error"],
+                    "total_tables": int(tables_payload.get("total") or 0),
+                    "candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        tables = [item for item in tables_payload.get("tables", []) if isinstance(item, dict)]
+        ranked = _rank_table_candidates(query, tables)
+        top_candidates = ranked[:limit]
+        payload: dict[str, Any] = {
+            "query": query,
+            "total_tables": int(tables_payload.get("total") or len(tables)),
+            "matched": len(ranked),
+            "candidates": top_candidates,
+        }
+        if ranked:
+            payload["best_match"] = top_candidates[0]
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class BitablePrepareCreateTool(Tool):
+    """为 bitable_create 构建非硬编码的候选表 + 紧凑字段摘要。"""
+
+    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
+        self.config = config
+        self._match_tool = BitableMatchTableTool(config, client)
+        self._field_tool = BitableListFieldsTool(config, client)
+
+    @property
+    def name(self) -> str:
+        return "bitable_prepare_create"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Prepare a natural-language Bitable record-creation request for bitable_create. "
+            "It resolves likely tables, fetches a compact create schema, and returns a dry-run-ready next step without executing the write."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "request_text": {
+                    "type": "string",
+                    "description": "Original natural-language user request for creating a record.",
+                },
+                "table_hint": {
+                    "type": "string",
+                    "description": "Optional explicit table hint if the user mentioned a likely table name.",
+                },
+                "app_token": {
+                    "type": "string",
+                    "description": "Bitable App Token. Defaults to config.",
+                },
+                "candidate_limit": {
+                    "type": "integer",
+                    "description": "How many candidate tables to consider. Defaults to 3.",
+                },
+            },
+            "required": ["request_text"],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        request_text = str(kwargs.get("request_text") or "").strip()
+        table_hint = str(kwargs.get("table_hint") or "").strip()
+        app_token = kwargs.get("app_token") or self.config.bitable.default_app_token
+        candidate_limit = max(1, int(kwargs.get("candidate_limit") or 3))
+        if not request_text:
+            return json.dumps({"error": "Missing request_text."}, ensure_ascii=False)
+
+        query = table_hint or request_text
+        matched_payload = json.loads(
+            await self._match_tool.execute(query=query, app_token=app_token, limit=candidate_limit)
+        )
+        if matched_payload.get("error"):
+            return json.dumps(
+                {
+                    "request_text": request_text,
+                    "table_hint": table_hint,
+                    "error": matched_payload["error"],
+                    "needs_table_confirmation": True,
+                    "candidates": [],
+                },
+                ensure_ascii=False,
+            )
+        candidates = [item for item in matched_payload.get("candidates", []) if isinstance(item, dict)]
+        if not candidates:
+            return json.dumps(
+                {
+                    "request_text": request_text,
+                    "table_hint": table_hint,
+                    "needs_table_confirmation": True,
+                    "candidates": [],
+                    "message": "No likely target table found. Ask the user which table to use.",
+                },
+                ensure_ascii=False,
+            )
+
+        selected = self._select_candidate(candidates)
+        if selected is None:
+            return json.dumps(
+                {
+                    "request_text": request_text,
+                    "table_hint": table_hint,
+                    "needs_table_confirmation": True,
+                    "candidates": candidates,
+                    "message": "Multiple similarly likely tables found. Ask the user to confirm which table to use.",
+                },
+                ensure_ascii=False,
+            )
+
+        fields_payload = json.loads(
+            await self._field_tool.execute(app_token=app_token, table_id=selected["table_id"], compact=True)
+        )
+        if fields_payload.get("error"):
+            return json.dumps(
+                {
+                    "request_text": request_text,
+                    "table_hint": table_hint,
+                    "needs_table_confirmation": False,
+                    "selected_table": selected,
+                    "candidates": candidates,
+                    "error": fields_payload["error"],
+                    "fields": [],
+                },
+                ensure_ascii=False,
+            )
+        fields = [item for item in fields_payload.get("fields", []) if isinstance(item, dict)]
+        field_preview = fields[:12]
+        payload = {
+            "request_text": request_text,
+            "table_hint": table_hint,
+            "needs_table_confirmation": False,
+            "selected_table": selected,
+            "candidates": candidates,
+            "field_total": len(fields),
+            "fields": field_preview,
+            "fields_truncated": len(fields) > len(field_preview),
+            "suggested_field_names": [str(item.get("field_name") or "") for item in field_preview if str(item.get("field_name") or "").strip()],
+            "next_step": {
+                "tool": "bitable_create",
+                "mode": "dry_run",
+                "arguments": {
+                    "app_token": app_token,
+                    "table_id": selected["table_id"],
+                    "fields": {},
+                },
+            },
+            "message": "Use the selected table and fill the fields object, then call bitable_create in dry_run mode.",
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _select_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not candidates:
+            return None
+        top = candidates[0]
+        top_score = float(top.get("score") or 0.0)
+        second_score = float(candidates[1].get("score") or 0.0) if len(candidates) > 1 else 0.0
+        if len(candidates) == 1:
+            return top if top_score >= 1.2 else None
+        if top_score >= 2.4 and (top_score - second_score) >= 0.2:
+            return top
+        if top_score >= 1.8 and (top_score - second_score) >= 0.45:
+            return top
+        return None
 
 
 class BitableSyncSchemaTool(Tool):
@@ -720,7 +1115,7 @@ class BitableSyncSchemaTool(Tool):
                 response = await self.client.request("GET", FeishuEndpoints.bitable_fields(app_token, table_id))
                 raw_fields = response.get("data", {}).get("items", [])
                 fields = [
-                    BitableListFieldsTool._serialize_field(item)
+                    BitableListFieldsTool._serialize_field(item, compact=False)
                     for item in raw_fields
                     if isinstance(item, dict)
                 ]

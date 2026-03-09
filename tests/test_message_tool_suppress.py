@@ -1,5 +1,6 @@
 """Test message tool suppress logic for final replies."""
 
+import json
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -113,9 +114,9 @@ class TestAgentSlashCommands:
         response = await loop._process_message(msg)
 
         assert response is not None
-        assert "当前设置" in response.content
+        assert "/status" in response.content
         assert "/setup" in response.content
-        assert "回复风格" in response.content
+        assert "当前偏好与授权状态" in response.content
 
     @pytest.mark.asyncio
     async def test_session_new_marks_reply_in_thread_for_feishu(self, tmp_path: Path) -> None:
@@ -247,3 +248,31 @@ class TestAgentSlashCommands:
         assert "已删除会话" in response.content
         keys = {str(item.get("key") or "") for item in loop.sessions.list_sessions()}
         assert "feishu:oc_1" not in keys
+
+
+@pytest.mark.asyncio
+async def test_pending_write_preview_keeps_tool_result_in_history(tmp_path: Path) -> None:
+    loop = _make_loop(tmp_path)
+    loop.provider.chat = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(id="call-1", name="bitable_create", arguments={"table_id": "tbl_1"})],
+        )
+    )
+    loop.tools.get_definitions = MagicMock(return_value=[])
+    loop.tools.execute = AsyncMock(return_value=json.dumps({"ok": True}, ensure_ascii=False))
+    loop._store_pending_write_from_result = MagicMock(return_value="已生成写入预览")
+    session = loop.sessions.get_or_create("cli:pending")
+
+    final_content, _, messages, _ = await loop._run_agent_loop(
+        [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "新增记录"}],
+        session_key="cli:pending",
+        session=session,
+    )
+
+    assert final_content == "已生成写入预览"
+    assistant_with_tool_call = next(msg for msg in messages if msg.get("role") == "assistant" and msg.get("tool_calls"))
+    tool_result = next(msg for msg in messages if msg.get("role") == "tool")
+    assert assistant_with_tool_call["tool_calls"][0]["id"] == "call-1"
+    assert tool_result["tool_call_id"] == "call-1"
+    assert messages[-1] == {"role": "assistant", "content": "已生成写入预览"}

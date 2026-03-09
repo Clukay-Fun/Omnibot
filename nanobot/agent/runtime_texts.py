@@ -1,11 +1,95 @@
-"""Runtime text/template defaults without workspace overrides."""
+"""Runtime text/template defaults with optional workspace overrides."""
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
+from loguru import logger
+
+_OVERRIDE_FILENAMES = ("runtime_texts.yaml", "runtime_texts.yml", "runtime_texts.json")
+
+
+def _deep_merge_dict(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    for key, value in overlay.items():
+        existing = base.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            _deep_merge_dict(existing, value)
+        else:
+            base[key] = deepcopy(value)
+    return base
+
+
+def _load_override_payload(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to read runtime text override {}: {}", path, exc)
+        return {}
+
+    try:
+        if path.suffix.lower() == ".json":
+            payload = json.loads(text)
+        else:
+            payload = yaml.safe_load(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to parse runtime text override {}: {}", path, exc)
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+_DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
+    "help": {
+        "commands_help_text": (
+            "可用命令\n"
+            "- /help 或 /commands：查看命令总览\n"
+            "- /status：查看当前偏好与授权状态\n"
+            "- /setup：查看初始化引导\n"
+            "- /connect 或 /oauth：连接飞书 OAuth\n"
+            "- /session：查看会话子命令帮助\n"
+            "- /new：开启新会话\n"
+            "- /stop：停止当前任务\n"
+            "- 继续 / 展开：查看分页剩余内容\n"
+            "- 确认 <token> / 取消 <token>：确认或取消写入"
+        ),
+        "session_help_text": (
+            "会话命令\n"
+            "- /session：查看帮助\n"
+            "- /session new [标题]：在群话题中新建会话\n"
+            "- /session list：列出当前聊天下会话\n"
+            "- /session del <id|main>：删除指定会话"
+        ),
+    },
+    "pagination": {
+        "no_more_content": "没有可继续的内容了。",
+        "continuation_hint": "回复“{continue_command}”查看剩余内容",
+        "not_found_data": "未查询到数据。",
+    },
+    "onboarding": {
+        "intro_first": "我先按 BOOTSTRAP 默认继续，也把确认方式发你，不影响继续提问。",
+        "intro_reentry": "已重新打开 BOOTSTRAP 确认提示。",
+        "guide_lines": [
+            "### 👋 BOOTSTRAP 确认",
+            "我会先按 `BOOTSTRAP.md` / `SOUL.md` 的默认设定继续，不阻塞对话。",
+            "",
+            "默认先确认两类事：",
+            "- 人格：{bootstrap_identity}",
+            "- 行动方式：{bootstrap_action}",
+            "",
+            "如果你想改，直接对我说：",
+            "- 以后叫我 {preferred_name}",
+            "- 语气再松一点 / 以后详细一点",
+            "- 默认查全部案件",
+            "- 写入仍先确认 / 以后直接写",
+            "",
+            "如果你不改，我就按默认继续。需要重看这条提示可以发 `/setup`。",
+        ],
+    },
+}
 
 _DEFAULT_ROUTING: dict[str, dict[str, Any]] = {
     "smalltalk_triggers": {
@@ -224,11 +308,57 @@ class RuntimeTextCatalog:
     prompts: dict[str, dict[str, Any]]
     routing: dict[str, dict[str, Any]]
     templates: dict[str, dict[str, Any]]
+    prompt_override_keys: set[tuple[str, str]] = field(default_factory=set)
+
+    @classmethod
+    def _apply_workspace_overrides(
+        cls,
+        *,
+        workspace: Path | None,
+        prompts: dict[str, dict[str, Any]],
+        routing: dict[str, dict[str, Any]],
+        templates: dict[str, dict[str, Any]],
+    ) -> set[tuple[str, str]]:
+        override_keys: set[tuple[str, str]] = set()
+        if workspace is None:
+            return override_keys
+
+        for filename in _OVERRIDE_FILENAMES:
+            path = workspace / filename
+            if not path.exists():
+                continue
+            payload = _load_override_payload(path)
+            prompts_override = payload.get("prompts")
+            routing_override = payload.get("routing")
+            templates_override = payload.get("templates")
+            if isinstance(prompts_override, dict):
+                for group, entries in prompts_override.items():
+                    if isinstance(entries, dict):
+                        override_keys.update((str(group), str(key)) for key in entries.keys())
+                _deep_merge_dict(prompts, prompts_override)
+            if isinstance(routing_override, dict):
+                _deep_merge_dict(routing, routing_override)
+            if isinstance(templates_override, dict):
+                _deep_merge_dict(templates, templates_override)
+        return override_keys
 
     @classmethod
     def load(cls, workspace: Path | None) -> "RuntimeTextCatalog":
-        del workspace
-        return cls(prompts={}, routing=deepcopy(_DEFAULT_ROUTING), templates=deepcopy(_DEFAULT_TEMPLATES))
+        prompts = deepcopy(_DEFAULT_PROMPTS)
+        routing = deepcopy(_DEFAULT_ROUTING)
+        templates = deepcopy(_DEFAULT_TEMPLATES)
+        override_keys = cls._apply_workspace_overrides(
+            workspace=workspace,
+            prompts=prompts,
+            routing=routing,
+            templates=templates,
+        )
+        return cls(
+            prompts=prompts,
+            routing=routing,
+            templates=templates,
+            prompt_override_keys=override_keys,
+        )
 
     def prompt_text(self, group: str, key: str, default: str = "") -> str:
         value = self.prompts.get(group, {}).get(key)
@@ -253,3 +383,6 @@ class RuntimeTextCatalog:
     def template(self, name: str) -> dict[str, Any]:
         raw = self.templates.get(name)
         return deepcopy(raw) if isinstance(raw, dict) else {}
+
+    def has_prompt_override(self, group: str, key: str) -> bool:
+        return (group, key) in self.prompt_override_keys

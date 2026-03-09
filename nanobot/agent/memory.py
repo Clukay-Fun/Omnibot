@@ -74,24 +74,94 @@ class MemoryStore:
         self.feishu_chat_dir = ensure_dir(self.memory_dir / "feishu" / "chats")
         self.feishu_thread_dir = ensure_dir(self.memory_dir / "feishu" / "threads")
 
-    def read_long_term(self) -> str:
+    _PRIVATE_PERSONA_FILES = ("BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md")
+
+    @staticmethod
+    def _template_root() -> Path:
+        return Path(__file__).resolve().parent.parent / "templates"
+
+    def _shared_markdown_path(self, filename: str) -> Path | None:
+        candidates: list[Path] = []
+        if filename == "MEMORY.md":
+            candidates.extend(
+                [
+                    self.memory_file,
+                    self.legacy_memory_file,
+                    self._template_root() / "memory" / "MEMORY.md",
+                ]
+            )
+        else:
+            candidates.extend([self.workspace / filename, self._template_root() / filename])
+
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def feishu_user_persona_dir(self, open_id: str) -> Path:
+        return ensure_dir(self.feishu_user_dir / safe_filename(open_id))
+
+    def feishu_user_persona_path(self, open_id: str, filename: str) -> Path:
+        if filename == "MEMORY.md":
+            return self.feishu_user_memory_path(open_id)
+        return self.feishu_user_persona_dir(open_id) / filename
+
+    def ensure_feishu_user_persona_file(self, open_id: str, filename: str) -> Path:
+        target = self.feishu_user_persona_path(open_id, filename)
+        if target.exists():
+            return target
+
+        source = self._shared_markdown_path(filename)
+        if source is None:
+            return target
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return target
+
+    def ensure_feishu_user_persona_files(self, open_id: str) -> list[Path]:
+        created: list[Path] = []
+        for filename in self._PRIVATE_PERSONA_FILES:
+            path = self.feishu_user_persona_path(open_id, filename)
+            existed = path.exists()
+            resolved = self.ensure_feishu_user_persona_file(open_id, filename)
+            if not existed and resolved.exists():
+                created.append(resolved)
+        return created
+
+    def resolve_persona_markdown_path(self, filename: str, runtime: PromptContext | None = None) -> Path | None:
+        runtime = runtime or PromptContext()
+        if runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                path = self.ensure_feishu_user_persona_file(open_id, filename)
+                if path.exists():
+                    return path
+        return self._shared_markdown_path(filename)
+
+    def read_long_term(self, runtime: PromptContext | None = None) -> str:
         """用处，参数
 
         功能:
             - 读取长期记忆内容。
         """
-        if self.memory_file.exists():
-            return self.memory_file.read_text(encoding="utf-8")
-        if self.legacy_memory_file.exists():
-            return self.legacy_memory_file.read_text(encoding="utf-8")
-        return ""
+        path = self.resolve_persona_markdown_path("MEMORY.md", runtime)
+        return path.read_text(encoding="utf-8") if path and path.exists() else ""
 
-    def write_long_term(self, content: str) -> None:
+    def write_long_term(self, content: str, runtime: PromptContext | None = None) -> None:
         """用处，参数
 
         功能:
             - 覆盖写入长期记忆内容。
         """
+        runtime = runtime or PromptContext()
+        if runtime.is_feishu and runtime.is_private:
+            open_id = runtime.sender_id or runtime.chat_id
+            if open_id:
+                path = self.ensure_feishu_user_persona_file(open_id, "MEMORY.md")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                return
         self.memory_file.write_text(content, encoding="utf-8")
 
     def _read_json(self, path: Path) -> dict:
@@ -192,18 +262,20 @@ class MemoryStore:
             return ""
 
         if not runtime.is_feishu:
-            long_term = self.read_long_term()
+            long_term = self.read_long_term(runtime)
             if long_term:
                 parts.append(f"## Long-term Memory\n{long_term}")
 
         if runtime.is_feishu and runtime.is_private:
-            long_term = self.read_long_term()
+            long_term = self.read_long_term(runtime)
             if long_term:
                 parts.append(f"## Long-term Memory\n{long_term}")
             open_id = runtime.sender_id or runtime.chat_id
             if open_id:
+                user_memory_path = self.feishu_user_memory_path(open_id)
+                long_term_path = self.resolve_persona_markdown_path("MEMORY.md", runtime)
                 user_memory = self.read_feishu_user_memory(open_id)
-                if user_memory:
+                if user_memory and user_memory_path != long_term_path:
                     parts.append(f"## Feishu User Memory\n{user_memory}")
 
         if runtime.is_feishu and runtime.is_group and runtime.chat_id:
@@ -217,7 +289,7 @@ class MemoryStore:
                     if thread_memory:
                         parts.append(f"## Feishu Thread Memory\n{thread_memory}")
             else:
-                long_term = self.read_long_term()
+                long_term = self.read_long_term(runtime)
                 if long_term:
                     parts.append(f"## Long-term Memory\n{long_term}")
                 if chat_memory:
@@ -241,6 +313,7 @@ class MemoryStore:
         provider: LLMProvider,
         model: str,
         *,
+        runtime: PromptContext | None = None,
         archive_all: bool = False,
         memory_window: int = 50,
     ) -> bool:
@@ -271,7 +344,7 @@ class MemoryStore:
             tools = f" [tools: {', '.join(m['tools_used'])}]" if m.get("tools_used") else ""
             lines.append(f"[{m.get('timestamp', '?')[:16]}] {m['role'].upper()}{tools}: {m['content']}")
 
-        current_memory = self.read_long_term()
+        current_memory = self.read_long_term(runtime)
         prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
 
 ## Current Long-term Memory
@@ -310,7 +383,7 @@ class MemoryStore:
                 if not isinstance(update, str):
                     update = json.dumps(update, ensure_ascii=False)
                 if update != current_memory:
-                    self.write_long_term(update)
+                    self.write_long_term(update, runtime)
 
             session.last_consolidated = 0 if archive_all else len(session.messages) - keep_count
             logger.info("Memory consolidation done: {} messages, last_consolidated={}", len(session.messages), session.last_consolidated)
