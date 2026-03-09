@@ -265,6 +265,146 @@ def test_registry_skips_internal_underscore_prefixed_files() -> None:
         assert all("_index" not in item for item in registry.report.invalid)
 
 
+def test_registry_exposes_normalized_blueprints_for_query_and_cross_query() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        workspace = root / "workspace"
+
+        _write_yaml(
+            workspace / "case_search.yaml",
+            """
+            meta:
+              id: case_search
+              version: "0.1"
+              description: Search case records.
+            params:
+              type: object
+              properties:
+                query:
+                  type: string
+            action:
+              kind: query
+              data_source: bitable
+              table:
+                alias: case_registry
+              select_fields:
+                - case_no
+                - title
+              pagination_mode: data
+            response: {}
+            error: {}
+            """,
+        )
+        _write_yaml(
+            workspace / "case_detail.yaml",
+            """
+            meta:
+              id: case_detail
+              version: "0.1"
+              description: Retrieve a case profile.
+            params:
+              type: object
+              properties:
+                case_no:
+                  type: string
+            action:
+              kind: query
+              pagination_mode: data
+              cross_query:
+                mode: fanout
+                steps:
+                  - id: case_base
+                    data_source: bitable
+                    table:
+                      alias: case_registry
+                  - id: related_tasks
+                    depends_on:
+                      - case_base
+                    data_source: bitable
+                    table:
+                      alias: case_tasks
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=root / "builtin")
+        registry.load()
+
+        search_blueprint = registry.get_blueprint("case_search")
+        assert search_blueprint is not None
+        assert search_blueprint.id == "case_search"
+        assert search_blueprint.action_kind == "query"
+        assert search_blueprint.primary_tool == "bitable_search"
+        assert search_blueprint.params_schema["type"] == "object"
+        assert search_blueprint.table is not None
+        assert search_blueprint.table.alias == "case_registry"
+        assert search_blueprint.action_metadata == {
+            "pagination_mode": "data",
+            "select_fields": ["case_no", "title"],
+        }
+
+        detail_blueprint = registry.blueprints["case_detail"]
+        assert detail_blueprint.action_kind == "query"
+        assert detail_blueprint.action_metadata["has_cross_query"] is True
+        assert detail_blueprint.action_metadata["cross_query_mode"] == "fanout"
+        assert [step.id for step in detail_blueprint.steps] == ["case_base", "related_tasks"]
+        assert detail_blueprint.steps[1].depends_on == ["case_base"]
+        assert [table.alias for table in detail_blueprint.tables] == ["case_registry", "case_tasks"]
+
+
+def test_registry_blueprint_collects_bridge_tools_for_non_query_actions() -> None:
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        workspace = root / "workspace"
+
+        _write_yaml(
+            workspace / "reminder_set.yaml",
+            """
+            meta:
+              id: reminder_set
+              version: "0.1"
+              description: Create a reminder.
+            params:
+              type: object
+              properties:
+                text:
+                  type: string
+            action:
+              kind: reminder_set
+              record_bridge:
+                enabled: true
+                tool: bitable_create
+              calendar_bridge:
+                enabled: false
+                tool: calendar_create
+              summary_cron_bridge:
+                enabled: true
+                tool: cron
+            response: {}
+            error: {}
+            """,
+        )
+
+        registry = SkillSpecRegistry(workspace_root=workspace, builtin_root=root / "builtin")
+        registry.load()
+
+        blueprint = registry.blueprints["reminder_set"]
+        assert blueprint.action_kind == "reminder_set"
+        assert blueprint.primary_tool == "bitable_create"
+        assert blueprint.tool_refs == ["bitable_create", "calendar_create", "cron"]
+        assert blueprint.action_metadata["bridge_keys"] == [
+            "calendar_bridge",
+            "record_bridge",
+            "summary_cron_bridge",
+        ]
+        assert "has_write_bridge" not in blueprint.action_metadata
+
+
 def test_table_registry_merges_workspace_over_builtin(tmp_path: Path) -> None:
     builtin = tmp_path / "builtin.yaml"
     _write_yaml(

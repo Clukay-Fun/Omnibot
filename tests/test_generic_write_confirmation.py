@@ -126,33 +126,6 @@ class _FakePrepareCreateTool(Tool):
         return json.dumps(self.payload, ensure_ascii=False)
 
 
-class _FakeFieldSchemaTool(Tool):
-    @property
-    def name(self) -> str:
-        return "bitable_list_fields"
-
-    @property
-    def description(self) -> str:
-        return "fake field schema"
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return {"type": "object", "properties": {}}
-
-    async def execute(self, **kwargs: Any) -> str:
-        _ = kwargs
-        return json.dumps(
-            {
-                "fields": [
-                    {"field_name": "日期", "type": 5, "property": {}},
-                    {"field_name": "人员", "type": 11, "property": {}},
-                    {"field_name": "未完成事项", "type": 1, "property": {}},
-                ]
-            },
-            ensure_ascii=False,
-        )
-
-
 class _FakeDirectorySearchTool(Tool):
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -197,6 +170,10 @@ def _build_loop(tmp_path, provider: _ScriptedProvider) -> AgentLoop:
         skillspec_config=SkillSpecConfig(enabled=False),
     )
     return loop
+
+
+def _registered_tool_names(loop: AgentLoop) -> set[str]:
+    return {tool["function"]["name"] for tool in loop.tools.get_definitions()}
 
 
 class _CoordinatorOnlyProvider:
@@ -265,7 +242,7 @@ async def test_directory_query_reaches_main_llm_without_coordinator_short_circui
     assert response is not None
     assert response.content == "llm-fallback"
     assert provider.calls == 1
-    assert provider.last_tool_names == ["bitable_directory_search"]
+    assert set(provider.last_tool_names) == _registered_tool_names(loop)
     assert directory_tool.calls == []
 
 
@@ -700,22 +677,16 @@ async def test_write_promise_context_is_recorded_but_not_replayed_deterministica
 
 
 @pytest.mark.asyncio
-async def test_normal_chat_confirmation_with_extra_fields_refreshes_preview(tmp_path) -> None:
-    provider = _ScriptedProvider(
-        [
-            LLMResponse(
-                content=json.dumps(
-                    {"action": "modify", "fields_patch": {"人员": "房怡康"}},
-                    ensure_ascii=False,
-                ),
-                tool_calls=[],
-            )
-        ]
+async def test_pending_write_free_text_followup_falls_back_to_main_llm(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
     )
-    loop = _build_loop(tmp_path, provider)
     create_tool = _FakeCreateTool()
     loop.tools.register(create_tool)
-    loop.tools.register(_FakeFieldSchemaTool())
 
     session = loop.sessions.get_or_create("cli:chat")
     session.metadata["pending_write"] = {
@@ -731,12 +702,10 @@ async def test_normal_chat_confirmation_with_extra_fields_refreshes_preview(tmp_
     )
 
     assert response is not None
-    assert "确认" in response.content
+    assert response.content == "llm-fallback"
     assert provider.calls == 1
-    assert len(create_tool.calls) == 1
-    assert create_tool.calls[0]["fields"]["人员"] == "房怡康"
-    assert "confirm_token" not in create_tool.calls[0]
+    assert create_tool.calls == []
 
-    refreshed = loop.sessions.get_or_create("cli:chat").metadata.get("pending_write") or {}
-    assert refreshed["token"] == "tok-create-1"
-    assert refreshed["args"]["fields"]["人员"] == "房怡康"
+    pending = loop.sessions.get_or_create("cli:chat").metadata.get("pending_write") or {}
+    assert pending["token"] == "tok-old"
+    assert pending["args"]["fields"] == {"日期": "2026-03-08", "未完成事项": "A"}

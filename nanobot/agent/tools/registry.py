@@ -307,10 +307,11 @@ class ToolRegistry:
         """用处，参数
 
         功能:
-            - 生成所有工具的 schema 定义列表。
+            - 生成所有已注册工具的 schema 定义列表。
         """
-        selected_names = self._allowed_tool_names(exposure, set(self._tools))
-        return [tool.to_schema() for name, tool in self._tools.items() if name in selected_names]
+        if exposure is not None and exposure.mode == "workflow_plan":
+            return []
+        return [tool.to_schema() for tool in self._tools.values()]
 
     async def execute(self, name: str, params: dict[str, Any], exposure: ToolExposureContext | None = None) -> str:
         """用处，参数

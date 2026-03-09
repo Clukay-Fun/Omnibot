@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
+
 SKILLSPEC_DIR = Path(__file__).resolve().parents[1] / "nanobot" / "skills" / "skillspec"
 REQUIRED_TOP_LEVEL_KEYS = {"meta", "params", "action", "response", "error"}
 
@@ -63,3 +65,35 @@ def test_skillspec_index_contains_id_and_description() -> None:
         assert isinstance(item, dict)
         assert item.get("id")
         assert item.get("description")
+
+
+def test_builtin_skillspec_assets_expose_blueprint_inventory(tmp_path: Path) -> None:
+    registry = SkillSpecRegistry(workspace_root=tmp_path / "workspace", builtin_root=SKILLSPEC_DIR)
+    registry.load()
+
+    case_detail = registry.blueprints["case_detail"]
+    assert case_detail.action_kind == "query"
+    assert case_detail.primary_tool == "bitable_search"
+    assert case_detail.action_metadata["has_cross_query"] is True
+    assert case_detail.action_metadata["cross_query_mode"] == "fanout"
+    assert [step.id for step in case_detail.steps] == ["case_base", "related_tasks", "related_contracts"]
+    assert [table.alias for table in case_detail.tables] == [
+        "case_registry",
+        "case_tasks",
+        "contract_registry",
+    ]
+
+    reminder_set = registry.blueprints["reminder_set"]
+    assert reminder_set.action_kind == "reminder_set"
+    assert reminder_set.tool_refs == ["bitable_create", "calendar_create", "cron"]
+    assert reminder_set.action_metadata["bridge_keys"] == [
+        "calendar_bridge",
+        "record_bridge",
+        "summary_cron_bridge",
+    ]
+
+    doc_recognize = registry.blueprints["doc_recognize"]
+    assert doc_recognize.action_kind == "document_pipeline"
+    assert doc_recognize.action_target == "process_document"
+    assert doc_recognize.primary_tool == "bitable_create"
+    assert doc_recognize.action_metadata["has_write_bridge"] is True
