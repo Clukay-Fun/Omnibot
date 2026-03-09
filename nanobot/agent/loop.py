@@ -2180,13 +2180,13 @@ class AgentLoop:
                             "progress", "tool_done", "{tool} 完成，继续思考中..."
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
                     if pending_preview is not None:
                         final_content = pending_preview
                         messages = self.context.add_assistant_message(messages, final_content)
                         break
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
 
                 if final_content is not None:
                     break

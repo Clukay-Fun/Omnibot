@@ -558,7 +558,7 @@ class FeishuChannel(BaseChannel):
         self._event_registration_report: list[dict[str, Any]] = []
         runtime_state_root = get_state_path()
         self._cron_service = CronService(
-            runtime_state_root / "cron" / "jobs.json",
+            runtime_state_root / "feishu" / "cron" / "jobs.json",
             legacy_store_paths=[self.workspace / "cron_jobs.json"],
         )
         self._reminder_runtime = ReminderRuntime(
