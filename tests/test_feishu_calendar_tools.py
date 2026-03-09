@@ -12,6 +12,7 @@ from nanobot.agent.tools.feishu_data.calendar_tools import (
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.registry import build_feishu_data_tools
+from nanobot.agent.tools.registry import ToolExposureContext, ToolRegistry
 from nanobot.config.schema import FeishuDataConfig
 
 
@@ -108,3 +109,21 @@ def test_registry_feature_flags_disable_optional_feishu_tools() -> None:
     assert "task_create" not in tool_names
     assert "bitable_app_create" not in tool_names
     assert "message_history_list" not in tool_names
+
+
+@pytest.mark.parametrize("content", ["搜索飞书文档里的日报模板", "搜一下云文档有哪些文档"])
+def test_feishu_query_mode_exposes_doc_search_for_doc_requests(config: FeishuDataConfig, content: str) -> None:
+    registry = ToolRegistry()
+    for tool in build_feishu_data_tools(config):
+        registry.register(tool)
+
+    definitions = registry.get_definitions(
+        ToolExposureContext(
+            channel="feishu",
+            user_text=content,
+            mode="main_feishu_query",
+        )
+    )
+
+    names = {tool["function"]["name"] for tool in definitions}
+    assert "doc_search" in names

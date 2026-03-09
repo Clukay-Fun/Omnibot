@@ -24,6 +24,7 @@ class ToolExposureContext:
 
 _DEV_TOOL_NAMES = {"read_file", "write_file", "edit_file", "list_dir", "exec", "spawn"}
 _WEB_TOOL_NAMES = {"web_search", "web_fetch"}
+_DOC_TOOL_NAMES = {"doc_search"}
 _BITABLE_READ_TOOL_NAMES = {
     "bitable_search",
     "bitable_list_tables",
@@ -63,7 +64,9 @@ _TASK_TOOL_NAMES = {
 _TASK_QUERY_TOOL_NAMES = {"task_get", "task_list", "tasklist_list"}
 _MESSAGE_HISTORY_TOOL_NAMES = {"message_history_list"}
 _REMINDER_TOOL_NAMES = {"cron"}
-_FEISHU_RESEARCH_TOOL_NAMES = _BITABLE_QUERY_TOOL_NAMES | {"bitable_directory_search"} | _MESSAGE_HISTORY_TOOL_NAMES | _CALENDAR_QUERY_TOOL_NAMES | _TASK_QUERY_TOOL_NAMES
+_FEISHU_RESEARCH_TOOL_NAMES = (
+    _BITABLE_QUERY_TOOL_NAMES | {"bitable_directory_search"} | _DOC_TOOL_NAMES | _MESSAGE_HISTORY_TOOL_NAMES | _CALENDAR_QUERY_TOOL_NAMES | _TASK_QUERY_TOOL_NAMES
+)
 
 
 def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
@@ -162,6 +165,7 @@ class ToolRegistry:
         bitable_intent = write_intent or _has_bitable_intent(text, include_write_terms=True)
         calendar_intent = _contains_any(text, ("日历", "日程", "会议", "空闲", "忙闲", "calendar"))
         task_intent = _contains_any(text, ("任务", "待办", "todo", "subtask", "评论", "备注任务"))
+        doc_intent = _contains_any(text, ("飞书文档", "云文档", "文档", "doc", "docs"))
         message_history_intent = _contains_any(text, ("消息历史", "聊天记录", "历史消息", "上一条消息", "引用消息", "message history"))
         dev_intent = _contains_any(
             text,
@@ -208,6 +212,8 @@ class ToolRegistry:
             exposed |= _CALENDAR_QUERY_TOOL_NAMES if mode == "main_feishu_query" else _CALENDAR_TOOL_NAMES
         if task_intent:
             exposed |= _TASK_QUERY_TOOL_NAMES if mode == "main_feishu_query" else _TASK_TOOL_NAMES
+        if doc_intent:
+            exposed |= _DOC_TOOL_NAMES
         if message_history_intent:
             exposed |= _MESSAGE_HISTORY_TOOL_NAMES
         if dev_intent and mode != "main_feishu_query":
@@ -236,9 +242,10 @@ class ToolRegistry:
         bitable_intent = _has_bitable_intent(text, include_write_terms=True)
         calendar_intent = _contains_any(text, ("日历", "日程", "会议", "空闲", "忙闲", "calendar"))
         task_intent = _contains_any(text, ("任务", "待办", "todo", "subtask", "评论", "备注任务"))
+        doc_intent = _contains_any(text, ("飞书文档", "云文档", "文档", "doc", "docs"))
         message_history_intent = _contains_any(text, ("消息历史", "聊天记录", "历史消息", "上一条消息", "引用消息", "message history"))
 
-        if directory_intent or bitable_intent or calendar_intent or task_intent or message_history_intent:
+        if directory_intent or bitable_intent or calendar_intent or task_intent or doc_intent or message_history_intent:
             exposed: set[str] = set()
             if directory_intent:
                 exposed.add("bitable_directory_search")
@@ -248,6 +255,8 @@ class ToolRegistry:
                 exposed |= _CALENDAR_TOOL_NAMES
             if task_intent:
                 exposed |= _TASK_TOOL_NAMES
+            if doc_intent:
+                exposed |= _DOC_TOOL_NAMES
             if message_history_intent:
                 exposed |= _MESSAGE_HISTORY_TOOL_NAMES
             return (exposed | authorized) & tool_names

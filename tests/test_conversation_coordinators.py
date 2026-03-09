@@ -150,6 +150,22 @@ async def test_contact_query_coordinator_logs_short_circuit(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["查一下今天日程", "搜一下云文档有哪些文档"])
+async def test_contact_query_coordinator_skips_non_directory_lookup_phrasing(tmp_path, content) -> None:
+    loop = _build_loop(tmp_path)
+    tool = _FakeDirectorySearchTool()
+    loop.tools.register(tool)
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content=content)
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback"
+    assert tool.calls == []
+
+
+@pytest.mark.asyncio
 async def test_continuation_coordinator_pages_recent_directory_hits(tmp_path) -> None:
     loop = _build_loop(tmp_path)
     session = loop.sessions.get_or_create("feishu:ou_chat")

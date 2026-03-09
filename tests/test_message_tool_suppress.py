@@ -1,5 +1,6 @@
 """Test message tool suppress logic for final replies."""
 
+import json
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.message import MessageTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import ChannelsConfig, FeishuConfig, SkillSpecConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -18,6 +20,18 @@ def _make_loop(tmp_path: Path) -> AgentLoop:
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
     return AgentLoop(bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10)
+
+
+class _BootstrapProvider:
+    def __init__(self) -> None:
+        self.last_messages: list[dict] = []
+
+    async def chat(self, **kwargs):
+        self.last_messages = list(kwargs.get("messages") or [])
+        return LLMResponse(content="llm-fallback", tool_calls=[])
+
+    def get_default_model(self) -> str:
+        return "test-model"
 
 
 class TestMessageToolSuppressLogic:
@@ -116,6 +130,44 @@ class TestAgentSlashCommands:
         assert "当前设置" in response.content
         assert "/setup" in response.content
         assert "回复风格" in response.content
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_turn_preserves_original_user_message_in_session_history(tmp_path: Path) -> None:
+    provider = _BootstrapProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        channels_config=ChannelsConfig(
+            feishu=FeishuConfig(
+                onboarding_enabled=True,
+                onboarding_blocking=False,
+                onboarding_guide_once=True,
+            )
+        ),
+        skillspec_config=SkillSpecConfig(enabled=True),
+    )
+
+    response = await loop._process_message(
+        InboundMessage(
+            channel="feishu",
+            sender_id="ou_bootstrap",
+            chat_id="ou_bootstrap",
+            content="你好",
+            metadata={"chat_type": "p2p", "message_id": "m-1"},
+        )
+    )
+
+    assert response is not None
+    session = loop.sessions.get_or_create("feishu:ou_bootstrap")
+    assert any(item.get("role") == "user" and item.get("content") == "你好" for item in session.messages)
+    assert not any(
+        item.get("role") == "user"
+        and isinstance(item.get("content"), str)
+        and item.get("content", "").startswith("[Bootstrap Internal Trigger]")
+        for item in session.messages
+    )
 
     @pytest.mark.asyncio
     async def test_session_new_marks_reply_in_thread_for_feishu(self, tmp_path: Path) -> None:

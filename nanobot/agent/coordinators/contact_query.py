@@ -17,6 +17,26 @@ if TYPE_CHECKING:
 _LIST_TOKENS = ("通讯录", "联系人", "同事")
 _LIST_PROMPTS = ("都有谁", "有哪些", "哪些人", "列一下", "列出", "名单", "所有人")
 _WRITE_TOKENS = ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")
+_NON_DIRECTORY_KEYWORDS = (
+    "日程",
+    "任务",
+    "待办",
+    "会议",
+    "日历",
+    "提醒",
+    "表格",
+    "多维表格",
+    "记录",
+    "字段",
+    "schema",
+    "视图",
+    "文档",
+    "云文档",
+    "文件",
+    "消息",
+    "聊天记录",
+    "历史消息",
+)
 _LOOKUP_RE = re.compile(
     r"^\s*(?:帮我)?(?:查|找|搜)(?:一下)?\s*(?P<keyword>[\w.@\-\u4e00-\u9fff]{2,40})\s*$",
     re.IGNORECASE,
@@ -65,7 +85,10 @@ class ContactQueryCoordinator(AgentCoordinator):
             return None, 10
         match = _LOOKUP_RE.match(text)
         if match:
-            return match.group("keyword"), 5
+            keyword = str(match.group("keyword") or "").strip()
+            if any(token in keyword for token in _NON_DIRECTORY_KEYWORDS):
+                return None
+            return keyword, 5
         return None
 
     @staticmethod

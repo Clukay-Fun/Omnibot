@@ -2814,6 +2814,16 @@ class AgentLoop:
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """将会话的新一轮消息保存起来，截断过长的工具结果。"""
         from datetime import datetime
+
+        def _restore_bootstrap_user_message(content: str) -> str | None:
+            prefix = "Actual user message:\n"
+            if not content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
+                return None
+            if prefix not in content:
+                return None
+            restored = content.split(prefix, 1)[1].strip()
+            return restored or None
+
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -2825,7 +2835,10 @@ class AgentLoop:
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     continue
                 if isinstance(content, str) and content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
-                    continue
+                    restored = _restore_bootstrap_user_message(content)
+                    if restored is None:
+                        continue
+                    entry["content"] = restored
                 if isinstance(content, list):
                     entry["content"] = [
                         {"type": "text", "text": "[image]"} if (
