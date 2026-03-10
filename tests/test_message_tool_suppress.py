@@ -193,24 +193,11 @@ class TestAgentSlashCommands:
         assert "全局命令" in response.content
         assert "/setup" in response.content
         assert "上下文命令" in response.content
-        assert "/plan" in response.content
-        assert "/build" in response.content
+        assert "/plan" not in response.content
+        assert "/build" not in response.content
 
     @pytest.mark.asyncio
-    async def test_plan_command_switches_session_to_plan_mode(self, tmp_path: Path) -> None:
-        loop = _make_loop(tmp_path)
-
-        response = await loop._process_message(
-            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/plan")
-        )
-
-        assert response is not None
-        assert "plan 模式" in response.content
-        session = loop.sessions.get_or_create("cli:chat")
-        assert session.metadata["workflow_mode"] == "plan"
-
-    @pytest.mark.asyncio
-    async def test_status_shows_current_workflow_mode(self, tmp_path: Path) -> None:
+    async def test_status_no_longer_shows_workflow_mode(self, tmp_path: Path) -> None:
         loop = _make_loop(tmp_path)
         session = loop.sessions.get_or_create("cli:chat")
         session.metadata["workflow_mode"] = "plan"
@@ -221,27 +208,12 @@ class TestAgentSlashCommands:
         )
 
         assert response is not None
-        assert "工作模式：计划（只读）" in response.content
+        assert "工作模式" not in response.content
 
     @pytest.mark.asyncio
-    async def test_plan_mode_blocks_skillspec_execution(self, tmp_path: Path) -> None:
-        skillspec_root = tmp_path / "skillspec"
-        skillspec_root.mkdir(parents=True, exist_ok=True)
-        (skillspec_root / "query_test.yaml").write_text(
-            """
-meta: {id: query_test, version: "0.1", description: 查询测试}
-params: {type: object, properties: {query: {type: string}}}
-action:
-  kind: query
-  table: {app_token: app_x, table_id: tbl_x}
-response: {}
-error: {}
-""".strip()
-            + "\n",
-            encoding="utf-8",
-        )
+    async def test_legacy_workflow_mode_no_longer_intercepts_skill_commands(self, tmp_path: Path) -> None:
         provider = _WorkflowProvider()
-        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=True))
+        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
         session = loop.sessions.get_or_create("cli:chat")
         session.metadata["workflow_mode"] = "plan"
         loop.sessions.save(session)
@@ -251,11 +223,11 @@ error: {}
         )
 
         assert response is not None
-        assert "plan 模式" in response.content
-        assert provider.calls == 0
+        assert response.content == "mode-aware-reply"
+        assert provider.calls == 1
 
     @pytest.mark.asyncio
-    async def test_plan_mode_keeps_chat_but_exposes_no_tools(self, tmp_path: Path) -> None:
+    async def test_legacy_workflow_mode_metadata_no_longer_hides_tools(self, tmp_path: Path) -> None:
         provider = _WorkflowProvider()
         loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=False))
         loop.tools.register(_DummyTool())
@@ -265,30 +237,6 @@ error: {}
 
         response = await loop._process_message(
             InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我规划一下合同录入流程")
-        )
-
-        assert response is not None
-        assert response.content == "mode-aware-reply"
-        assert provider.calls == 1
-        assert provider.last_tools == []
-
-    @pytest.mark.asyncio
-    async def test_build_command_restores_tool_access(self, tmp_path: Path) -> None:
-        provider = _WorkflowProvider()
-        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=False))
-        loop.tools.register(_DummyTool())
-        session = loop.sessions.get_or_create("cli:chat")
-        session.metadata["workflow_mode"] = "plan"
-        loop.sessions.save(session)
-
-        switch = await loop._process_message(
-            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="/build")
-        )
-        assert switch is not None
-        assert "build 模式" in switch.content
-
-        response = await loop._process_message(
-            InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我继续")
         )
 
         assert response is not None
@@ -477,7 +425,7 @@ async def test_pending_write_preview_keeps_tool_result_in_history(tmp_path: Path
     )
     loop.tools.get_definitions = MagicMock(return_value=[])
     loop.tools.execute = AsyncMock(return_value=json.dumps({"ok": True}, ensure_ascii=False))
-    loop._store_pending_write_from_result = MagicMock(return_value="已生成写入预览")
+    loop._capture_coordinator_tool_result = MagicMock(return_value="已生成写入预览")
     session = loop.sessions.get_or_create("cli:pending")
 
     final_content, _, messages, _ = await loop._run_agent_loop(

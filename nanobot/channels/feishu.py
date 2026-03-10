@@ -21,7 +21,7 @@ from loguru import logger
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
-from nanobot.agent.skill_runtime import BitableReminderRuleEngine, ReminderRuntime
+from nanobot.agent.reminders import BitableReminderRuleEngine, ReminderRuntime
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -562,7 +562,7 @@ class FeishuChannel(BaseChannel):
         self._event_registration_report: list[dict[str, Any]] = []
         runtime_state_root = get_state_path() / "feishu"
         self._cron_service = CronService(
-            runtime_state_root / "feishu" / "cron" / "jobs.json",
+            runtime_state_root / "cron" / "jobs.json",
             legacy_store_paths=[self.workspace / "cron_jobs.json"],
         )
         self._reminder_runtime = ReminderRuntime(

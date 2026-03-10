@@ -11,10 +11,11 @@ from typing import Any, Awaitable, Callable
 
 @dataclass
 class ToolCallRequest:
-    """用处，参数
+    """
+    用处: 模型输出的执行意图载体。
 
     功能:
-        - 表示模型返回的单次工具调用请求。
+        - 表示模型返回的单次工具调用请求，包含工具名与反序列化前的 JSON 参数。
     """
     id: str
     name: str
@@ -51,10 +52,11 @@ class LLMResponse:
 
 
 class LLMProvider(ABC):
-    """用处，参数
+    """
+    用处: 约束多平台大模型对接规范的统一抽象。
 
     功能:
-        - 约束不同模型提供方的公共行为。
+        - 约束不同模型提供方的公共行为，支持流式和同步请求。
     """
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):

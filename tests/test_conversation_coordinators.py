@@ -135,6 +135,7 @@ class _FakePrepareCreateTool(Tool):
         ("查找表格", _FakeTableListTool),
         ("列出字段", _FakeFieldListTool),
         ("找案件", None),
+        ("查看团队周工作计划表所有内容", _FakeTableListTool),
     ],
 )
 async def test_ordinary_feishu_queries_bypass_pre_llm_routing(tmp_path, content, tool) -> None:
@@ -157,6 +158,30 @@ async def test_ordinary_feishu_queries_bypass_pre_llm_routing(tmp_path, content,
     assert response is not None
     assert response.content == "llm-fallback-1"
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_feishu_followup_overview_inherits_previous_query_context(tmp_path) -> None:
+    provider = _CapturingProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+        skillspec_config=SkillSpecConfig(enabled=False),
+    )
+    loop.tools.register(_FakeTableListTool())
+
+    session = loop.sessions.get_or_create("feishu:ou_chat")
+    session.add_message("user", "查看团队周工作计划表所有内容")
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="feishu", sender_id="ou_user", chat_id="ou_chat", content="概览")
+    )
+
+    assert response is not None
+    assert response.content == "llm-fallback-1"
+    assert "bitable_list_tables" in provider.last_tool_names
 
 
 @pytest.mark.asyncio

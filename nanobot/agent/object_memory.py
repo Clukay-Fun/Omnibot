@@ -1,4 +1,12 @@
+"""
+描述: 结构化的实体对象内存管理器。
+主要功能:
+    - 为常驻业务对象（例如被反复引用的项目、案件、表单记录等）提供指代词与历史栈管理。
+    - 处理自然语言中诸如“刚才那一条”、“第二个合同”的序列解析引用。
+"""
+
 from __future__ import annotations
+
 
 import json
 import re
@@ -26,8 +34,15 @@ _ORDINAL_HINTS = {
     "第3个": 2,
 }
 
+# region [泛实体归类与记录提取]
 
 def object_kind_for_payload(*, profile: dict[str, Any] | None = None, table: dict[str, Any] | None = None) -> str | None:
+    """
+    用处: 解析表名或实体标签。
+
+    功能:
+        - 通过字符串匹配规则区分当前的查询焦点到底是 Case、Contract 还是 Weekly Plan 等预设分类。
+    """
     text = " ".join(
         str(item).strip()
         for item in (
@@ -143,6 +158,10 @@ def resolve_recent_object_reference(metadata: dict[str, Any], *, kind: str, text
         return None
     return dict(history[index])
 
+
+# endregion
+
+# region [通用上下文指代判言]
 
 def recent_object_focus(metadata: dict[str, Any]) -> str:
     return str(metadata.get(_FOCUS_KEY) or "").strip()

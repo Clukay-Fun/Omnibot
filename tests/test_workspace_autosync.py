@@ -3,9 +3,8 @@ from typing import Any, cast
 
 from nanobot.agent.loop import AgentLoop
 from nanobot.agent.memory import MemoryStore
-from nanobot.agent.skill_runtime.document_extractor import load_extract_templates
-from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
-from nanobot.agent.skill_runtime.table_registry import TableRegistry
+from nanobot.agent.documents.document_extractor import load_extract_templates
+from nanobot.agent.table_runtime.table_registry import TableRegistry
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel
 from nanobot.config.schema import FeishuConfig, SkillSpecConfig
@@ -162,32 +161,3 @@ def test_table_registry_ignores_repo_root_style_skills_duplicates(tmp_path, monk
     registry = TableRegistry(workspace=tmp_path / "workspace")
 
     assert registry.map_field("case_registry", "status") == "案件状态"
-
-
-def test_skillspec_registry_ignores_repo_root_style_skillspec_duplicates(tmp_path, monkeypatch) -> None:
-    (tmp_path / "skillspec").mkdir()
-    (tmp_path / "skillspec" / "case_detail.yaml").write_text(
-        "\n".join(
-            [
-                "meta:",
-                "  id: case_detail",
-                "  version: '0.1'",
-                "  title: Duplicate",
-                "  description: Duplicate repo-root skillspec.",
-                "params:",
-                "  type: object",
-                "action:",
-                "  kind: create",
-                "response: {}",
-                "error: {}",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    monkeypatch.chdir(tmp_path)
-
-    registry = SkillSpecRegistry(workspace_root=tmp_path / "workspace" / "skillspec")
-    registry.load()
-
-    assert registry.blueprints["case_detail"].action_kind == "query"

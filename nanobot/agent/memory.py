@@ -54,17 +54,20 @@ _SAVE_MEMORY_TOOL = [
 
 
 class MemoryStore:
-    """用处，参数
+    """
+    用处: 记忆与历史数据存储门面。
 
     功能:
-        - 提供记忆文件读写与会话整合能力。
+        - 封装读写本地 Markdown 与 JSON 状态文件的逻辑。
+        - 处理来自各种会话作用域（User / Chat / Thread）的路径散列。
     """
 
     def __init__(self, workspace: Path):
-        """用处，参数
+        """
+        用处: 构造函数。参数 workspace: 工作区根路径。
 
         功能:
-            - 初始化记忆目录与文件路径。
+            - 初始化记忆库根目录，并依次创建飞书体系下的 user/chat/thread 子级目录。
         """
         self.memory_dir = ensure_dir(workspace / "memory")
         self.workspace = workspace
@@ -155,19 +158,21 @@ class MemoryStore:
         return self._shared_markdown_path(filename)
 
     def read_long_term(self, runtime: PromptContext | None = None) -> str:
-        """用处，参数
+        """
+        用处: 读取当前上下文中关联的长线记忆文档。
 
         功能:
-            - 读取长期记忆内容。
+            - 检索并读取 MEMORY.md 的内容，可能是应用级全局记忆或基于飞书单聊会话分隔的独占记忆。
         """
         path = self.resolve_persona_markdown_path("MEMORY.md", runtime)
         return path.read_text(encoding="utf-8") if path and path.exists() else ""
 
     def write_long_term(self, content: str, runtime: PromptContext | None = None) -> None:
-        """用处，参数
+        """
+        用处: 执行持久化长线记忆。参数 content: 将要复写的变更, runtime: 当前处理上下文。
 
         功能:
-            - 覆盖写入长期记忆内容。
+            - 将大模型凝练后的新记忆覆盖写入目标级别的 MEMORY.md 文件。
         """
         runtime = runtime or PromptContext()
         if runtime.is_feishu and runtime.is_private:
@@ -257,18 +262,20 @@ class MemoryStore:
         return f"## {title}\n" + "\n".join(lines) if lines else ""
 
     def append_history(self, entry: str) -> None:
-        """用处，参数
+        """
+        用处: 此前用于持续落盘所有流水账历史对话记录的遗留接口。参数 entry: 要写入的新条目。
 
         功能:
-            - Batch 1 起禁用 HISTORY 落盘，保留接口兼容。
+            - Batch 1 起禁用 HISTORY 落盘以避免存储碎片爆炸，仅保留接口兼容性占位。
         """
         _ = entry
 
     def get_memory_context(self, runtime: PromptContext | None = None) -> str:
-        """用处，参数
+        """
+        用处: 将分布的多级记忆与画像信息拼装为 LLM Prompt 上下文文段。
 
         功能:
-            - 生成注入提示词的长期记忆片段。
+            - 检查并拼接 Long-term, User Memory, Thread Memory 与业务级别的 User Profile 至纯文本字符串。
         """
         runtime = runtime or PromptContext()
         parts: list[str] = []
@@ -332,10 +339,11 @@ class MemoryStore:
         archive_all: bool = False,
         memory_window: int = 50,
     ) -> bool:
-        """用处，参数
+        """
+        用处: 对长对话执行记忆浓缩过程。参数 session: 会话实例, provider: LLM 提供商, model: 指定模型名称等。
 
         功能:
-            - 调用模型整合旧消息并更新记忆文件。
+            - 当多轮对话窗口超出设定阈值时，自动提取最早部分消息交由模型以 `save_memory` 工具调用提炼出总结并归档。
         """
         if archive_all:
             old_messages = session.messages

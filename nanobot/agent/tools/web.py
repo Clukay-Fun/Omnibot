@@ -1,4 +1,9 @@
-"""Web tools: web_search and web_fetch."""
+"""
+描述: 网页搜索与抓取工具模块。
+主要功能:
+    - 提供使用 Brave Search API 进行全网搜索的 `WebSearchTool`。
+    - 提供抓取 URL 网页并提取其正文内容转换为 Markdown/文本的 `WebFetchTool`。
+"""
 
 import html
 import json
@@ -12,13 +17,20 @@ from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
+#region 共有常量与辅助函数
+
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
 
 
 def _strip_tags(text: str) -> str:
-    """Remove HTML tags and decode entities."""
+    """
+    用处: 清除文本中的 HTML 标签。
+
+    功能:
+        - 移除 `<script>` 和 `<style>` 块内容，去除其余 HTML 标签并解码实体字符。
+    """
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
     text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
     text = re.sub(r'<[^>]+>', '', text)
@@ -26,13 +38,23 @@ def _strip_tags(text: str) -> str:
 
 
 def _normalize(text: str) -> str:
-    """Normalize whitespace."""
+    """
+    用处: 规范化连续的空白字符。
+
+    功能:
+        - 将多个空格/制表符替换为单空格，并将三个以上的换行符缩减为双换行。
+    """
     text = re.sub(r'[ \t]+', ' ', text)
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
 def _validate_url(url: str) -> tuple[bool, str]:
-    """Validate URL: must be http(s) with valid domain."""
+    """
+    用处: 校验给定的 URL 是否合法。
+
+    功能:
+        - 判断 URL 必须为 http 或 https 协议且包含有效的域名。
+    """
     try:
         p = urlparse(url)
         if p.scheme not in ('http', 'https'):
@@ -44,8 +66,17 @@ def _validate_url(url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+#endregion
+
+#region 网页搜索工具
+
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """
+    用处: 基于 Brave Search 的全网内容搜索引擎。
+
+    功能:
+        - 接收用户查询词，返回相关结果的标题、网址和描述片段。
+    """
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -65,10 +96,21 @@ class WebSearchTool(Tool):
 
     @property
     def api_key(self) -> str:
-        """Resolve API key at call time so env/config changes are picked up."""
+        """
+        用处: 运行时解析 API_KEY 凭证。
+
+        功能:
+            - 优先使用初始化参数，若无则从环境变量中读取配置，实现凭证的热加载。
+        """
         return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
 
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
+        """
+        用处: 执行网页搜索。参数 query: 搜索词，count: 时望返回条数。
+
+        功能:
+            - 向 Brave 接口发送 HTTP GET 请求，格式化返回最多 10 条检索记录。
+        """
         if not self.api_key:
             return (
                 "Error: Brave Search API key not configured. Set it in "
@@ -106,8 +148,17 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
 
+#endregion
+
+#region 网页正文拉取工具
+
 class WebFetchTool(Tool):
-    """Fetch and extract content from a URL using Readability."""
+    """
+    用处: 对目标网页进行无头请求与正文内容提取。
+
+    功能:
+        - 抓取任意 URL，将其 HTML DOM 借由 Readability 算法清洗并转为 Markdown 或纯文本以供 LLM 阅读。
+    """
 
     name = "web_fetch"
     description = "Fetch URL and extract readable content (HTML → markdown/text)."
@@ -126,6 +177,12 @@ class WebFetchTool(Tool):
         self.proxy = proxy
 
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+        """
+        用处: 执行抓取动作。参数 url: 目标解析地址。
+
+        功能:
+            - 发起网络请求并判定内容类型；若是 HTML，则智能提取正文主体转为可读结构，最后返回限定截断字数的 JSON 数据串。
+        """
         from readability import Document
 
         max_chars = maxChars or self.max_chars
@@ -169,7 +226,12 @@ class WebFetchTool(Tool):
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
 
     def _to_markdown(self, html: str) -> str:
-        """Convert HTML to markdown."""
+        """
+        用处: 内部 HTML 到 Markdown 标签的转化引擎。
+
+        功能:
+            - 运用正则模式替换掉链接、各级标题、列表结构为 Markdown 基本语法，保留重要排版骨架。
+        """
         # Convert links, headings, lists before stripping tags
         text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
                       lambda m: f'[{_strip_tags(m[2])}]({m[1]})', html, flags=re.I)
@@ -179,3 +241,5 @@ class WebFetchTool(Tool):
         text = re.sub(r'</(p|div|section|article)>', '\n\n', text, flags=re.I)
         text = re.sub(r'<(br|hr)\s*/?>', '\n', text, flags=re.I)
         return _normalize(_strip_tags(text))
+
+#endregion

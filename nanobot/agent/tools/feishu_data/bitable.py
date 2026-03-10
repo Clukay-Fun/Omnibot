@@ -19,9 +19,9 @@ from nanobot.agent.object_memory import (
     recent_object_focus,
     resolve_recent_object_reference,
 )
-from nanobot.agent.skill_runtime.table_registry import TableRegistry
-from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
-from nanobot.agent.skill_runtime.table_profile_cache import schema_hash_for_fields
+from nanobot.agent.table_runtime.table_registry import TableRegistry
+from nanobot.agent.table_runtime.table_profile_synthesizer import TableProfileSynthesizer
+from nanobot.agent.table_runtime.table_profile_cache import schema_hash_for_fields
 from nanobot.agent.tools.feishu_data.cache import TTLCache
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.date_utils import build_date_filter

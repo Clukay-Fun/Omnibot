@@ -1,4 +1,9 @@
-"""Heartbeat service - periodic agent wake-up to check for tasks."""
+"""
+描述: 智能体常驻脉搏心跳唤醒服务。
+主要功能:
+    - 周期性地激活 Agent 去检查任务或清理过期上下文。
+    - 通过将检查过程包装为虚拟的大模型工具调用（Tool Call）来保证决策的结构化。
+"""
 
 from __future__ import annotations
 
@@ -39,15 +44,11 @@ _HEARTBEAT_TOOL = [
 
 class HeartbeatService:
     """
-    Periodic heartbeat service that wakes the agent to check for tasks.
+    用处: 驻留内存的心跳定时器。
 
-    Phase 1 (decision): reads HEARTBEAT.md and asks the LLM — via a virtual
-    tool call — whether there are active tasks.  This avoids free-text parsing
-    and the unreliable HEARTBEAT_OK token.
-
-    Phase 2 (execution): only triggered when Phase 1 returns ``run``.  The
-    ``on_execute`` callback runs the task through the full agent loop and
-    returns the result to deliver.
+    功能:
+        - 阶段1（决策）：读取工作区的 HEARTBEAT.md 文件并通过虚设的 Tool 询问 LLM 是否有待处理任务。
+        - 阶段2（执行）：仅当阶段1返回 run 时触发；运行完整的 Agent 逻辑环并执行回调通知。
     """
 
     def __init__(

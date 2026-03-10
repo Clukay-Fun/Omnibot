@@ -1,4 +1,10 @@
-"""Cron service for scheduling agent tasks."""
+"""
+描述: 智能体常时驻留的后台任务调度引擎。
+主要功能:
+    - 基于 asyncio 管理并维持定时唤醒逻辑。
+    - 负责读取并执行 SQLite 中的持久化定时任务。
+    - 向下层提供时间表达式的计算，向上层暴露操作接口。
+"""
 
 import asyncio
 import json
@@ -63,7 +69,13 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
 
 
 class CronService:
-    """Service for managing and executing scheduled jobs."""
+    """
+    用处: 驻留内存的调度大管家。
+
+    功能:
+        - 维护一份从 SQLite 拉取的本地调度表。
+        - 伴随 Event Loop 持续运行，在时间到达之际唤起 Agent 回调。
+    """
 
     def __init__(
         self,
@@ -108,7 +120,7 @@ class CronService:
                 job_id = str(raw.get("id") or "")
                 if not job_id:
                     continue
-                self._sqlite.upsert_cron_job(
+                self._sqlite.cron.upsert(
                     {
                         "id": job_id,
                         "name": str(raw.get("name") or ""),
@@ -216,7 +228,7 @@ class CronService:
 
         try:
             self._migrate_legacy_json_if_needed()
-            rows = self._sqlite.list_cron_jobs()
+            rows = self._sqlite.cron.list_all()
             self._store = CronStore(jobs=[self._cron_job_from_row(row) for row in rows])
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to load cron store: {}", exc)
@@ -229,7 +241,7 @@ class CronService:
         if self._store is None:
             return
 
-        self._sqlite.save_cron_jobs([self._cron_job_to_row(job) for job in self._store.jobs])
+        self._sqlite.cron.save_all([self._cron_job_to_row(job) for job in self._store.jobs])
 
     async def start(self) -> None:
         """Start the cron service."""

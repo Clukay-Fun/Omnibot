@@ -12,10 +12,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ProviderSpec:
-    """用处，参数
+    """
+    用处: 核心调度路由元信息载体。
 
     功能:
-        - 定义单个提供方的匹配和路由元信息。
+        - 定义单个提供方的匹配和环境变量、前缀路由。
     """
 
     # identity

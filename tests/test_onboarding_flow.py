@@ -4,7 +4,7 @@ import json
 import pytest
 
 from nanobot.agent.loop import AgentLoop
-from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
+from nanobot.agent.user_state import UserMemoryStore
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ChannelsConfig, FeishuConfig, SkillSpecConfig

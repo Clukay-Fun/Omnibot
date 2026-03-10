@@ -1,4 +1,9 @@
-"""Runtime text/template defaults with optional workspace overrides."""
+"""
+描述: 运行时静态文案与默认模板中心。
+主要功能:
+    - 集中硬编码所有机器人的标准话术、系统帮助页、正则意图触发词簇以及飞书卡片视图骨架。
+    - 允许外部工作区提供 .yaml/.json 覆写（Override）。
+"""
 
 from __future__ import annotations
 
@@ -48,8 +53,6 @@ _DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
             "全局命令\n"
             "- /help 或 /commands：查看命令总览\n"
             "- /status：查看当前偏好与授权状态\n"
-            "- /plan：切换到计划模式（只分析/规划，不执行 skill 或工具）\n"
-            "- /build：切换到构建模式（允许执行 skill 和工具）\n"
             "- /setup：查看初始化引导\n"
             "- /connect 或 /oauth：连接飞书 OAuth\n"
             "- /session：查看会话子命令帮助\n"
@@ -308,6 +311,12 @@ _DEFAULT_TEMPLATES: dict[str, dict[str, Any]] = {
 
 @dataclass(slots=True)
 class RuntimeTextCatalog:
+    """
+    用处: 运行时文案词典管理对象。
+
+    功能:
+        - 承载机器人的各种静态文本资源缓存，用于在 Agent 各个阶段统一调用和规避硬代码字串。
+    """
     prompts: dict[str, dict[str, Any]]
     routing: dict[str, dict[str, Any]]
     templates: dict[str, dict[str, Any]]

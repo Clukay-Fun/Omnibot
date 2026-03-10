@@ -1,4 +1,8 @@
-"""Asynchronous writer for Feishu scoped MEMORY.md files."""
+"""
+描述: 私域会话记忆的旁路异步落盘处理器。
+主要功能:
+    - 阻断高频写入请求同步卡死 LLM 渲染流，通过消息队列在后台批量整理写入。
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,12 @@ _SENTINEL = object()
 
 @dataclass(slots=True)
 class MemoryTurnTask:
+    """
+    用处: 写入记忆的异步作业载荷（DTO）。
+
+    功能:
+        - 记录着通道来源、用户文本、回复截面与对应应当合并修改的 scopes 限位层级。
+    """
     channel: str
     user_id: str | None
     chat_id: str | None
@@ -32,7 +42,12 @@ class MemoryTurnTask:
 
 
 class MemoryWriteWorker:
-    """Background queue worker for memory writeback."""
+    """
+    用处: 后台队列流式消费者。
+
+    功能:
+        - 控制一定时间窗口或触发阈值后（Flush Threshold）从缓存合并生成 Markdown 行日志追加到历史系统（含去重过滤）。
+    """
 
     DEFAULT_FLUSH_THRESHOLD = 3
 

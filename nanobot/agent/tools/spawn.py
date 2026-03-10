@@ -12,7 +12,12 @@ if TYPE_CHECKING:
 # region [子代理派生工具]
 
 class SpawnTool(Tool):
-    """用于派生后台子代理执行任务的工具。"""
+    """
+    用处: 孵化创建新后台子代理的执行入口点。
+
+    功能:
+        - 允许当前 Agent (主线程) 将长尾耗时任务“分发”给另一个独立运行的子代理 (Subagent) 去平行执行。
+    """
 
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
@@ -21,7 +26,12 @@ class SpawnTool(Tool):
         self._session_key = "cli:direct"
 
     def set_context(self, channel: str, chat_id: str) -> None:
-        """设置子代理向最初来源通报结果的上下文。"""
+        """
+        用处: 设置子代理执行完毕后向谁报告的联系方式。
+
+        功能:
+            - 将当前来源渠道与用户存入缓存实例中，后续组装为 Session Key。
+        """
         self._origin_channel = channel
         self._origin_chat_id = chat_id
         self._session_key = f"{channel}:{chat_id}"
@@ -37,10 +47,16 @@ class SpawnTool(Tool):
 
     @property
     def description(self) -> str:
+        """
+        用处: 对派生请求的意图阐述。
+
+        功能:
+            - 告知大模型只有当面临无法在同一轮立刻响应完毕的长尾复杂任务时才主动使用。
+        """
         return (
             "派生（Spawn）一个子代理以在后台处理任务。"
             "当任务复杂或耗时较长、且可以独立运行时使用。"
-            "子代理将完成任务并在完成后报告。"
+            "子代理将完成任务并在完成后自动报告。"
         )
 
     @property
@@ -69,7 +85,12 @@ class SpawnTool(Tool):
         }
 
     async def execute(self, **kwargs: Any) -> str:
-        """派生子代理在后台执行指定的任务。"""
+        """
+        用处: 执行子代理孵化动作。
+
+        功能:
+            - 从参数重抓取核心 task 语句并根据授权将请求转发至挂载的 `_manager.spawn` 管理器中。
+        """
         task = str(kwargs.get("task") or "")
         label = kwargs.get("label")
         mode = kwargs.get("mode")

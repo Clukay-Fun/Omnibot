@@ -1,4 +1,9 @@
-"""智能体能力的技能加载器。"""
+"""
+描述: 智能体能力的动态挂载与描述生成器。
+主要功能:
+    - 从工作区和内置技能树（skills/）读取 SKILL.md。
+    - 生成包含环境与依赖限制的供大模型阅读的能力目录清单。
+"""
 
 import json
 import os
@@ -14,9 +19,11 @@ BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "builtin"
 
 class SkillsLoader:
     """
-    智能体技能加载器。
+    用处: 运行时技能扫描与内容提供者。
 
-    技能是 Markdown 文件（SKILL.md），用于教会智能体如何使用特定工具或执行特定任务。
+    功能:
+        - 查找工作区或内置区定义的外部应用拓展配置（如飞书数据接入等指令）。
+        - 组装带缺失依赖警告（requires/env）的结构化 XML 或 Markdown 挂载信息。
     """
 
     def __init__(self, workspace: Path, builtin_skills_dir: Path | None = None):
@@ -26,7 +33,10 @@ class SkillsLoader:
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
         """
-        列出所有可用的技能。
+        用处: 收集可供挂载的目录树节点。
+
+        功能:
+            - 遍历搜索默认内置和用户工作区的拓展，按可用性标记加载状态。
 
         Args:
             filter_unavailable: 如果为 True，则过滤掉不满足要求的技能。
@@ -59,7 +69,10 @@ class SkillsLoader:
 
     def load_skill(self, name: str) -> str | None:
         """
-        根据名称加载技能。
+        用处: 定点获取技能的 Markdown 全文。
+
+        功能:
+            - 解析原始文件内容供后续正则提纯和组装所用。
 
         Args:
             name: 技能名称（目录名）。
@@ -82,7 +95,10 @@ class SkillsLoader:
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
         """
-        加载指定的技能，以便包含在智能体上下文中。
+        用处: 将特定开启的技能数组转为 LLM 阅读的 Prompt 文本块。
+
+        功能:
+            - 提取技能具体上下文逻辑进行拼装（已过滤去头部配置数据）。
 
         Args:
             skill_names: 要加载的技能名称列表。
@@ -101,9 +117,10 @@ class SkillsLoader:
 
     def build_skills_summary(self) -> str:
         """
-        构建所有技能的摘要（名称、描述、路径、可用性）。
+        用处: 构建 XML 格式的全局导航目录。
 
-        这用于渐进式加载 —— 智能体可以在需要时使用 read_file 去读取完整的技能内容。
+        功能:
+            - 常用于渐进式加载 —— 智能体可以在此预览大纲，并在需要时再使用 `read_file` 深入阅读技能细则。
 
         Returns:
             XML 格式的技能摘要。

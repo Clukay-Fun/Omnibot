@@ -1,4 +1,8 @@
-"""Session management for conversation history."""
+"""
+描述: 对话会话历史的持久化层与多轮上下文读写管理器。
+主要功能:
+    - 统筹隔离各个频道的会话记录，并提供向大语言模型请求时的上下文拼接能力。
+"""
 
 import json
 import shutil
@@ -16,13 +20,11 @@ from nanobot.utils.helpers import ensure_dir, get_state_path, migrate_legacy_pat
 @dataclass
 class Session:
     """
-    A conversation session.
+    用处: 运行时某一个具体对话维度的上下文持有器。
 
-    Stores messages in JSONL format for easy reading and persistence.
-
-    Important: Messages are append-only for LLM cache efficiency.
-    The consolidation process may update MEMORY.md
-    but does NOT modify the messages list or get_history() output.
+    功能:
+        - 在内存中托管由用户问题、AI 回复以及 Tool 调用记录组成的 List[dict]。
+        - 为大模型缓存命中效率考量，内部采用增量追加写入而不随便篡改历史记录。
     """
 
     key: str  # channel:chat_id
@@ -72,9 +74,11 @@ class Session:
 
 class SessionManager:
     """
-    Manages conversation sessions.
+    用处: 统合全部会话的缓存调度与序列化门面。
 
-    Sessions are stored as JSONL files in the sessions directory.
+    功能:
+        - 以 JSONL 落盘方式支持海量消息的快速末尾追加读写保障。
+        - 处理来自各个平台的 Session Key 生成、匹配获取、生命周期销毁驱逐。
     """
 
     def __init__(
@@ -161,7 +165,7 @@ class SessionManager:
                     else:
                         messages.append(data)
 
-            sql_state = self._sqlite.get_session_state(key)
+            sql_state = self._sqlite.sessions.get(key)
             if sql_state:
                 sql_metadata = sql_state.get("metadata")
                 if isinstance(sql_metadata, dict):
@@ -203,7 +207,7 @@ class SessionManager:
             for msg in session.messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
-        self._sqlite.upsert_session_state(
+        self._sqlite.sessions.upsert(
             session.key,
             metadata=dict(session.metadata or {}),
             created_at=session.created_at.isoformat(),
@@ -229,7 +233,7 @@ class SessionManager:
                 path.unlink()
             if legacy_path.exists():
                 legacy_path.unlink()
-            self._sqlite.delete_session_state(key)
+            self._sqlite.sessions.delete(key)
             return exists
         except Exception as e:
             logger.warning("Failed to delete session {}: {}", key, e)
@@ -243,7 +247,7 @@ class SessionManager:
             List of session info dicts.
         """
         sessions = []
-        sql_map = {item["session_key"]: item for item in self._sqlite.list_session_state()}
+        sql_map = {item["session_key"]: item for item in self._sqlite.sessions.list_all()}
 
         for path in self.sessions_dir.glob("*.jsonl"):
             try:

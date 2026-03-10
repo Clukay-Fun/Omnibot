@@ -1,4 +1,8 @@
-"""Structured result contracts for specialist subagents."""
+"""
+描述: 垂直类微代理的数据返回契约定义中心。
+主要功能:
+    - 统一定义并校验各种执行计划（Plan/Research/Apply）结束后，LLM 返回结构的形式是否处于合法 JSON。
+"""
 
 from __future__ import annotations
 
@@ -9,6 +13,12 @@ from typing import Any
 
 @dataclass(slots=True)
 class SubagentResultContract:
+    """
+    用处: 子代理与主路由器的消息约定协议。
+
+    功能:
+        - 确保 JSON 化文本的确定性转义格式。包裹并提取 AI 模型自我判定的置信度、成功状态以及建议的后续接力动作。
+    """
     kind: str
     status: str
     summary: str

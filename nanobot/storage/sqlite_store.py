@@ -1,4 +1,9 @@
-"""SQLite storage primitives for Feishu state, OAuth, and token lifecycle."""
+"""
+描述: 全局唯一的基础关卡数据库引擎网关。
+主要功能:
+    - 为飞书状态、OAuth 鉴权、Token 刷新、会话序列化及定时任务提供底层数据存取。
+    - 集中管理表结构的创建迁移与执行锁。
+"""
 
 from __future__ import annotations
 
@@ -12,10 +17,20 @@ from pathlib import Path
 from shutil import copy2
 from typing import Any, Iterator, Literal
 
+from nanobot.storage.dao.cron import CronDAO
+from nanobot.storage.dao.oauth import OAuthDAO
+from nanobot.storage.dao.reminder import ReminderDAO
+from nanobot.storage.dao.session import SessionDAO
+
 
 @dataclass(frozen=True, slots=True)
 class SQLiteConnectionOptions:
-    """Connection-level sqlite pragma settings."""
+    """
+    用处: 调优数据库表现的建连参数。
+
+    功能:
+        - 精细控制 PRAGMA 级的选项，例如并发性能关键的 WAL 模式开关。
+    """
 
     journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"] = "WAL"
     synchronous: Literal["OFF", "NORMAL", "FULL", "EXTRA"] = "NORMAL"
@@ -23,7 +38,13 @@ class SQLiteConnectionOptions:
 
 
 class SQLiteStore:
-    """Unified SQLite storage with schema + transaction helpers."""
+    """
+    用处: DB 操作统一数据访问对象（DAO）层。
+
+    功能:
+        - 透明挂载并完成所需表结构的幂等检查（`init_db`）。
+        - 为各种业务模型（UserToken / Cron / Reminders / Session 等）暴露安全的原子级 CRUD。
+    """
 
     GLOBAL_CHAT_ID = "__global__"
 
@@ -36,6 +57,11 @@ class SQLiteStore:
         self._lock = threading.RLock()
         self._configure_connection()
         self.init_db()
+
+        self.sessions = SessionDAO(self)
+        self.oauth = OAuthDAO(self)
+        self.cron = CronDAO(self)
+        self.reminders = ReminderDAO(self)
 
     def close(self) -> None:
         with self._lock:
@@ -293,303 +319,6 @@ class SQLiteStore:
         copy2(path, backup_path)
         return backup_path
 
-    def list_cron_jobs(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            """
-            SELECT
-                id,
-                name,
-                enabled,
-                schedule_json,
-                payload_json,
-                state_json,
-                created_at_ms,
-                updated_at_ms,
-                delete_after_run
-            FROM cron_jobs
-            ORDER BY created_at_ms ASC, id ASC
-            """
-        ).fetchall()
-        return [
-            {
-                "id": str(row["id"]),
-                "name": str(row["name"]),
-                "enabled": bool(row["enabled"]),
-                "schedule": self._decode(str(row["schedule_json"]), default={}),
-                "payload": self._decode(str(row["payload_json"]), default={}),
-                "state": self._decode(str(row["state_json"]), default={}),
-                "created_at_ms": int(row["created_at_ms"]),
-                "updated_at_ms": int(row["updated_at_ms"]),
-                "delete_after_run": bool(row["delete_after_run"]),
-            }
-            for row in rows
-        ]
-
-    def upsert_cron_job(self, job: dict[str, Any]) -> None:
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO cron_jobs(
-                    id,
-                    name,
-                    enabled,
-                    schedule_json,
-                    payload_json,
-                    state_json,
-                    created_at_ms,
-                    updated_at_ms,
-                    delete_after_run
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id)
-                DO UPDATE SET
-                    name=excluded.name,
-                    enabled=excluded.enabled,
-                    schedule_json=excluded.schedule_json,
-                    payload_json=excluded.payload_json,
-                    state_json=excluded.state_json,
-                    created_at_ms=excluded.created_at_ms,
-                    updated_at_ms=excluded.updated_at_ms,
-                    delete_after_run=excluded.delete_after_run
-                """,
-                (
-                    str(job.get("id") or ""),
-                    str(job.get("name") or ""),
-                    self._bool_to_int(job.get("enabled", True)),
-                    self._encode(job.get("schedule") or {}),
-                    self._encode(job.get("payload") or {}),
-                    self._encode(job.get("state") or {}),
-                    int(job.get("created_at_ms") or 0),
-                    int(job.get("updated_at_ms") or 0),
-                    self._bool_to_int(job.get("delete_after_run", False)),
-                ),
-            )
-
-    def save_cron_jobs(self, jobs: list[dict[str, Any]]) -> None:
-        keep_ids = [str(item.get("id") or "") for item in jobs if str(item.get("id") or "")]
-        with self.transaction() as cur:
-            if keep_ids:
-                placeholders = ", ".join("?" for _ in keep_ids)
-                cur.execute(f"DELETE FROM cron_jobs WHERE id NOT IN ({placeholders})", keep_ids)
-            else:
-                cur.execute("DELETE FROM cron_jobs")
-
-            for job in jobs:
-                cur.execute(
-                    """
-                    INSERT INTO cron_jobs(
-                        id,
-                        name,
-                        enabled,
-                        schedule_json,
-                        payload_json,
-                        state_json,
-                        created_at_ms,
-                        updated_at_ms,
-                        delete_after_run
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id)
-                    DO UPDATE SET
-                        name=excluded.name,
-                        enabled=excluded.enabled,
-                        schedule_json=excluded.schedule_json,
-                        payload_json=excluded.payload_json,
-                        state_json=excluded.state_json,
-                        created_at_ms=excluded.created_at_ms,
-                        updated_at_ms=excluded.updated_at_ms,
-                        delete_after_run=excluded.delete_after_run
-                    """,
-                    (
-                        str(job.get("id") or ""),
-                        str(job.get("name") or ""),
-                        self._bool_to_int(job.get("enabled", True)),
-                        self._encode(job.get("schedule") or {}),
-                        self._encode(job.get("payload") or {}),
-                        self._encode(job.get("state") or {}),
-                        int(job.get("created_at_ms") or 0),
-                        int(job.get("updated_at_ms") or 0),
-                        self._bool_to_int(job.get("delete_after_run", False)),
-                    ),
-                )
-
-    def delete_cron_job(self, job_id: str) -> None:
-        with self.transaction() as cur:
-            cur.execute("DELETE FROM cron_jobs WHERE id=?", (job_id,))
-
-    def list_reminders(
-        self,
-        *,
-        user_id: str | None = None,
-        external_key: str | None = None,
-    ) -> list[dict[str, Any]]:
-        query = (
-            "SELECT id, external_key, user_id, chat_id, channel, text, due_at, status, created_at, "
-            "updated_at, cancelled_at, calendar_event_id FROM reminders"
-        )
-        clauses: list[str] = []
-        params: list[Any] = []
-        if user_id is not None:
-            clauses.append("user_id=?")
-            params.append(user_id)
-        if external_key is not None:
-            clauses.append("external_key=?")
-            params.append(external_key)
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY due_at ASC, id ASC"
-        rows = self._conn.execute(query, tuple(params)).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            item = {
-                "id": str(row["id"]),
-                "user_id": str(row["user_id"]),
-                "chat_id": str(row["chat_id"]),
-                "channel": row["channel"],
-                "text": str(row["text"]),
-                "due_at": str(row["due_at"]),
-                "status": str(row["status"]),
-                "created_at": str(row["created_at"]),
-            }
-            if row["external_key"] is not None:
-                item["external_key"] = str(row["external_key"])
-            if row["updated_at"] is not None:
-                item["updated_at"] = str(row["updated_at"])
-            if row["cancelled_at"] is not None:
-                item["cancelled_at"] = str(row["cancelled_at"])
-            if row["calendar_event_id"] is not None:
-                item["calendar_event_id"] = str(row["calendar_event_id"])
-            result.append(item)
-        return result
-
-    def upsert_reminder(self, reminder: dict[str, Any]) -> None:
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO reminders(
-                    id,
-                    external_key,
-                    user_id,
-                    chat_id,
-                    channel,
-                    text,
-                    due_at,
-                    status,
-                    created_at,
-                    updated_at,
-                    cancelled_at,
-                    calendar_event_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id)
-                DO UPDATE SET
-                    external_key=excluded.external_key,
-                    user_id=excluded.user_id,
-                    chat_id=excluded.chat_id,
-                    channel=excluded.channel,
-                    text=excluded.text,
-                    due_at=excluded.due_at,
-                    status=excluded.status,
-                    created_at=excluded.created_at,
-                    updated_at=excluded.updated_at,
-                    cancelled_at=excluded.cancelled_at,
-                    calendar_event_id=excluded.calendar_event_id
-                """,
-                (
-                    str(reminder.get("id") or ""),
-                    reminder.get("external_key"),
-                    str(reminder.get("user_id") or ""),
-                    str(reminder.get("chat_id") or ""),
-                    reminder.get("channel"),
-                    str(reminder.get("text") or ""),
-                    str(reminder.get("due_at") or ""),
-                    str(reminder.get("status") or "active"),
-                    str(reminder.get("created_at") or datetime.now().isoformat()),
-                    reminder.get("updated_at"),
-                    reminder.get("cancelled_at"),
-                    reminder.get("calendar_event_id"),
-                ),
-            )
-
-    def save_reminders(self, reminders: list[dict[str, Any]]) -> None:
-        keep_ids = [str(item.get("id") or "") for item in reminders if str(item.get("id") or "")]
-        with self.transaction() as cur:
-            if keep_ids:
-                placeholders = ", ".join("?" for _ in keep_ids)
-                cur.execute(f"DELETE FROM reminders WHERE id NOT IN ({placeholders})", keep_ids)
-            else:
-                cur.execute("DELETE FROM reminders")
-
-            for reminder in reminders:
-                cur.execute(
-                    """
-                    INSERT INTO reminders(
-                        id,
-                        external_key,
-                        user_id,
-                        chat_id,
-                        channel,
-                        text,
-                        due_at,
-                        status,
-                        created_at,
-                        updated_at,
-                        cancelled_at,
-                        calendar_event_id
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(id)
-                    DO UPDATE SET
-                        external_key=excluded.external_key,
-                        user_id=excluded.user_id,
-                        chat_id=excluded.chat_id,
-                        channel=excluded.channel,
-                        text=excluded.text,
-                        due_at=excluded.due_at,
-                        status=excluded.status,
-                        created_at=excluded.created_at,
-                        updated_at=excluded.updated_at,
-                        cancelled_at=excluded.cancelled_at,
-                        calendar_event_id=excluded.calendar_event_id
-                    """,
-                    (
-                        str(reminder.get("id") or ""),
-                        reminder.get("external_key"),
-                        str(reminder.get("user_id") or ""),
-                        str(reminder.get("chat_id") or ""),
-                        reminder.get("channel"),
-                        str(reminder.get("text") or ""),
-                        str(reminder.get("due_at") or ""),
-                        str(reminder.get("status") or "active"),
-                        str(reminder.get("created_at") or datetime.now().isoformat()),
-                        reminder.get("updated_at"),
-                        reminder.get("cancelled_at"),
-                        reminder.get("calendar_event_id"),
-                    ),
-                )
-
-    def update_reminder(self, reminder_id: str, *, updates: dict[str, Any]) -> dict[str, Any] | None:
-        current = self.get_reminder(reminder_id)
-        if current is None:
-            return None
-        current.update(updates)
-        self.upsert_reminder(current)
-        return current
-
-    def cancel_reminder(self, reminder_id: str, *, cancelled_at: str) -> dict[str, Any] | None:
-        return self.update_reminder(reminder_id, updates={"status": "cancelled", "cancelled_at": cancelled_at})
-
-    def get_reminder(self, reminder_id: str) -> dict[str, Any] | None:
-        rows = self.list_reminders()
-        for item in rows:
-            if item.get("id") == reminder_id:
-                return item
-        return None
-
-    def get_reminder_by_external_key(self, external_key: str) -> dict[str, Any] | None:
-        rows = self.list_reminders(external_key=external_key)
-        return rows[0] if rows else None
-
     def record_event_audit(
         self,
         event_type: str,
@@ -693,227 +422,18 @@ class SQLiteStore:
             cur.execute("DELETE FROM event_audit WHERE created_at < ?", (before_at,))
             return cur.rowcount
 
+    def get_oauth_state(self, state: str) -> dict[str, Any] | None:
+        """Compatibility wrapper for older callers still reading OAuth state from SQLiteStore."""
+        return self.oauth.get_state(state)
+
+    def cleanup_expired_oauth_states(self, *, now_iso: str) -> int:
+        """Compatibility wrapper for older callers invoking OAuth cleanup from SQLiteStore."""
+        return self.oauth.cleanup_expired_states(now_iso=now_iso)
+
     def cleanup_feishu_message_index_before(self, before_at: str) -> int:
         with self.transaction() as cur:
             cur.execute("DELETE FROM feishu_message_index WHERE created_at < ?", (before_at,))
             return cur.rowcount
-
-    def upsert_session_state(
-        self,
-        session_key: str,
-        *,
-        metadata: dict[str, Any],
-        created_at: str,
-        updated_at: str,
-        last_consolidated: int,
-    ) -> None:
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO session_state(session_key, metadata, created_at, updated_at, last_consolidated)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(session_key)
-                DO UPDATE SET
-                    metadata=excluded.metadata,
-                    created_at=excluded.created_at,
-                    updated_at=excluded.updated_at,
-                    last_consolidated=excluded.last_consolidated
-                """,
-                (
-                    session_key,
-                    self._encode(metadata),
-                    created_at,
-                    updated_at,
-                    int(last_consolidated),
-                ),
-            )
-
-    def get_session_state(self, session_key: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            """
-            SELECT session_key, metadata, created_at, updated_at, last_consolidated
-            FROM session_state
-            WHERE session_key=?
-            """,
-            (session_key,),
-        ).fetchone()
-        data = self._row_to_dict(row)
-        if data is None:
-            return None
-        return {
-            "session_key": str(data.get("session_key") or session_key),
-            "metadata": self._decode(data.get("metadata"), default={}),
-            "created_at": str(data.get("created_at") or ""),
-            "updated_at": str(data.get("updated_at") or ""),
-            "last_consolidated": int(data.get("last_consolidated") or 0),
-        }
-
-    def list_session_state(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            """
-            SELECT session_key, metadata, created_at, updated_at, last_consolidated
-            FROM session_state
-            ORDER BY updated_at DESC
-            """
-        ).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            result.append(
-                {
-                    "session_key": str(row["session_key"]),
-                    "metadata": self._decode(str(row["metadata"]), default={}),
-                    "created_at": str(row["created_at"]),
-                    "updated_at": str(row["updated_at"]),
-                    "last_consolidated": int(row["last_consolidated"]),
-                }
-            )
-        return result
-
-    def delete_session_state(self, session_key: str) -> None:
-        with self.transaction() as cur:
-            cur.execute("DELETE FROM session_state WHERE session_key=?", (session_key,))
-
-    def upsert_oauth_state(
-        self,
-        state: str,
-        *,
-        provider: str,
-        actor_open_id: str | None,
-        chat_id: str | None,
-        thread_id: str | None,
-        redirect_uri: str,
-        scopes: list[str],
-        created_at: str,
-        expires_at: str,
-        status: str = "pending",
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                INSERT INTO oauth_states(
-                    state, provider, actor_open_id, chat_id, thread_id,
-                    created_at, expires_at, redirect_uri, scopes, status,
-                    consumed_at, last_error, payload
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
-                ON CONFLICT(state)
-                DO UPDATE SET
-                    provider=excluded.provider,
-                    actor_open_id=excluded.actor_open_id,
-                    chat_id=excluded.chat_id,
-                    thread_id=excluded.thread_id,
-                    created_at=excluded.created_at,
-                    expires_at=excluded.expires_at,
-                    redirect_uri=excluded.redirect_uri,
-                    scopes=excluded.scopes,
-                    status=excluded.status,
-                    consumed_at=NULL,
-                    last_error=NULL,
-                    payload=excluded.payload
-                """,
-                (
-                    state,
-                    provider,
-                    actor_open_id,
-                    chat_id,
-                    thread_id,
-                    created_at,
-                    expires_at,
-                    redirect_uri,
-                    self._encode(scopes),
-                    status,
-                    self._encode(payload or {}),
-                ),
-            )
-
-    def get_oauth_state(self, state: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            """
-            SELECT
-                state, provider, actor_open_id, chat_id, thread_id,
-                created_at, expires_at, redirect_uri, scopes,
-                status, consumed_at, last_error, payload
-            FROM oauth_states
-            WHERE state=?
-            """,
-            (state,),
-        ).fetchone()
-        data = self._row_to_dict(row)
-        if data is None:
-            return None
-        data["scopes"] = self._decode(data.get("scopes"), default=[])
-        data["payload"] = self._decode(data.get("payload"), default={})
-        return data
-
-    def claim_oauth_state(self, state: str, *, now_iso: str) -> dict[str, Any] | None:
-        with self.transaction() as cur:
-            row = cur.execute(
-                """
-                SELECT
-                    state, provider, actor_open_id, chat_id, thread_id,
-                    created_at, expires_at, redirect_uri, scopes,
-                    status, consumed_at, last_error, payload
-                FROM oauth_states
-                WHERE state=?
-                """,
-                (state,),
-            ).fetchone()
-            if row is None:
-                return None
-
-            data = self._row_to_dict(row)
-            if data is None:
-                return None
-
-            status = str(data.get("status") or "pending")
-            expires_at = str(data.get("expires_at") or "")
-            if status != "pending":
-                return None
-            if expires_at and expires_at <= now_iso:
-                cur.execute(
-                    "UPDATE oauth_states SET status='expired', last_error='state expired' WHERE state=?",
-                    (state,),
-                )
-                return None
-
-            cur.execute(
-                "UPDATE oauth_states SET status='processing', last_error=NULL WHERE state=? AND status='pending'",
-                (state,),
-            )
-            if cur.rowcount != 1:
-                return None
-
-            data["scopes"] = self._decode(data.get("scopes"), default=[])
-            data["payload"] = self._decode(data.get("payload"), default={})
-            return data
-
-    def finalize_oauth_state(self, state: str, *, status: str, last_error: str | None = None) -> None:
-        consumed_at = datetime.now().isoformat() if status == "consumed" else None
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                UPDATE oauth_states
-                SET status=?, consumed_at=?, last_error=?
-                WHERE state=?
-                """,
-                (status, consumed_at, last_error, state),
-            )
-
-    def cleanup_expired_oauth_states(self, *, now_iso: str) -> int:
-        with self.transaction() as cur:
-            cur.execute(
-                """
-                UPDATE oauth_states
-                SET status='expired', last_error=COALESCE(last_error, 'state expired')
-                WHERE status IN ('pending', 'processing')
-                    AND expires_at IS NOT NULL
-                    AND expires_at <= ?
-                """,
-                (now_iso,),
-            )
-            return cur.rowcount
-
     def upsert_feishu_user_token(
         self,
         open_id: str,

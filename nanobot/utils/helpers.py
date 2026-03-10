@@ -1,4 +1,8 @@
-"""Utility functions for nanobot."""
+"""
+描述: 无副作用或高度复用的工具箱。
+主要功能:
+    - 提供路径安全拼接解析、遗留系统目录迁移与应用级配置目录（`~/.nanobot`）自检建立的基础组件。
+"""
 
 import re
 import shutil

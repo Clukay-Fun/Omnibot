@@ -1,4 +1,8 @@
-"""MCP client: connects to MCP servers and wraps their tools as native nanobot tools."""
+"""
+描述: Model Context Protocol (MCP) 客户端集成支持。
+主要功能:
+    - 连接到外部 MCP 服务将其远程能力注册和映射为本地的原生 Agent Tools。
+"""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -11,8 +15,15 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 
 
+#region MCP 代理包装器
+
 class MCPToolWrapper(Tool):
-    """Wraps a single MCP server tool as a nanobot Tool."""
+    """
+    用处: 远程工具在本地体系中的“肉身”代理。
+
+    功能:
+        - 继承基础功能，将原生的 `execute` 动作通过 MCP Session 透传至远端服务。
+    """
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
         self._session = session
@@ -71,10 +82,20 @@ class MCPToolWrapper(Tool):
         return "\n".join(parts) or "(no output)"
 
 
+#endregion
+
+#region MCP 连接调度生命周期
+
 async def connect_mcp_servers(
     mcp_servers: dict, registry: ToolRegistry, stack: AsyncExitStack
 ) -> None:
-    """Connect to configured MCP servers and register their tools."""
+    """
+    用处: 集中构建 MCP 的网络通讯。
+
+    功能:
+        - 从配置文件中取出 `stdio/sse/streamableHttp` 不同形式的服务声明并开启监听/调用长链接。
+        - 从目标 MCP Server 抽取暴露的 Schema 对象列表注入全局 ToolRegistry 中。
+    """
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.sse import sse_client
     from mcp.client.stdio import stdio_client
@@ -146,3 +167,5 @@ async def connect_mcp_servers(
             logger.info("MCP server '{}': connected, {} tools registered", name, len(tools.tools))
         except Exception as e:
             logger.error("MCP server '{}': failed to connect: {}", name, e)
+
+#endregion

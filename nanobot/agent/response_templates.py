@@ -1,4 +1,9 @@
-"""Deterministic response templates for structured Feishu data replies."""
+"""
+描述: 面向飞书结构化数据的确定性兜底与模板渲染器。
+主要功能:
+    - 基于正则和命中工具（Tool Payload）分析用户查询意图。
+    - 在必要时直接绕过大模型生成标准飞书卡片（如案件卡/合同卡）。
+"""
 
 from __future__ import annotations
 
@@ -56,7 +61,12 @@ def uses_structured_feishu_data(payloads: list[ToolPayload]) -> bool:
 
 
 class TemplateRouter:
-    """Rule-based intent router for deterministic template rendering."""
+    """
+    用处: 意图判定路由器。
+
+    功能:
+        - 根据用户的 User Text 及其调用的工具参数，推断当前场景究竟是在查案件、搜合同还是跨表总览。
+    """
 
     def __init__(self, runtime_text: RuntimeTextCatalog | None = None):
         self._runtime_text = runtime_text or RuntimeTextCatalog.load(None)
@@ -138,7 +148,12 @@ class TemplateRouter:
 
 
 class TemplateRenderer:
-    """Render fixed-format response cards by template id."""
+    """
+    用处: 卡片模板组装中心。
+
+    功能:
+        - 按照确定的 Template ID 与填充变量，渲染生成多维表格记录卡片文本格式。
+    """
 
     def __init__(self, max_items: int = 5, runtime_text: RuntimeTextCatalog | None = None):
         self.max_items = max(1, max_items)

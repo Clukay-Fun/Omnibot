@@ -241,21 +241,10 @@ def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
 
 
-def test_config_supports_skillspec_render_timeout_defaults_and_overrides() -> None:
+def test_config_no_longer_exposes_skillspec_render_timeout_fields() -> None:
     config = Config()
-    assert config.agents.defaults.skillspec_render_primary_timeout_seconds == 12.0
-    assert config.agents.defaults.skillspec_render_retry_timeout_seconds == 6.0
-
-    overridden = Config.model_validate({
-        "agents": {
-            "defaults": {
-                "skillspecRenderPrimaryTimeoutSeconds": 8,
-                "skillspecRenderRetryTimeoutSeconds": 3,
-            }
-        }
-    })
-    assert overridden.agents.defaults.skillspec_render_primary_timeout_seconds == 8
-    assert overridden.agents.defaults.skillspec_render_retry_timeout_seconds == 3
+    assert not hasattr(config.agents.defaults, "skillspec_render_primary_timeout_seconds")
+    assert not hasattr(config.agents.defaults, "skillspec_render_retry_timeout_seconds")
 
 
 def test_runtime_text_catalog_ignores_workspace_prompt_overrides(tmp_path: Path) -> None:

@@ -5,12 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanobot.agent.skill_runtime.document_extractor import (
+from nanobot.agent.documents.document_extractor import (
     ExtractionQualityError,
     extract_fields,
     load_extract_templates,
 )
-from nanobot.agent.skill_runtime.document_pipeline import process_document
+from nanobot.agent.documents.document_pipeline import process_document
 
 
 def test_load_templates_with_workspace_override(tmp_path: Path) -> None:
@@ -137,8 +137,8 @@ async def test_process_document_reports_low_quality_error(monkeypatch, tmp_path:
         workspace_path=tmp_path,
         tools=SimpleNamespace(mineru=SimpleNamespace(enabled=True)),
     )
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_config", lambda: cfg)
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.MinerUClient", _MinerU)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.load_config", lambda: cfg)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.MinerUClient", _MinerU)
 
     payload = await process_document([str(document)], skill_id="doc_recognize", user_context=None)
 
@@ -172,10 +172,10 @@ async def test_process_document_template_missing_has_structured_result(monkeypat
         workspace_path=tmp_path,
         tools=SimpleNamespace(mineru=SimpleNamespace(enabled=True)),
     )
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_config", lambda: cfg)
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.MinerUClient", _MinerU)
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.DocumentClassifier", _Classifier)
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_extract_templates", lambda _: {})
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.load_config", lambda: cfg)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.MinerUClient", _MinerU)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.DocumentClassifier", _Classifier)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.load_extract_templates", lambda _: {})
 
     payload = await process_document([str(document)], skill_id="doc_recognize", user_context=None)
 
@@ -197,7 +197,7 @@ async def test_process_document_reports_missing_file_and_unsupported_format(monk
         workspace_path=tmp_path,
         tools=SimpleNamespace(mineru=SimpleNamespace(enabled=False)),
     )
-    monkeypatch.setattr("nanobot.agent.skill_runtime.document_pipeline.load_config", lambda: cfg)
+    monkeypatch.setattr("nanobot.agent.documents.document_pipeline.load_config", lambda: cfg)
 
     payload = await process_document([str(unsupported), str(missing_pdf)], skill_id="doc_recognize", user_context=None)
 

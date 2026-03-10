@@ -1,15 +1,23 @@
-"""Base class for agent tools."""
+"""
+描述: 智能体底层工具的抽象基类。
+主要功能:
+    - 定义所有工具必须实现的属性（名称、描述、参数 Schema）与执行方法。
+    - 提供内建的 JSON Schema 参数解析、类型安全转换与合法性校验。
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any
 
 
+#region 工具基类与抽象接口
+
 class Tool(ABC):
     """
-    Abstract base class for agent tools.
+    用处: 所有 Agent 执行工具的抽象基类。
 
-    Tools are capabilities that the agent can use to interact with
-    the environment, such as reading files, executing commands, etc.
+    功能:
+        - 规范化工具的输入与输出格式。
+        - 强制子类实现 `name`, `description`, `parameters` 和 `execute` 方法。
     """
 
     _TYPE_MAP = {
@@ -24,36 +32,53 @@ class Tool(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """Tool name used in function calls."""
+        """
+        用处: 获取工具的唯一标识名称。
+
+        功能:
+            - 作为向 LLM Function Calling 暴露的 `name` 字段。
+        """
         pass
 
     @property
     @abstractmethod
     def description(self) -> str:
-        """Description of what the tool does."""
+        """
+        用处: 获取工具的详细能力描述。
+
+        功能:
+            - 作为向 LLM 提供的方法摘要，指导其理解何时该调用此工具。
+        """
         pass
 
     @property
     @abstractmethod
     def parameters(self) -> dict[str, Any]:
-        """JSON Schema for tool parameters."""
+        """
+        用处: 获取工具的入参结构定义。
+
+        功能:
+            - 返回严格遵循 JSON Schema 规范的字典对象。
+        """
         pass
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> str:
         """
-        Execute the tool with given parameters.
+        用处: 异步执行工具的核心业务逻辑。
 
-        Args:
-            **kwargs: Tool-specific parameters.
-
-        Returns:
-            String result of the tool execution.
+        功能:
+            - 接收经过校验的 kwargs 关键字参数并返回值，必须始终返回 string 类型的文本结果供大模型阅读。
         """
         pass
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Apply safe schema-driven casts before validation."""
+        """
+        用处: 根据 Schema 声明，在校验前进行安全的类型强制转换。
+
+        功能:
+            - 应对 LLM 有时传入的 JSON 类型不精确问题（如需要 int 传了 string），保证向下传递的数据符合强类型要求。
+        """
         schema = self.parameters or {}
         if schema.get("type", "object") != "object":
             return params
@@ -170,7 +195,12 @@ class Tool(ABC):
         return errors
 
     def to_schema(self) -> dict[str, Any]:
-        """Convert tool to OpenAI function schema format."""
+        """
+        用处: 生成标准的工具声明 Schema。
+
+        功能:
+            - 将 name、description、parameters 组装为兼容 OpenAI Function Calling 格式的描述结构。
+        """
         return {
             "type": "function",
             "function": {
@@ -179,3 +209,5 @@ class Tool(ABC):
                 "parameters": self.parameters,
             },
         }
+
+#endregion

@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from nanobot.agent.skill_runtime.mineru_client import (
+from nanobot.agent.documents.mineru_client import (
     MinerUClient,
     MinerUClientError,
     MinerUTimeoutError,

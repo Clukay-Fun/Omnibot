@@ -1,4 +1,9 @@
-"""Helpers for structured pending-write confirmation flows."""
+"""
+描述: 半自动风险写入与用户拦截确认工具集。
+主要功能:
+    - 负责分析是否收到了来自前端的“通过/驳回/取消”等确认口语，或者按钮 Action 回调提取关键授权令牌（Token）。
+    - 生成需要审批回执的飞书卡片提示预览消息。
+"""
 
 from __future__ import annotations
 
@@ -60,6 +65,12 @@ def _extract_token_from_card_action(content: str) -> str | None:
 
 
 def extract_pending_write_command(msg: InboundMessage) -> tuple[str | None, str | None, str]:
+    """
+    用处: 分析新一轮的信息是否是一次写操作审批命令。
+
+    功能:
+        - 用正则比对纯文本信息（如“确认”）以及结构化 Card Action 的 Callback 对象中获取授权状态标头。
+    """
     content = msg.content.strip()
     exact_confirm = _EXACT_CONFIRM_RE.match(content)
     if exact_confirm:

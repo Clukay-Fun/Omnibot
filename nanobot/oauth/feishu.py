@@ -1,4 +1,9 @@
-"""Feishu OAuth business services and token lifecycle manager."""
+"""
+描述: 飞书身份的交互与令牌（Token）生命周期维护服务。
+主要功能:
+    - 处理授权跳转 URL 创建、回调处理与换表。
+    - 在后端提供线程安全的 User Access Token 访问服务，带过期检查并自动热刷新。
+"""
 
 from __future__ import annotations
 
@@ -139,7 +144,13 @@ class FeishuOAuthClient:
 
 
 class FeishuOAuthService:
-    """Coordinates state lifecycle, callback handling, and token persistence."""
+    """
+    用处: 统合凭证生命周期与事件审计的网关门面。
+
+    功能:
+        - 构造用于发放给用户的飞书授权登陆直达链接，并在数据库里登记生成的防跨站随机字串（State）。
+        - 在 Oauth 会话结束拿回来 Code 后交由底层 SDK 完成校验并登记 User Token 的初始落地，抛射审计。
+    """
 
     def __init__(
         self,
@@ -172,7 +183,7 @@ class FeishuOAuthService:
         now = datetime.now()
         state = secrets.token_urlsafe(32)
         merged_scopes = [scope.strip() for scope in (scopes or self.scopes) if scope.strip()]
-        self.store.upsert_oauth_state(
+        self.store.oauth.upsert_state(
             state,
             provider="feishu",
             actor_open_id=actor_open_id,
@@ -211,7 +222,7 @@ class FeishuOAuthService:
             return OAuthCallbackResult(False, 400, "Missing state parameter.")
 
         if oauth_error:
-            self.store.finalize_oauth_state(state, status="failed", last_error=oauth_error_description or oauth_error)
+            self.store.oauth.finalize_state(state, status="failed", last_error=oauth_error_description or oauth_error)
             self.store.record_event_audit(
                 "oauth_callback_failed",
                 payload={
@@ -223,12 +234,12 @@ class FeishuOAuthService:
             )
             return OAuthCallbackResult(False, 400, oauth_error_description or oauth_error)
 
-        claimed = self.store.claim_oauth_state(state, now_iso=self._now_iso())
+        claimed = self.store.oauth.claim_state(state, now_iso=self._now_iso())
         if claimed is None:
             return OAuthCallbackResult(False, 400, "Invalid, expired, or already used state.")
 
         if not code:
-            self.store.finalize_oauth_state(state, status="failed", last_error="missing authorization code")
+            self.store.oauth.finalize_state(state, status="failed", last_error="missing authorization code")
             return OAuthCallbackResult(False, 400, "Missing code parameter.")
 
         try:
@@ -268,7 +279,7 @@ class FeishuOAuthService:
                 last_error=None,
                 payload=token_payload,
             )
-            self.store.finalize_oauth_state(state, status="consumed", last_error=None)
+            self.store.oauth.finalize_state(state, status="consumed", last_error=None)
             self.store.record_event_audit(
                 "oauth_callback_succeeded",
                 chat_id=str(claimed.get("chat_id") or "") or None,
@@ -288,7 +299,7 @@ class FeishuOAuthService:
             )
         except Exception as exc:
             error_text = str(exc)
-            self.store.finalize_oauth_state(state, status="failed", last_error=error_text)
+            self.store.oauth.finalize_state(state, status="failed", last_error=error_text)
             self.store.record_event_audit(
                 "oauth_callback_failed",
                 chat_id=str(claimed.get("chat_id") or "") or None,
@@ -310,7 +321,13 @@ class FeishuOAuthService:
 
 
 class FeishuUserTokenManager:
-    """Returns valid user access token with automatic refresh and persistence."""
+    """
+    用处: 用户 User Access Token （UAT）存取自动刷新代理器。
+
+    功能:
+        - 将数据库中的令牌提取，在检测到将要超时的情况下去走 Refresh 链路热更，确保交由下文 SDK 时的可用性。
+        - 带重入锁隔离防护，避免刷新导致多并发。
+    """
 
     def __init__(
         self,

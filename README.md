@@ -12,9 +12,6 @@
   - 完美支持飞书话题（Thread）和话题群模式，自动维持话题内的独立上下文流。
   - 支持飞书富文本帖子、图片、合并转发卡片的解析与理解。
   - 细粒度的群聊唤醒门控（全开、仅@、关闭），并支持特定管理员指令强行穿透。
-- **SkillSpec 大模型前置路由系统**：
-  - 摒弃了僵化的关键字匹配，重构为基于大语言模型原生 Tool Calling 的意图识别路由机制。
-  - 将业务拆解为简单的声明式 YAML (`skillspec`)，即可低代码扩展专属于你的飞书业务数据查询与提醒技能。
 - **无感知的飞书新用户引导**：首次会话发送一次富文本上手提示，不阻塞正常对话；可随时 `/setup` 重看。
 - **Workspace 可覆盖运行文案**：在 `workspace/runtime_texts.yaml` 中覆盖 onboarding / routing / 卡片文案；未覆盖部分自动回退到代码默认值。
 
@@ -95,10 +92,6 @@ tools:
       task_enabled: true
       bitable_admin_enabled: true
       message_history_enabled: true
-
-agents:
-  skillspec:
-    query_rewrite_enabled: false  # 查询结果默认不做二次简化改写
 ```
 
 如果你以前在仓库根目录放过本地 `./config.json`，请迁移到 `~/.nanobot/config.json`；根目录现在只保留示例文件 `config.example.json`。
@@ -128,17 +121,6 @@ export NANOBOT_INTEGRATIONS__FEISHU__STORAGE__STATE_DB_PATH="/var/lib/nanobot/fe
   - `/session new [标题]`：从当前消息强制创建一个独立处理的飞书话题（Thread）。
   - `/session list`：列出当前聊天下的所有活跃会话（主会话 + 独立话题）。
   - `/session del [id|main]`：删除当前或指定会话。
-
-## 🧩 声明式业务技能 (SkillSpec)
-
-Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将多维表格等业务查询组装为 AI 工具。
-
-- **多层级配置加载**：
-  1. `workspace/skillspec/*.yaml` (最高优先级，用户本地自定义)
-  2. `workspace/skillspec/managed/*.yaml` (次级，集中管理分发)
-  3. `nanobot/skills/skillspec/*.yaml` (内置保底默认规格)
-- **防脱敏抽象层设计**：通过 `table_registry.yaml` 配置真实 `table_id` 和复杂的原始表头别名映射，避免将生产环境真实的表格 ID 和底层中文字段名直接暴露给大模型造成混淆和泄露风险。
-- **混合智能路由**：引入了确定性规则优先（`explicit > regex > keyword`）与大模型自动编排相结合的调度逻辑，并可选开启 Embedding 向量化检索作为超大规模技能池场景下的路由兜底。
 
 ## 📅 协同与提醒系统 (Reminder MVP)
 

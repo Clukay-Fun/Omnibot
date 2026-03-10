@@ -1,4 +1,9 @@
-"""Configuration loading utilities."""
+"""
+描述: 全局配置化与本地实例挂载加载器。
+主要功能:
+    - 统筹处理默认情况下的 ~/.nanobot/config.json 读写。
+    - 在应用运行时提供依赖注入前缀路径环境，兼容并自动迁移早期版本陈旧的整合数据结构。
+"""
 
 import json
 from pathlib import Path
@@ -31,7 +36,10 @@ def get_data_dir() -> Path:
 
 def load_config(config_path: Path | None = None) -> Config:
     """
-    Load configuration from file or create default.
+    用处: 运行时装在读取/创建实例配置。
+
+    功能:
+        - 将配置文件转反序列化为 Pydantic 实体 Config 结构，遇到残破记录会利用自带的数据迁移规则 `_migrate_config` 修复。
 
     Args:
         config_path: Optional path to config file. Uses default if not provided.
@@ -57,7 +65,10 @@ def load_config(config_path: Path | None = None) -> Config:
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
     """
-    Save configuration to file.
+    用处: 动态持久化覆写配置。
+
+    功能:
+        - 序列化数据（带严格的 ensure_ascii=False 中文保障）写回 Config 实例所在路径。
 
     Args:
         config: Configuration to save.
@@ -93,7 +104,12 @@ def _prefer_new_value(target: dict[str, Any], key: str, incoming: Any, warnings:
 
 
 def _migrate_config(data: dict) -> dict:
-    """Migrate old config formats to current."""
+    """
+    用处: 配置跨版本升级的平滑过渡处理器。
+
+    功能:
+        - 把之前混合在 tools 或 channels 中的各种陈旧 Feishu/Bitable 取值汇聚到现在的 Integrations 全局共享树上。
+    """
     # Move tools.exec.restrictToWorkspace → tools.restrictToWorkspace
     tools = data.get("tools", {})
     exec_cfg = tools.get("exec", {})

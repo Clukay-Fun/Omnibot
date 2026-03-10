@@ -1,4 +1,9 @@
-"""Asynchronous event audit sink backed by SQLite."""
+"""
+描述: 异步高并发事件审计日志收集器。
+主要功能:
+    - 结合底层的 SQLite 提供非阻塞的批量刷盘日志记录能力。
+    - 自带定期清理老旧无用系统数据的作用。
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,13 @@ _SENTINEL = object()
 
 
 class AuditSink:
-    """Queue-based audit writer that flushes events in batches."""
+    """
+    用处: 平滑峰值入库请求的旁路队列写手。
+
+    功能:
+        - 内存驻留一个 asyncio.Queue 收集零散日志。
+        - 汇聚成批后定期压入 SQLite 减轻锁竞争，内置清理守护协程。
+    """
 
     DEFAULT_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
     DEFAULT_EVENT_AUDIT_RETENTION_DAYS = 365
@@ -149,8 +160,14 @@ class AuditSink:
     def _run_cleanup(self, *, now: datetime | None = None) -> dict[str, int]:
         now_at = now or datetime.now()
         now_iso = now_at.isoformat()
+        oauth_cleanup = getattr(self._store, "cleanup_expired_oauth_states", None)
+        oauth_count = 0
+        if callable(oauth_cleanup):
+            oauth_count = int(oauth_cleanup(now_iso=now_iso))
+        else:
+            oauth_count = int(self._store.oauth.cleanup_expired_states(now_iso=now_iso))
         result = {
-            "oauth_states": self._store.cleanup_expired_oauth_states(now_iso=now_iso),
+            "oauth_states": oauth_count,
             "event_audit": 0,
             "feishu_message_index": 0,
         }

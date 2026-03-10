@@ -23,3 +23,32 @@ botpy.log
 /config.json
 tests/
 .ruff_cache/
+ops/env/feishu-local.env
+
+# =========================
+# Local Config & State & DB
+# =========================
+config.local.*
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3.bak
+*.db
+*.bak
+workspace/
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# IDEs & OS Files
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

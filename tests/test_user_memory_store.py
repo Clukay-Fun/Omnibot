@@ -3,7 +3,8 @@
     - 验证用户记忆存储路径和更新逻辑。
 """
 
-from nanobot.agent.skill_runtime.user_memory import UserMemoryStore
+from nanobot.agent.skill_runtime.user_memory import UserMemoryStore as LegacyUserMemoryStore
+from nanobot.agent.user_state.user_memory import UserMemoryStore
 
 
 #region 用户记忆测试
@@ -38,6 +39,15 @@ def test_user_memory_update_merges_payload(tmp_path) -> None:
     updated = store.update("telegram", "42", {"lang": "zh", "team": "ops"})
 
     assert updated == {"city": "Shenzhen", "lang": "zh", "team": "ops"}
+
+
+def test_legacy_user_memory_import_reexports_canonical_store() -> None:
+    """用处，参数
+
+    功能:
+        - 校验旧路径仍兼容并指向新的规范导出。
+    """
+    assert LegacyUserMemoryStore is UserMemoryStore
 
 
 #endregion

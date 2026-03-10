@@ -20,7 +20,6 @@ Assets that must survive packaging stay under the `nanobot` package so Hatch inc
 - `nanobot/skills/builtin/`: built-in agent skills shipped with the package.
 - `nanobot/skills/extract/`: built-in document extraction templates.
 - `nanobot/skills/registry/table_registry.yaml`: built-in table alias registry defaults.
-- `nanobot/skills/skillspec/`: built-in SkillSpec definitions.
 
 Rule of thumb: if runtime code loads it with `importlib.resources`, it belongs under `nanobot/` rather than the repository root.
 
@@ -29,11 +28,11 @@ Rule of thumb: if runtime code loads it with `importlib.resources`, it belongs u
 The runtime workspace keeps its user-facing paths stable even though the packaged source assets are grouped by domain.
 
 - Root persona files remain at workspace root: `AGENTS.md`, `BOOTSTRAP.md`, `HEARTBEAT.md`, `IDENTITY.md`, `MEMORY.md`, `SOUL.md`, `TOOLS.md`, `USER.md`, and `runtime_texts.yaml`.
-- Runtime data stays under dedicated folders such as `memory/`, `skills/`, `skillspec/`, `extract/`, and `feishu/`.
+- Runtime data stays under dedicated folders such as `memory/`, `skills/`, `extract/`, and `feishu/`.
 - Workspace overrides continue to win over packaged defaults:
   - `skills/table_registry.yaml` overrides the built-in registry.
   - `extract/*.yaml` overrides built-in extraction templates.
-  - `skillspec/*.yaml` and `skillspec/managed/*.yaml` override built-in SkillSpec assets by precedence.
+  - `skillspec/` may still exist in older workspaces as a compatibility path for legacy extract overrides.
 
 Compatibility rule: repository/package reorganization must not require users to move existing workspace files unless a migration is explicitly documented.
 

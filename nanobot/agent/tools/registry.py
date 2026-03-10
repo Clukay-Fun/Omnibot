@@ -1,6 +1,8 @@
-"""描述:
+"""
+描述: 工具注册表与执行调度中心。
 主要功能:
-    - 维护工具注册、查询与执行入口。
+    - 维护全局代理工具（Tool）的注册、查询与执行入口。
+    - 提供基于飞书渠道、意图分析和资源白名单的细粒度工具权限控制。
 """
 
 from dataclasses import dataclass, field
@@ -67,6 +69,7 @@ _REMINDER_TOOL_NAMES = {"cron"}
 _FEISHU_RESEARCH_TOOL_NAMES = (
     _BITABLE_QUERY_TOOL_NAMES | {"bitable_directory_search"} | _DOC_TOOL_NAMES | _MESSAGE_HISTORY_TOOL_NAMES | _CALENDAR_QUERY_TOOL_NAMES | _TASK_QUERY_TOOL_NAMES
 )
+_FEISHU_ALWAYS_ON_READ_TOOL_NAMES = set(_FEISHU_RESEARCH_TOOL_NAMES)
 
 
 def _contains_any(text: str, tokens: tuple[str, ...]) -> bool:
@@ -89,17 +92,20 @@ def _normalized_string_set(value: Any) -> set[str]:
 #region 工具注册表
 
 class ToolRegistry:
-    """用处，参数
+    """
+    用处: 全局工具注册与执行调度器。
 
     功能:
-        - 管理工具生命周期并统一执行校验。
+        - 集中管理所有派生自 `Tool` 基类的工具生命周期。
+        - 在执行前后进行细粒度的权限校验。
     """
 
     def __init__(self):
-        """用处，参数
+        """
+        用处: 构造函数。
 
         功能:
-            - 初始化空的工具映射表。
+            - 初始化一个空的字典结构，作为底层名称到实例的映射表。
         """
         self._tools: dict[str, Tool] = {}
 
@@ -122,51 +128,47 @@ class ToolRegistry:
         )
 
     def register(self, tool: Tool) -> None:
-        """用处，参数
+        """
+        用处: 动态注册一个新工具。参数 tool: 符合 Tool 接口的工具实例。
 
         功能:
-            - 按工具名称注册工具实例。
+            - 按工具的 `name` 属性作为键，将其缓存进内部注册表。
         """
         self._tools[tool.name] = tool
 
     def unregister(self, name: str) -> None:
-        """用处，参数
+        """
+        用处: 卸载或移除已注册的工具。参数 name: 工具唯一标识名。
 
         功能:
-            - 按名称移除已注册工具。
+            - 安全地从内部字典中抹除对应工具的执行入口配置。
         """
         self._tools.pop(name, None)
 
     def get(self, name: str) -> Tool | None:
-        """用处，参数
+        """
+        用处: 依据名称提取底层工具对象本身。
 
         功能:
-            - 返回指定名称的工具实例。
+            - 如果没有该名字对应的工具对象则安全返回 None。
         """
         return self._tools.get(name)
 
     def has(self, name: str) -> bool:
-        """用处，参数
+        """
+        用处: 判别工具名是否存在于当前的全局调度表中。
 
         功能:
-            - 判断工具名称是否存在。
+            - 返回布尔值，常用于预载或兜底校验。
         """
         return name in self._tools
 
     @staticmethod
     def _select_feishu_tools(exposure: ToolExposureContext, tool_names: set[str]) -> set[str]:
         text = exposure.user_text.strip().lower()
-        if not text:
-            return set()
         mode = exposure.mode or "main_chat_readonly"
 
-        directory_intent = _contains_any(text, ("通讯录", "联系人", "同事", "open_id", "邮箱", "手机号", "电话"))
         write_intent = _contains_any(text, ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除"))
-        bitable_intent = write_intent or _has_bitable_intent(text, include_write_terms=True)
-        calendar_intent = _contains_any(text, ("日历", "日程", "会议", "空闲", "忙闲", "calendar"))
-        task_intent = _contains_any(text, ("任务", "待办", "todo", "subtask", "评论", "备注任务"))
-        doc_intent = _contains_any(text, ("飞书文档", "云文档", "文档", "doc", "docs"))
-        message_history_intent = _contains_any(text, ("消息历史", "聊天记录", "历史消息", "上一条消息", "引用消息", "message history"))
         dev_intent = _contains_any(
             text,
             (
@@ -191,10 +193,11 @@ class ToolRegistry:
         reminder_intent = _contains_any(text, ("提醒", "cron", "定时"))
 
         exposed: set[str] = set()
-        if mode == "main_chat_readonly":
-            if dev_intent:
+        if mode in {"main_chat_readonly", "main_feishu_query"}:
+            exposed |= _FEISHU_ALWAYS_ON_READ_TOOL_NAMES
+            if mode == "main_chat_readonly" and dev_intent:
                 exposed |= _DEV_TOOL_NAMES | _WEB_TOOL_NAMES
-            if web_intent:
+            if mode == "main_chat_readonly" and web_intent:
                 exposed |= _WEB_TOOL_NAMES
             if reminder_intent:
                 exposed |= _REMINDER_TOOL_NAMES
@@ -202,23 +205,13 @@ class ToolRegistry:
 
         if exposure.pending_write or mode == "main_write_commit":
             exposed |= _BITABLE_READ_TOOL_NAMES | _BITABLE_WRITE_TOOL_NAMES
-        if directory_intent:
-            exposed.add("bitable_directory_search")
-        if bitable_intent:
-            exposed |= _BITABLE_QUERY_TOOL_NAMES if mode == "main_feishu_query" else _BITABLE_READ_TOOL_NAMES
+        if mode == "main_write_prepare":
+            exposed |= _FEISHU_ALWAYS_ON_READ_TOOL_NAMES | {"bitable_prepare_create"}
         if mode == "main_write_prepare" and write_intent:
             exposed |= _BITABLE_WRITE_TOOL_NAMES | {"bitable_directory_search"}
-        if calendar_intent:
-            exposed |= _CALENDAR_QUERY_TOOL_NAMES if mode == "main_feishu_query" else _CALENDAR_TOOL_NAMES
-        if task_intent:
-            exposed |= _TASK_QUERY_TOOL_NAMES if mode == "main_feishu_query" else _TASK_TOOL_NAMES
-        if doc_intent:
-            exposed |= _DOC_TOOL_NAMES
-        if message_history_intent:
-            exposed |= _MESSAGE_HISTORY_TOOL_NAMES
-        if dev_intent and mode != "main_feishu_query":
+        if dev_intent:
             exposed |= _DEV_TOOL_NAMES | _WEB_TOOL_NAMES
-        if web_intent and mode != "main_feishu_query":
+        if web_intent:
             exposed |= _WEB_TOOL_NAMES
         if admin_intent and mode == "main_write_prepare":
             exposed |= _BITABLE_ADMIN_TOOL_NAMES | _BITABLE_READ_TOOL_NAMES
@@ -267,8 +260,6 @@ class ToolRegistry:
     def _allowed_tool_names(cls, exposure: ToolExposureContext | None, tool_names: set[str]) -> set[str]:
         if exposure is None:
             return set(tool_names)
-        if exposure.mode == "workflow_plan":
-            return set()
         if exposure.mode.startswith("subagent_") or exposure.mode in {"feishu_research", "code_research", "write_apply"}:
             return cls._select_subagent_tools(exposure, tool_names)
         if exposure.channel != "feishu":
@@ -304,20 +295,20 @@ class ToolRegistry:
         return True
 
     def get_definitions(self, exposure: ToolExposureContext | None = None) -> list[dict[str, Any]]:
-        """用处，参数
+        """
+        用处: 获取被暴露或被授权的可调用工具的完整 Schema。参数 exposure: 工具暴露侧权限控制上下文。
 
         功能:
-            - 生成所有已注册工具的 schema 定义列表。
+            - 遍历所有注册工具对象，根据上下文过滤并汇聚它们的 OpenAI Definition 结构列表。
         """
-        if exposure is not None and exposure.mode == "workflow_plan":
-            return []
         return [tool.to_schema() for tool in self._tools.values()]
 
     async def execute(self, name: str, params: dict[str, Any], exposure: ToolExposureContext | None = None) -> str:
-        """用处，参数
+        """
+        用处: 工具执行器（统一入口）。参数 name: 工具的名字，params: JSON解析出的纯净参数字典，exposure: 用来校验此用户有没有调用此工具权限的请求上下文信息。
 
         功能:
-            - 校验参数并执行目标工具，返回文本结果。
+            - 实施参数校验并拦截无权工具执行；如果通过所有前置依赖审核，触发原子的工具执行，获取字串级结果。
         """
         _hint = "\n\n[Analyze the error above and try a different approach.]"
 
@@ -342,26 +333,29 @@ class ToolRegistry:
 
     @property
     def tool_names(self) -> list[str]:
-        """用处，参数
+        """
+        用处: 输出当前已完成依赖登记工作的所有工具名字串列表。
 
         功能:
-            - 返回当前所有已注册工具名。
+            - 返回字典键缓存集合，用于渲染帮助列表或是供调试程序快速浏览。
         """
         return list(self._tools.keys())
 
     def __len__(self) -> int:
-        """用处，参数
+        """
+        用处: 获取有效登记执行组件的动态长度。
 
         功能:
-            - 返回注册表中工具数量。
+            - Python built-in 的长度魔法扩展接口，返回实际容量数字。
         """
         return len(self._tools)
 
     def __contains__(self, name: str) -> bool:
-        """用处，参数
+        """
+        用处: `in` 操作符快捷判断语法糖。
 
         功能:
-            - 支持使用 in 判断工具是否存在。
+            - 借助原生字典 keys 进行非常快速匹配验证。
         """
         return name in self._tools
 

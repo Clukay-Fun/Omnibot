@@ -1,4 +1,8 @@
-"""文件系统工具：读取、写入、编辑。"""
+"""
+描述: 本地文件系统操作工具集。
+主要功能:
+    - 提供向安全沙箱（Workspace 等机制）内读取、写入、内容替换和列出目录内容的能力。
+"""
 
 import difflib
 from pathlib import Path
@@ -25,7 +29,12 @@ def _ensure_in_allowed_dir(path: Path, *, raw_path: str, allowed_dir: Path | Non
         raise PermissionError(f"Path {raw_path} is outside allowed directory {allowed_dir}")
 
 def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
-    """根据工作区（如果是相对路径）解析路径，并实施目录限制检查。"""
+    """
+    用处: 安全组装和校验绝对路径。
+
+    功能:
+        - 强制相对于工作区解析路径，并实施目录边界限制检查以阻止跨目录攻击。
+    """
     resolved = _resolve_candidate(path, workspace)
     _ensure_in_allowed_dir(resolved, raw_path=path, allowed_dir=allowed_dir)
     return resolved
@@ -65,7 +74,12 @@ def _resolve_skill_write_path(
 # region [文件读取工具]
 
 class ReadFileTool(Tool):
-    """读取文件内容的工具。"""
+    """
+    用处: 读取单个文件全文。
+
+    功能:
+        - 向模型呈现指定限制目录内的纯文本或代码文件内容。
+    """
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -113,7 +127,12 @@ class ReadFileTool(Tool):
 # region [文件写入工具]
 
 class WriteFileTool(Tool):
-    """向文件写入内容的工具。"""
+    """
+    用处: 截断并写入内容至指定文件。
+
+    功能:
+        - 提供创建新文件并按需生成上游缺失父级目录的能力。
+    """
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -165,7 +184,12 @@ class WriteFileTool(Tool):
 # region [文件编辑工具]
 
 class EditFileTool(Tool):
-    """通过替换文本来编辑文件的工具。"""
+    """
+    用处: 对已有文件行踪局部定点修改。
+
+    功能:
+        - 基于精确的字符串匹配进行替换。适用于只想改一行而不重写全文的场景。
+    """
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -234,7 +258,13 @@ class EditFileTool(Tool):
 
     @staticmethod
     def _not_found_message(old_text: str, content: str, path: str) -> str:
-        """当未找到 old_text 时构建有用的错误提示。"""
+        """
+        用处: 大模型常常记错当前代码段，此方法用以辅助容错。
+
+        功能:
+            - 当精确匹配 `old_text` 失败时，执行向下的模糊相似度对比。
+            - 以 unified diff 的格式将“最接近的匹配处”展示给模型，帮助其理解真正的上下文并修正其修改指令。
+        """
         lines = content.splitlines(keepends=True)
         old_lines = old_text.splitlines(keepends=True)
         window = len(old_lines)
@@ -260,7 +290,12 @@ class EditFileTool(Tool):
 # region [目录列出工具]
 
 class ListDirTool(Tool):
-    """列出目录内容的工具。"""
+    """
+    用处: 文件目录探测工具。
+
+    功能:
+        - 以 `📁` 与 `📄` 的标识树出安全范围内指定目标目录内的文件列表。
+    """
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace

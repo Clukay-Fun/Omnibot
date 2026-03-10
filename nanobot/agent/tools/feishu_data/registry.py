@@ -114,7 +114,7 @@ def build_feishu_data_tools(
     profile_synthesizer = None
     if provider is not None:
         try:
-            from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
+            from nanobot.agent.table_runtime.table_profile_synthesizer import TableProfileSynthesizer
 
             profile_synthesizer = TableProfileSynthesizer(provider=provider, model=model)
         except Exception as exc:

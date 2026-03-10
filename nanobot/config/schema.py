@@ -1,4 +1,8 @@
-"""Configuration schema using Pydantic."""
+"""
+描述: 系统级的 Pydantic 核心配置业务结构约束。
+主要功能:
+    - 统一定义并校验所有集成服务、多渠道 Token、大模型并发数、以及底层数据库的强类型设定（Type-Hint）。
+"""
 
 from pathlib import Path
 from typing import Literal
@@ -320,8 +324,6 @@ class AgentDefaults(Base):
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
     llm_timeout_seconds: float = 90.0
     stage_heartbeat_seconds: float = 15.0
-    skillspec_render_primary_timeout_seconds: float = 12.0
-    skillspec_render_retry_timeout_seconds: float = 6.0
 
 
 class ResponseTemplateConfig(Base):
@@ -538,7 +540,13 @@ class ToolsConfig(Base):
 
 
 class Config(BaseSettings):
-    """Root configuration for nanobot."""
+    """
+    用处: 应用程序全局共享设置载体实体。
+
+    功能:
+        - 将分布式的 JSON 内容装配为代码中可供注入提示及自动联想补全的聚合对象。
+        - 提供兼容早期配置降级的各类 `resolve_x` 获取助手方法。
+    """
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)

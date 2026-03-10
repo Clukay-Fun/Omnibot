@@ -8,7 +8,6 @@ from __future__ import annotations
 from datetime import datetime as real_datetime
 import json
 from pathlib import Path
-from textwrap import dedent
 import datetime as datetime_module
 
 from nanobot.agent.context import ContextBuilder
@@ -46,22 +45,6 @@ def _make_workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True)
     return workspace
-
-
-def _write_skillspec(workspace: Path, name: str, content: str) -> None:
-    skillspec_dir = workspace / "skillspec"
-    skillspec_dir.mkdir(parents=True, exist_ok=True)
-    (skillspec_dir / name).write_text(dedent(content).strip() + "\n", encoding="utf-8")
-
-
-def _business_capabilities_block(prompt: str) -> str:
-    marker = "# Business Capabilities\n"
-    start = prompt.index(marker)
-    end = prompt.find("\n\n---\n\n", start)
-    if end == -1:
-        return prompt[start:]
-    return prompt[start:end]
-
 
 #endregion
 
@@ -253,61 +236,23 @@ def test_add_tool_result_compacts_bitable_field_metadata_for_llm(tmp_path) -> No
     assert payload["fields"][0]["property"]["option_count"] == 10
 
 
-def test_feishu_business_capabilities_prompt_block_is_deterministic(tmp_path) -> None:
+def test_feishu_prompt_does_not_read_skillspec_blueprints(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     (workspace / "MEMORY.md").write_text("global-memory", encoding="utf-8")
 
-    _write_skillspec(
-        workspace,
-        "z_last.yaml",
-        """
-        meta:
-          id: z_last
-          version: "0.1"
-          title: Z Last
-          description: Final capability in file order, but not prompt order.
-        params:
-          type: object
-        action:
-          kind: query
-          table:
-            alias: z_table
-        response: {}
-        error: {}
-        """,
-    )
-    _write_skillspec(
-        workspace,
-        "a_first.yaml",
-        """
-        meta:
-          id: a_first
-          version: "0.1"
-          title: A First
-          description: First capability in prompt order.
-        params:
-          type: object
-        action:
-          kind: update
-          table:
-            alias: a_table
-        response: {}
-        error: {}
-        """,
-    )
+    skillspec_dir = workspace / "skillspec"
+    skillspec_dir.mkdir(parents=True, exist_ok=True)
+    (skillspec_dir / "broken.yaml").write_text("not: [valid", encoding="utf-8")
 
     builder = ContextBuilder(workspace)
     runtime = PromptContext(channel="feishu", chat_id="oc_group", sender_id="ou_user", metadata={"chat_type": "group"})
 
     prompt1 = builder.build_system_prompt(runtime=runtime)
     prompt2 = builder.build_system_prompt(runtime=runtime)
-    block1 = _business_capabilities_block(prompt1)
-    block2 = _business_capabilities_block(prompt2)
 
-    assert block1 == block2
-    assert "id=a_first; title=A First; kind=update; tool=bitable_update; tables=a_table" in block1
-    assert "id=z_last; title=Z Last; kind=query; tool=bitable_search; tables=z_table" in block1
-    assert block1.index("id=a_first") < block1.index("id=z_last")
+    assert prompt1 == prompt2
+    assert "# Business Capabilities" not in prompt1
+    assert "# Business Capabilities" not in prompt2
 
 
 #endregion

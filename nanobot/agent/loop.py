@@ -1,4 +1,10 @@
-"""Agent 循环：核心处理引擎。"""
+"""
+描述: Agent 运作主循环（Main Loop）与核心处理引擎。
+主要功能:
+    - 统筹处理来自上行 Channel（如 CLI、飞书等）的消息分发。
+    - 将上下文挂载发往底层的 LLM Provider 进行对话决策，然后捕获工具调用进行本地与云端能力执行。
+    - 统一处理异常重试、持久化记忆分发与兜底限流的容灾控制。
+"""
 
 from __future__ import annotations
 
@@ -22,14 +28,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
 from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
-from nanobot.agent.skill_runtime import (
-    EmbeddingSkillRouter,
-    OutputGuard,
-    ReminderRuntime,
-    SkillSpecExecutor,
-    SkillSpecRegistry,
-    UserMemoryStore,
-)
+from nanobot.agent.user_state import UserMemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.turn_runtime import TurnRuntime
 from nanobot.agent.tools.cron import CronTool
@@ -62,14 +61,11 @@ if TYPE_CHECKING:
 
 class AgentLoop:
     """
-    Agent 循环是核心处理引擎。
+    用处: 系统的“大脑”与中央分发控制器。
 
-    它的工作流：
-    1. 从事件总线接收消息
-    2. 使用历史记录、记忆、技能构建上下文
-    3. 调用大语言模型（LLM）
-    4. 执行工具调用
-    5. 将响应发送回去
+    功能:
+        - 接收事件（Event），并基于最新 User Context 与 Memory 编排推导模型交互调度。
+        - 根据大模型下发的 Tool Calls 进行反向拦截调用，再将实际执行产出的 Tool Message 递归注入下一轮 AI 思考环节。
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
@@ -78,9 +74,6 @@ class AgentLoop:
     _ONBOARDING_GUIDE_PROMPTED_KEY = "guide_prompted_at"
     _PENDING_TOPIC_METADATA_KEY = "pending_topic_titles"
     _BOOTSTRAP_INTERNAL_TRIGGER_PREFIX = "[Bootstrap Internal Trigger]"
-    _SKILLSPEC_RENDER_MAX_TOKENS = 800
-    _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
-    _WORKFLOW_MODE_METADATA_KEY = "workflow_mode"
     _MEMORY_WRITE_TURN_THRESHOLD = 3
     _MEMORY_TOPIC_END_KEYWORDS = (
         "先这样",
@@ -125,16 +118,12 @@ class AgentLoop:
         from nanobot.agent.response_templates import TemplateRenderer, TemplateRouter
         from nanobot.config.schema import (
             ExecToolConfig,
-            ProviderConfig,
             ResponseTemplateConfig,
-            SkillSpecConfig,
         )
         self.bus = bus
         self.channels_config = channels_config
         self.feishu_data_config = feishu_data_config
         self.response_template_config = response_template_config or ResponseTemplateConfig()
-        self.skillspec_config = skillspec_config or SkillSpecConfig()
-        self._skillspec_embedding_provider_config = skillspec_embedding_provider_config or ProviderConfig()
         self.provider = provider
         self.workspace = workspace
         sync_workspace_templates(self.workspace, silent=True)
@@ -150,14 +139,6 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._llm_timeout_seconds = max(0.1, float(llm_timeout_seconds))
         self._stage_heartbeat_seconds = max(0.0, float(stage_heartbeat_seconds))
-        self._skillspec_render_primary_timeout_seconds = max(
-            0.1,
-            float(skillspec_render_primary_timeout_seconds),
-        )
-        self._skillspec_render_retry_timeout_seconds = max(
-            0.1,
-            float(skillspec_render_retry_timeout_seconds),
-        )
 
         self.context = ContextBuilder(workspace)
         self._memory_store = self.context.memory
@@ -295,60 +276,6 @@ class AgentLoop:
         self._register_default_tools()
         self._pending_write_coordinator = PendingWriteCoordinator(self)
         self._continuation_coordinator = ContinuationCoordinator(self)
-        self._skillspec_registry: SkillSpecRegistry | None = None
-        self._skillspec_runtime: SkillSpecExecutor | None = None
-        self._init_skillspec_runtime()
-
-    def _init_skillspec_runtime(self) -> None:
-        if not self.skillspec_config.enabled:
-            return
-
-        from nanobot.agent.skill_runtime.table_registry import TableRegistry
-
-        workspace_root = self.workspace / "skillspec"
-        if not self.skillspec_config.workspace_override_enabled:
-            workspace_root = self.workspace / "__skillspec_disabled__"
-
-        self._skillspec_registry = SkillSpecRegistry(workspace_root=workspace_root)
-        self._skillspec_registry.load()
-        embedding_router = EmbeddingSkillRouter(
-            embedding_enabled=self.skillspec_config.embedding_enabled,
-            embedding_top_k=self.skillspec_config.embedding_top_k,
-            embedding_model=self.skillspec_config.embedding_model,
-            embedding_timeout_seconds=self.skillspec_config.embedding_timeout_seconds,
-            embedding_cache_ttl_seconds=self.skillspec_config.embedding_cache_ttl_seconds,
-            provider_config=self._skillspec_embedding_provider_config,
-        )
-        self._skillspec_runtime = SkillSpecExecutor(
-            registry=self._skillspec_registry,
-            tools=self.tools,
-            output_guard=OutputGuard(),
-            user_memory=self._user_memory_store,
-            embedding_router=embedding_router,
-            embedding_min_score=self.skillspec_config.embedding_min_score,
-            route_log_enabled=self.skillspec_config.route_log_enabled,
-            route_log_top_k=self.skillspec_config.route_log_top_k,
-            reminder_runtime=ReminderRuntime(
-                get_state_path() / "reminders.json",
-                legacy_store_paths=[self.workspace / "reminders.json"],
-            ),
-            runtime_text=self._runtime_text,
-            table_registry=TableRegistry(workspace=self.workspace),
-        )
-
-        if self.skillspec_config.startup_report_enabled:
-            report = self._skillspec_registry.report
-            logger.info(
-                "Skillspec registry loaded={} overridden={} collisions={} disabled={}",
-                len(report.loaded),
-                len(report.overridden),
-                len(report.source_collisions),
-                len(report.disabled),
-            )
-            if report.source_collisions:
-                logger.info("Skillspec source collisions: {}", "; ".join(report.source_collisions))
-            if self.skillspec_config.startup_report_include_invalid and report.invalid:
-                logger.warning("Skillspec invalid entries: {}", "; ".join(report.invalid))
 
     @staticmethod
     def _now_iso() -> str:
@@ -1694,48 +1621,95 @@ class AgentLoop:
         logger.info("Coordinator hit: {} session={} source={}", name, session_key, source)
 
     @staticmethod
+    def _looks_like_feishu_query_prompt(text: str) -> bool:
+        lowered = text.strip().lower()
+        if not lowered:
+            return False
+        query_tokens = (
+            "通讯录",
+            "联系人",
+            "同事",
+            "open_id",
+            "邮箱",
+            "手机号",
+            "电话",
+            "表格",
+            "多维表格",
+            "bitable",
+            "字段",
+            "schema",
+            "视图",
+            "table_id",
+            "日历",
+            "日程",
+            "会议",
+            "空闲",
+            "任务",
+            "待办",
+            "聊天记录",
+            "消息历史",
+            "周工作计划",
+            "工作计划表",
+            "查看",
+            "列出",
+            "展示",
+            "导出",
+            "最近20条",
+            "最近 20 条",
+            "全部内容",
+            "所有内容",
+        )
+        return any(token in lowered for token in query_tokens) or bool(
+            re.match(r"^\s*(?:帮我)?(?:查|找|搜|看)(?:一下)?\s*[\w.@\-\u4e00-\u9fff]{2,80}\s*$", text)
+        )
+
+    @classmethod
+    def _inherits_feishu_query_context(cls, session: Session | None, text: str) -> bool:
+        normalized = re.sub(r"\s+", "", text.strip().lower())
+        if normalized not in {
+            "概览",
+            "全量",
+            "全部",
+            "全部内容",
+            "所有",
+            "所有内容",
+            "最近20条",
+            "最近10条",
+            "最近5条",
+            "最近20",
+            "最近10",
+            "最近5",
+            "详情",
+            "详细",
+        }:
+            return False
+        if session is None:
+            return False
+        recent_selected_table = session.metadata.get("recent_selected_table")
+        if isinstance(recent_selected_table, dict) and recent_selected_table:
+            return True
+        for item in reversed(session.messages[-8:]):
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and cls._looks_like_feishu_query_prompt(content):
+                return True
+        return False
+
+    @staticmethod
     def _tool_exposure_context_for_message(msg: InboundMessage, *, session: Session | None = None) -> ToolExposureContext:
         metadata = dict(msg.metadata or {})
         text = msg.content.strip().lower()
         pending_write = False
-        workflow_mode = AgentLoop._workflow_mode(session)
         if session is not None:
             pending_write = isinstance(session.metadata.get("pending_write"), dict)
         mode = ""
-        if workflow_mode == "plan":
-            mode = "workflow_plan"
-        elif msg.channel == "feishu":
+        if msg.channel == "feishu":
             if pending_write:
                 mode = "main_write_commit"
             elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
                 mode = "main_write_prepare"
-            elif any(
-                token in text
-                for token in (
-                    "通讯录",
-                    "联系人",
-                    "同事",
-                    "open_id",
-                    "邮箱",
-                    "手机号",
-                    "电话",
-                    "表格",
-                    "多维表格",
-                    "bitable",
-                    "字段",
-                    "schema",
-                    "视图",
-                    "table_id",
-                    "日历",
-                    "日程",
-                    "会议",
-                    "空闲",
-                    "任务",
-                    "待办",
-                    "聊天记录",
-                    "消息历史",
-                )
-            ) or re.match(r"^\s*(?:帮我)?(?:查|找|搜)(?:一下)?\s*[\w.@\-\u4e00-\u9fff]{2,40}\s*$", msg.content):
+            elif AgentLoop._looks_like_feishu_query_prompt(msg.content) or AgentLoop._inherits_feishu_query_context(session, msg.content):
                 mode = "main_feishu_query"
             else:
                 mode = "main_chat_readonly"
@@ -1757,123 +1731,6 @@ class AgentLoop:
     ) -> TurnRuntime:
         resolved_purpose = purpose or AgentLoop._prompt_purpose_for_message(msg)
         return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, resolved_purpose), mode=mode)
-
-    async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
-        content = raw_content.strip()
-        if not content:
-            return raw_content
-        if len(content) > self._SKILLSPEC_RENDER_MAX_INPUT_CHARS:
-            logger.info(
-                "Skillspec LLM render skipped for {} due to large payload ({} chars)",
-                msg.session_key,
-                len(content),
-            )
-            return raw_content
-
-        primary_prompt = (
-            "你已经得到一次结构化技能执行结果，请直接用自然语言回复用户。\n"
-            "要求：\n"
-            "1) 只基于给定结果回答，不要再次调用工具。\n"
-            "2) 不要提及内部实现（如 skillspec、tool、路由）。\n"
-            "3) 结果为空时，简短说明并给出下一步建议。\n\n"
-            f"用户请求：\n{msg.content}\n\n"
-            f"结构化结果：\n{content}\n"
-        )
-
-        retry_prompt = (
-            "把下面结果改写成给用户的简短自然语言回复。"
-            "不要调用工具，不要解释内部机制。\n\n"
-            f"用户请求：{msg.content}\n"
-            f"结果：{content}\n"
-        )
-
-        base_messages = [
-            {"role": "system", "content": self.context.build_system_prompt()},
-            {"role": "user", "content": ContextBuilder._build_runtime_context(msg.channel, msg.chat_id)},
-        ]
-
-        max_tokens = max(128, min(self.max_tokens, self._SKILLSPEC_RENDER_MAX_TOKENS))
-        attempts = (
-            (
-                "primary",
-                primary_prompt,
-                min(self._llm_timeout_seconds, self._skillspec_render_primary_timeout_seconds),
-                self.reasoning_effort,
-            ),
-            (
-                "retry",
-                retry_prompt,
-                min(self._llm_timeout_seconds, self._skillspec_render_retry_timeout_seconds),
-                "low",
-            ),
-        )
-
-        for index, (label, prompt, timeout_seconds, reasoning_effort) in enumerate(attempts, start=1):
-            messages = [*base_messages, {"role": "user", "content": prompt}]
-            llm_started = time.perf_counter()
-            try:
-                response = await asyncio.wait_for(
-                    self.provider.chat(
-                        messages=messages,
-                        tools=None,
-                        model=self.model,
-                        temperature=self.temperature,
-                        max_tokens=max_tokens,
-                        reasoning_effort=reasoning_effort,
-                    ),
-                    timeout=timeout_seconds,
-                )
-            except asyncio.TimeoutError:
-                elapsed_ms = int((time.perf_counter() - llm_started) * 1000)
-                logger.warning(
-                    "Skillspec LLM render {} timed out for {} after {} ms (limit={}s)",
-                    label,
-                    msg.session_key,
-                    elapsed_ms,
-                    timeout_seconds,
-                )
-                continue
-            except Exception as exc:
-                logger.warning(
-                    "Skillspec LLM render {} failed for {}: {}",
-                    label,
-                    msg.session_key,
-                    exc,
-                )
-                continue
-
-            if response.finish_reason == "error":
-                logger.warning("Skillspec LLM render {} returned finish_reason=error", label)
-                continue
-            if response.has_tool_calls:
-                logger.warning("Skillspec LLM render {} returned tool_calls, retrying", label)
-                continue
-
-            rewritten = self._strip_think(response.content)
-            if rewritten:
-                return rewritten
-
-            logger.warning(
-                "Skillspec LLM render {} produced empty content for {} (attempt {})",
-                label,
-                msg.session_key,
-                index,
-            )
-
-        logger.warning("Skillspec LLM render exhausted retries for {}, fallback to raw result", msg.session_key)
-        return raw_content
-
-    @staticmethod
-    def _skillspec_kind(metadata: dict[str, Any] | None) -> str:
-        if not isinstance(metadata, dict):
-            return ""
-        return str(metadata.get("skillspec_kind") or "").strip().lower()
-
-    def _should_rewrite_skillspec_result(self, metadata: dict[str, Any] | None) -> bool:
-        kind = self._skillspec_kind(metadata)
-        if kind == "query" and not bool(getattr(self.skillspec_config, "query_rewrite_enabled", False)):
-            return False
-        return True
 
     # endregion
 
@@ -2175,14 +2032,10 @@ class AgentLoop:
                             "progress", "tool_done", "{tool} 完成，继续思考中..."
                         )
                         await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
-                    messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
-                    )
                     if pending_preview is not None:
-                        if prepared_followup is None:
-                            messages = self.context.add_tool_result(
-                                messages, tool_call.id, tool_call.name, result
-                            )
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
                         final_content = pending_preview
                         messages = self.context.add_assistant_message(messages, final_content)
                         break
@@ -2385,8 +2238,6 @@ class AgentLoop:
             "全局命令\n"
             "- /help 或 /commands：查看命令总览\n"
             "- /status：查看当前偏好与授权状态\n"
-            "- /plan：切换到计划模式（只分析/规划，不执行 skill 或工具）\n"
-            "- /build：切换到构建模式（允许执行 skill 和工具）\n"
             "- /setup：查看初始化引导\n"
             "- /connect 或 /oauth：连接飞书 OAuth\n"
             "- /session：查看会话子命令帮助\n"
@@ -2396,32 +2247,6 @@ class AgentLoop:
             "- 继续 / 展开：仅当当前有分页结果时，查看剩余内容\n"
             "- 确认 <token> / 取消 <token>：仅当当前有写入预览时，确认或取消写入"
         )
-
-    @classmethod
-    def _workflow_mode(cls, session: Session | None) -> str:
-        if session is None:
-            return "build"
-        value = str((session.metadata or {}).get(cls._WORKFLOW_MODE_METADATA_KEY) or "build").strip().lower()
-        return value if value in {"plan", "build"} else "build"
-
-    @classmethod
-    def _set_workflow_mode(cls, session: Session, mode: str) -> None:
-        metadata = dict(session.metadata or {})
-        metadata[cls._WORKFLOW_MODE_METADATA_KEY] = "plan" if mode == "plan" else "build"
-        session.metadata = metadata
-
-    @classmethod
-    def _workflow_mode_label(cls, mode: str) -> str:
-        return "计划（只读）" if mode == "plan" else "构建（可执行）"
-
-    def _handle_workflow_mode_command(self, *, msg: InboundMessage, session: Session, mode: str) -> OutboundMessage:
-        self._set_workflow_mode(session, mode)
-        self.sessions.save(session)
-        if mode == "plan":
-            content = "已切换到 plan 模式。接下来我只做分析、规划和方案讨论，不执行 skill、工具或写入。需要实际操作时发 /build。"
-        else:
-            content = "已切换到 build 模式。接下来我可以执行 skill、工具调用和写入流程。"
-        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     @staticmethod
     def _default_session_help_text() -> str:
@@ -2435,7 +2260,6 @@ class AgentLoop:
 
     def _build_status_text(self, msg: InboundMessage) -> str:
         session = self.sessions.get_or_create(msg.session_key)
-        workflow_mode = self._workflow_mode(session)
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         preferences = cast(dict[str, Any], profile["preferences"])
         skillspec = cast(dict[str, Any], profile["skillspec"])
@@ -2481,7 +2305,6 @@ class AgentLoop:
 
         return (
             "📌 当前设置\n\n"
-            f"工作模式：{self._workflow_mode_label(workflow_mode)}\n"
             f"怎么称呼您：{display_name}\n"
             f"回复风格：{style_label}\n"
             f"录入数据时：{confirm_label}\n"
@@ -2768,10 +2591,6 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
-        if cmd == "/plan":
-            return self._handle_workflow_mode_command(msg=msg, session=session, mode="plan")
-        if cmd == "/build":
-            return self._handle_workflow_mode_command(msg=msg, session=session, mode="build")
         if cmd == "/step":
             return OutboundMessage(
                 channel=msg.channel,
@@ -2812,63 +2631,14 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
-        workflow_mode = self._workflow_mode(session)
-        if raw_cmd.startswith("/skill"):
-            if workflow_mode == "plan":
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content="当前是 plan 模式：我只做分析和规划，不执行 skill 或工具。需要实际操作请先发 /build。",
-                )
-            if self._skillspec_runtime:
-                skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
-                if skillspec_result.handled:
-                    rendered = skillspec_result.content
-                    if self._should_rewrite_skillspec_result(skillspec_result.metadata):
-                        rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
-                    self.sessions.save(session)
-                    outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
-                    outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
-                    if skillspec_result.reply_chat_id:
-                        for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
-                            outbound_metadata.pop(key, None)
-                        outbound_metadata["_reply_in_thread"] = False
-                    outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
-                    return OutboundMessage(
-                        channel=msg.channel,
-                        chat_id=outbound_chat_id,
-                        content=rendered,
-                        metadata=outbound_metadata,
-                    )
-        if workflow_mode != "plan":
-            pending_outbound = await self._pending_write_coordinator.handle(msg=msg, session=session)
-            if pending_outbound is not None:
-                self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "message")
-                return pending_outbound
-            continuation_outbound = await self._continuation_coordinator.handle(msg=msg, session=session)
-            if continuation_outbound is not None:
-                self._log_coordinator_hit(self._continuation_coordinator.name, session.key, "message")
-                return continuation_outbound
-
-        if workflow_mode != "plan" and self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
-            continuation = self._skillspec_runtime.continue_from_session(session)
-            if continuation is not None and continuation.handled:
-                rendered = continuation.content
-                if self._should_rewrite_skillspec_result(continuation.metadata):
-                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=continuation.content)
-                self.sessions.save(session)
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=msg.chat_id,
-                    content=rendered,
-                    metadata={**(msg.metadata or {}), "_tool_turn": continuation.tool_turn},
-                )
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
-                metadata={**(msg.metadata or {}), "_tool_turn": True},
-            )
+        pending_outbound = await self._pending_write_coordinator.handle(msg=msg, session=session)
+        if pending_outbound is not None:
+            self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "message")
+            return pending_outbound
+        continuation_outbound = await self._continuation_coordinator.handle(msg=msg, session=session)
+        if continuation_outbound is not None:
+            self._log_coordinator_hit(self._continuation_coordinator.name, session.key, "message")
+            return continuation_outbound
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):

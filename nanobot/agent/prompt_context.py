@@ -1,4 +1,8 @@
-"""Prompt context helpers for runtime-aware workspace loading."""
+"""
+描述: 提示词装配环境感知助手模块。
+主要功能:
+    - 为上下文加载器提炼出运行时的元数据快捷读取属性（如判别当前环境是否是飞书、群聊等）。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,12 @@ PromptPurpose = Literal["chat", "heartbeat", "bootstrap"]
 
 @dataclass(slots=True)
 class PromptContext:
-    """Runtime metadata that influences workspace file selection."""
+    """
+    用处: 跨周期的运行时元数据状态只读载体。
+
+    功能:
+        - 将动态透传进来的散列字典（Session Metadata）安全包装为具备业务语义解析的具象类（如 is_private 等方法）。
+    """
 
     purpose: PromptPurpose = "chat"
     channel: str | None = None

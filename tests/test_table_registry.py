@@ -2,9 +2,9 @@ import json
 
 import pytest
 
-from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
+from nanobot.agent.table_runtime.table_profile_synthesizer import TableProfileSynthesizer
 from nanobot.agent.tools.feishu_data.bitable import BitableSyncSchemaTool
-from nanobot.agent.skill_runtime.table_registry import TableRegistry
+from nanobot.agent.table_runtime.table_registry import TableRegistry
 from nanobot.config.schema import FeishuDataConfig
 from nanobot.providers.base import LLMResponse
 

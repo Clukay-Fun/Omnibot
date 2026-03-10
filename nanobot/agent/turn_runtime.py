@@ -1,4 +1,8 @@
-"""Unified per-turn runtime context shared across prompt, tools, and coordinators."""
+"""
+描述: 对话轮次（Turn）的瞬时执行上下文定义模型。
+主要功能:
+    - 用于在跨文件、跨系统调用时集中保存并共享这一交互生命周期里的各种高频只读元数据流。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,13 @@ from nanobot.session.manager import Session
 
 @dataclass(slots=True)
 class TurnRuntime:
+    """
+    用处: 数据传输载体（Data Transfer Object）。
+
+    功能:
+        - 存放每次交互时的底层消息与上游事件原始结构（例如是 bootstrap、还是 chat）、
+        - 防止无止尽给各种函数的 args 放大量散乱信息串。
+    """
     purpose: PromptPurpose = "chat"
     channel: str = ""
     chat_id: str = ""

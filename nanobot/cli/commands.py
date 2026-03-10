@@ -44,12 +44,13 @@ _SAVED_TERM_ATTRS = None  # 原始 termios 设置，在退出时恢复
 
 
 def _build_cron_service(store_path: Path | None = None):
-    from nanobot.cron.service import CronService
+    from nanobot.cron.service import CronService as _CronService
 
     resolved_store_path = store_path or (get_state_path() / "cron" / "jobs.json")
     legacy_store_path = get_data_path() / "cron" / "jobs.json"
     legacy_paths = [] if legacy_store_path == resolved_store_path else [legacy_store_path]
-    return CronService(resolved_store_path, legacy_store_paths=legacy_paths)
+    cron_service_cls = globals().get("CronService", _CronService)
+    return cron_service_cls(resolved_store_path, legacy_store_paths=legacy_paths)
 
 
 def _flush_pending_tty_input() -> None:
@@ -392,7 +393,7 @@ def gateway(
     )
     oauth_stack = _build_feishu_oauth_stack(config)
     if oauth_stack is not None:
-        oauth_stack.store.cleanup_expired_oauth_states(now_iso=datetime.now().isoformat())
+        oauth_stack.store.oauth.cleanup_expired_states(now_iso=datetime.now().isoformat())
 
     # 首先创建 Cron 服务（将会在 agent 创建后设置回调）
     cron = _build_cron_service()
@@ -410,8 +411,6 @@ def gateway(
         reasoning_effort=config.agents.defaults.reasoning_effort,
         llm_timeout_seconds=config.agents.defaults.llm_timeout_seconds,
         stage_heartbeat_seconds=config.agents.defaults.stage_heartbeat_seconds,
-        skillspec_render_primary_timeout_seconds=config.agents.defaults.skillspec_render_primary_timeout_seconds,
-        skillspec_render_retry_timeout_seconds=config.agents.defaults.skillspec_render_retry_timeout_seconds,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
@@ -421,8 +420,6 @@ def gateway(
         channels_config=config.channels,
         feishu_data_config=config.tools.feishu_data,
         response_template_config=config.agents.response_templates,
-        skillspec_config=config.agents.skillspec,
-        skillspec_embedding_provider_config=config.providers.siliconflow,
         feishu_oauth_service=oauth_stack.oauth_service if oauth_stack else None,
         state_db_path=feishu_state_db_path,
         sqlite_options=feishu_sqlite_options,
@@ -596,8 +593,6 @@ def agent(
         reasoning_effort=config.agents.defaults.reasoning_effort,
         llm_timeout_seconds=config.agents.defaults.llm_timeout_seconds,
         stage_heartbeat_seconds=config.agents.defaults.stage_heartbeat_seconds,
-        skillspec_render_primary_timeout_seconds=config.agents.defaults.skillspec_render_primary_timeout_seconds,
-        skillspec_render_retry_timeout_seconds=config.agents.defaults.skillspec_render_retry_timeout_seconds,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         cron_service=cron,
@@ -606,8 +601,6 @@ def agent(
         channels_config=config.channels,
         feishu_data_config=config.tools.feishu_data,
         response_template_config=config.agents.response_templates,
-        skillspec_config=config.agents.skillspec,
-        skillspec_embedding_provider_config=config.providers.siliconflow,
         state_db_path=feishu_state_db_path,
         sqlite_options=feishu_sqlite_options,
     )
@@ -1097,8 +1090,6 @@ def cron_run(
         reasoning_effort=config.agents.defaults.reasoning_effort,
         llm_timeout_seconds=config.agents.defaults.llm_timeout_seconds,
         stage_heartbeat_seconds=config.agents.defaults.stage_heartbeat_seconds,
-        skillspec_render_primary_timeout_seconds=config.agents.defaults.skillspec_render_primary_timeout_seconds,
-        skillspec_render_retry_timeout_seconds=config.agents.defaults.skillspec_render_retry_timeout_seconds,
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -1106,8 +1097,6 @@ def cron_run(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         response_template_config=config.agents.response_templates,
-        skillspec_config=config.agents.skillspec,
-        skillspec_embedding_provider_config=config.providers.siliconflow,
     )
 
     service = _build_cron_service()

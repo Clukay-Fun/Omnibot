@@ -1,4 +1,9 @@
-"""用于后台任务执行的子代理（Subagent）管理器。"""
+"""
+描述: 用于后台任务并行与离线异步执行的子代理（Subagent）管理器。
+主要功能:
+    - 隔离并管理与会话解耦的长期任务，防止由于多重 API 等待导致单向阻塞。
+    - 对内联挂载指定的工具有限开放状态，并将回退事件传递回核心事件总线体系中。
+"""
 
 from __future__ import annotations
 
@@ -26,7 +31,12 @@ from nanobot.providers.base import LLMProvider
 # region [子代理管理器]
 
 class SubagentManager:
-    """管理后台子代理的执行。"""
+    """
+    用处: 统一的 Subagent 生命周期集装箱。
+
+    功能:
+        - 创建新并行的模型调度 Task，维持会话绑定与释放索引，监听退出状态并发送通告回源。
+    """
 
     def __init__(
         self,
@@ -71,7 +81,12 @@ class SubagentManager:
         mode: str = "subagent_plan",
         grant: dict[str, Any] | None = None,
     ) -> str:
-        """派发（Spawn）一个子代理在后台执行任务。"""
+        """
+        用处: 派发并游离出一条独立的 LLM 工作通道。
+
+        功能:
+            - 提取工作上下文创建 Task 追踪句柄放入 event loop 池并附着垃圾清理 callback。
+        """
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
@@ -108,7 +123,12 @@ class SubagentManager:
         mode: str = "subagent_plan",
         grant: dict[str, Any] | None = None,
     ) -> None:
-        """执行一个子代理任务。"""
+        """
+        用处: Subagent 的微型单体 AgentLoop 简化实现。
+
+        功能:
+            - 生成专用的工具白名单集合和 Prompt，进行循环 LLM Calling 直到无新工具生成或抛错超时。
+        """
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         try:
@@ -239,7 +259,12 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
     ) -> None:
-        """通过消息总线向主智能体通告子代理的执行结果。"""
+        """
+        用处: 向用户发起事件通知。
+
+        功能:
+            - 构建一个纯系统级消息结构体推流至原始对话房间模拟系统返回的结果提示气泡。
+        """
         status_text = "completed successfully" if status == "ok" else "failed"
 
         announce_content = f"""[Subagent '{label}' {status_text}]
@@ -263,7 +288,12 @@ Summarize this naturally for the user. Prefer `summary` as the user-facing truth
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
 
     def _build_subagent_prompt(self, mode: str = "subagent_plan") -> str:
-        """为子代理构建目标聚焦的系统提示词。"""
+        """
+        用处: 为子代理约束极简与高纯度的输出 Schema 断言。
+
+        功能:
+            - 强制该下挂代理只通过固定格式的 JSON 交卷（Output Contract）而不仅是对话。
+        """
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
@@ -301,7 +331,12 @@ Do not return markdown fences. Do not return free-form prose outside the JSON ob
         return "\n\n".join(parts)
 
     async def cancel_by_session(self, session_key: str) -> int:
-        """为给定的会话取消所有活跃的子代理任务。返回已被取消的数量。"""
+        """
+        用处: 中断正在长久运行或者死循环的后台 Subagent。
+
+        功能:
+            - 根据 Session Key 查找到隶属所有协程对象后立刻分发 Cancel 信号。
+        """
         tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
                  if tid in self._running_tasks and not self._running_tasks[tid].done()]
         for t in tasks:
@@ -311,7 +346,12 @@ Do not return markdown fences. Do not return free-form prose outside the JSON ob
         return len(tasks)
 
     def get_running_count(self) -> int:
-        """返回当前正在运行的子代理数量。"""
+        """
+        用处: 监控与心跳检查。
+
+        功能:
+            - 总计多少子任务仍在活跃。
+        """
         return len(self._running_tasks)
 
     # endregion

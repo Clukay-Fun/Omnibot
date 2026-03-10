@@ -1,4 +1,9 @@
-"""用于组装智能体提示词的上下文构建器。"""
+"""
+描述: 用于上下文及系统提示词（System Prompt）装配的核心模块。
+主要功能:
+    - 读取预设的角色（Persona）与引导（Bootstrap）文件。
+    - 组合长期记忆与可用的主动技能，并渲染进每次大语言模型请求的全局上下文中。
+"""
 
 import base64
 import json
@@ -11,12 +16,17 @@ from typing import Any
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.prompt_context import PromptContext
-from nanobot.agent.skill_runtime.registry import SkillSpecRegistry
 from nanobot.agent.skills import SkillsLoader
 
 
 class ContextBuilder:
-    """构建智能体的上下文（系统提示词 + 消息历史记录）。"""
+    """
+    用处: 系统 Prompt 的中央处理器。
+
+    功能:
+        - 整合读取各种静态与动态 Markdown 档案（BOOTSTRAP, IDENTITY 等）。
+        - 为特定的目标 Channel 及 Chat Scene 提供受限与特化的指导准则。
+    """
 
     SHARED_COMMON_FILES = ["AGENTS.md", "TOOLS.md"]
     PERSONA_COMMON_FILES = ["IDENTITY.md"]
@@ -26,9 +36,6 @@ class ContextBuilder:
     HEARTBEAT_FILES = ["HEARTBEAT.md"]
     _LLM_TABLE_METADATA_LIMIT = 8
     _LLM_FIELD_METADATA_LIMIT = 12
-    _SKILLSPEC_BLUEPRINT_LIMIT = 16
-    _SKILLSPEC_DESCRIPTION_LIMIT = 120
-
     # region [初始化与提示词构建]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
 
@@ -42,7 +49,12 @@ class ContextBuilder:
         skill_names: list[str] | None = None,
         runtime: PromptContext | None = None,
     ) -> str:
-        """从身份设定、引导文件、记忆和技能中构建系统提示词。"""
+        """
+        用处: 生成主从模型交互的核心指令集（System Prompt）。
+
+        功能:
+            - 按顺排列并组装基本身份描述、聊天特用引导文件内容、工作区记忆历史与能力约束集。
+        """
         runtime = runtime or PromptContext()
         parts = [self._get_identity()]
 
@@ -80,7 +92,12 @@ Skills with available="false" need dependencies installed first - you can try in
         return "\n\n---\n\n".join(parts)
 
     def _get_identity(self) -> str:
-        """获取核心身份设定部分。"""
+        """
+        用处: 构建基于环境变量、机器信息与根规范的机器人自画像。
+
+        功能:
+            - 提供底层操作系统探针信息与必须硬遵守的核心大模型指令约束部分。
+        """
         workspace_path = str(self.workspace.expanduser().resolve())
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -123,16 +140,18 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         chat_id: str | None,
         runtime: PromptContext | None = None,
     ) -> str:
-        """构建不受信任的运行时元数据块，用于注入到用户消息之前。"""
+        """
+        用处: 将非指令型的实时状态推入最近一轮用户的消息之前。
+
+        功能:
+            - 补充当前真实流速时间，以及诸如近期表单点击、引用事件这类易失性但具强时效背景提示。
+        """
         now = datetime.now().strftime("%Y-%m-%d %H:%M (%A)")
         tz = time.strftime("%Z") or "UTC"
         lines = [f"Current Time: {now} ({tz})"]
         if channel and chat_id:
             lines += [f"Channel: {channel}", f"Chat ID: {chat_id}"]
         if runtime is not None:
-            workflow_mode = str(runtime.metadata.get("workflow_mode") or "").strip()
-            if workflow_mode:
-                lines.append(f"Workflow Mode: {workflow_mode}")
             thread_id = str(runtime.metadata.get("thread_id") or runtime.metadata.get("root_id") or "").strip()
             if thread_id:
                 lines.append(f"Thread ID: {thread_id}")
@@ -198,7 +217,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return files
 
     def _load_bootstrap_files(self, runtime: PromptContext) -> str:
-        """从工作区加载所有引导文件（bootstrap files）。"""
+        """
+        用处: 安全读取各个不同私有/公共范畴边界内的 Bootstrap 引导文件。
+
+        功能:
+            - 从 `_resolve_workspace_files` 中迭代出有效文档，并将它们的文本连缀合并。
+        """
         parts = []
 
         for file_path in self._resolve_workspace_files(runtime):
@@ -238,69 +262,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return "\n".join(lines)
 
     def _build_business_capabilities_context(self, runtime: PromptContext) -> str:
-        if not runtime.is_feishu:
-            return ""
-
-        registry = SkillSpecRegistry(workspace_root=self.workspace / "skillspec")
-        registry.load()
-        blueprints = sorted(registry.blueprints.values(), key=lambda item: item.id)
-        if not blueprints:
-            return ""
-
-        lines = [
-            "# Business Capabilities",
-            "Use these Feishu skillspec blueprints as concise business capability references. They help map user intent to tools and tables, but they do not change routing.",
-        ]
-
-        for blueprint in blueprints[: self._SKILLSPEC_BLUEPRINT_LIMIT]:
-            lines.append(self._format_blueprint_for_prompt(blueprint))
-
-        omitted = len(blueprints) - self._SKILLSPEC_BLUEPRINT_LIMIT
-        if omitted > 0:
-            lines.append(f"- additional_capabilities_omitted={omitted}")
-
-        return "\n".join(lines)
-
-    @classmethod
-    def _format_blueprint_for_prompt(cls, blueprint: Any) -> str:
-        title = cls._normalize_prompt_text(getattr(blueprint, "title", None))
-        description = cls._normalize_prompt_text(getattr(blueprint, "description", None), limit=cls._SKILLSPEC_DESCRIPTION_LIMIT)
-        action_kind = cls._normalize_prompt_text(getattr(blueprint, "action_kind", None)) or "unknown"
-        primary_tool = cls._normalize_prompt_text(getattr(blueprint, "primary_tool", None)) or "unknown"
-
-        table_aliases: list[str] = []
-        for table in getattr(blueprint, "tables", []) or []:
-            alias = cls._normalize_prompt_text(getattr(table, "alias", None))
-            table_id = cls._normalize_prompt_text(getattr(table, "table_id", None))
-            if alias:
-                label = alias
-            elif table_id:
-                label = table_id
-            else:
-                continue
-            if label not in table_aliases:
-                table_aliases.append(label)
-        tables = ", ".join(table_aliases) if table_aliases else "none"
-
-        details = [
-            f"id={blueprint.id}",
-            f"title={title or blueprint.id}",
-            f"kind={action_kind}",
-            f"tool={primary_tool}",
-            f"tables={tables}",
-        ]
-        if description:
-            details.append(f"desc={description}")
-        return "- " + "; ".join(details)
-
-    @staticmethod
-    def _normalize_prompt_text(value: Any, limit: int | None = None) -> str:
-        if value is None:
-            return ""
-        text = " ".join(str(value).split())
-        if limit is not None and len(text) > limit:
-            return text[: max(0, limit - 3)].rstrip() + "..."
-        return text
+        return ""
 
     # endregion
 
@@ -316,7 +278,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         chat_id: str | None = None,
         runtime: PromptContext | None = None,
     ) -> list[dict[str, Any]]:
-        """构建用于大语言模型调用的完整消息列表。"""
+        """
+        用处: 面向提供商的底层 Chat Completions 数组组装。
+
+        功能:
+            - 将 System Prompt, 回溯历史列表, 以及带有时态附注（运行时环境）的当轮 User Text 融合成标准 List 结构。
+        """
         runtime = runtime or PromptContext(channel=channel, chat_id=chat_id)
         messages = [
             {"role": "system", "content": self.build_system_prompt(skill_names, runtime=runtime)},
@@ -333,7 +300,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """构建包含可选 Base64 编码图片的用户消息内容。"""
+        """
+        用处: 将常规文本转换为包含可能由于 MimeType 衍生为 Vision 请求的格式。
+
+        功能:
+            - 解析附加的多媒体路径并将符合格式的图像做 base64 DataURI 序列化。
+        """
         if not media:
             return text
 
@@ -358,7 +330,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         self, messages: list[dict[str, Any]],
         tool_call_id: str, tool_name: str, result: str,
     ) -> list[dict[str, Any]]:
-        """将工具调用结果追加到消息列表中。"""
+        """
+        用处: 保存某个 LLM 工具调用执行的落地返回结果。
+
+        功能:
+            - 对于飞书多维表格（Bitable）这类高宽带列表类查询应用进行超限折叠缩水，避免触发底层模型上下文洪流崩溃。
+        """
         messages.append(
             {
                 "role": "tool",
@@ -406,7 +383,12 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         reasoning_content: str | None = None,
         thinking_blocks: list[dict] | None = None,
     ) -> list[dict[str, Any]]:
-        """将助手的消息追加到消息列表中。"""
+        """
+        用处: 保存模型本身生成的语言回复与内部思考过程片段。
+
+        功能:
+            - 直接封装构建一个纯正类型的 Assistant 结构推入。
+        """
         msg: dict[str, Any] = {"role": "assistant", "content": content}
         if tool_calls:
             msg["tool_calls"] = tool_calls

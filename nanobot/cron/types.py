@@ -10,10 +10,11 @@ from typing import Literal
 
 @dataclass
 class CronSchedule:
-    """用处，参数
+    """
+    用处: 调度频次与触发节点的数据结构载体。
 
     功能:
-        - 描述任务触发方式与时间规则。
+        - 描述任务触发方式（单次、间隔、cron 表达式）与时间规则。
     """
     kind: Literal["at", "every", "cron"]
     # For "at": timestamp in ms
@@ -28,10 +29,11 @@ class CronSchedule:
 
 @dataclass
 class CronPayload:
-    """用处，参数
+    """
+    用处: 到期唤醒后交接给 Agent 的通信包。
 
     功能:
-        - 描述任务触发后的执行内容与投递目标。
+        - 描述任务触发后的执行内容（消息体文本）与投递目标频道。
     """
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
@@ -43,10 +45,11 @@ class CronPayload:
 
 @dataclass
 class CronJobState:
-    """用处，参数
+    """
+    用处: 运行时状态切片记录。
 
     功能:
-        - 保存任务运行时状态与最近结果。
+        - 保存任务运行时状态、最近执行时间和上次执行结果，防止时间紊乱或错误。
     """
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
@@ -56,10 +59,11 @@ class CronJobState:
 
 @dataclass
 class CronJob:
-    """用处，参数
+    """
+    用处: 平台最顶层的统一任务抽象。
 
     功能:
-        - 表示完整的单个定时任务对象。
+        - 表示完整的单个定时任务对象，关联调度属性、包体和状态元数据。
     """
     id: str
     name: str
@@ -74,10 +78,11 @@ class CronJob:
 
 @dataclass
 class CronStore:
-    """用处，参数
+    """
+    用处: 数据库或磁盘落地的集合缓存器。
 
     功能:
-        - 表示定时任务持久化存储结构。
+        - 表示定时任务持久化存储结构（内存模型）。
     """
     version: int = 1
     jobs: list[CronJob] = field(default_factory=list)

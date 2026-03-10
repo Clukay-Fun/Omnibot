@@ -1,4 +1,9 @@
-"""Coordinator for deterministic continuation/pagination commands."""
+"""
+描述: 处理上下文本延续和分页指令的协调器。
+主要功能:
+    - 拦截诸如“继续”、“下一页”等用户确定性指令。
+    - 负责维持并展示联系人列表、候选记录等多行较长数据的分页结果回放。
+"""
 
 from __future__ import annotations
 
@@ -11,8 +16,15 @@ from nanobot.session.manager import Session
 if TYPE_CHECKING:
     from nanobot.agent.loop import AgentLoop
 
+#region 上下文延续协调器
 
 class ContinuationCoordinator(AgentCoordinator):
+    """
+    用处: 上下文延续协调器类。继承自 AgentCoordinator。
+
+    功能:
+        - 拦截延续命令，读取当前会话状态中的分页偏移量，并组装下一页内容返回给用户。
+    """
     _COMMANDS = {"继续", "更多", "下一页", "more", "continue", "next"}
 
     def __init__(self, agent: "AgentLoop") -> None:
@@ -25,15 +37,33 @@ class ContinuationCoordinator(AgentCoordinator):
 
     @staticmethod
     def _record_direct_turn(session: Session, msg: InboundMessage, assistant_content: str) -> None:
+        """
+        用处: 直接在会话中记录一对交互轮次。参数为 session, 用户消息 msg, 助手回复文本 assistant_content。
+
+        功能:
+            - 将当前用户的指令和协调器生成的回复直接写入历史，跳过大语言模型的推演。
+        """
         session.add_message("user", msg.content)
         session.add_message("assistant", assistant_content)
 
     @classmethod
     def _is_continuation(cls, text: str) -> bool:
+        """
+        用处: 判断文本是否为延续指令。参数为用户输入的文本 text。
+
+        功能:
+            - 通过精准匹配内部预设命令集合，拦截指令。
+        """
         return text.strip().lower() in cls._COMMANDS
 
     @staticmethod
     def _format_directory_contacts(contacts: list[dict[str, Any]], *, remaining: int = 0) -> str:
+        """
+        用处: 格式化人员目录联系人以便展示。参数为联系人字典列表 contacts 以及剩余条数 remaining。
+
+        功能:
+            - 将底层返回的飞书联系人数组转化为具有高可读性的自然语言文本描述。
+        """
         if not contacts:
             return "没有更多联系人可展示了。"
         lines = ["继续展示联系人："]
@@ -56,6 +86,12 @@ class ContinuationCoordinator(AgentCoordinator):
         remaining: int = 0,
         start_index: int = 1,
     ) -> str:
+        """
+        用处: 格式化选项目录/结果表中的候选项，用于分页展示。
+
+        功能:
+            - 根据不同的类型 (table_candidates / record_candidates) 前缀生成结构化的项列表信息和索引号。
+        """
         kind = str(selection.get("kind") or "options")
         title = "继续展示候选项：" if kind == "table_candidates" else "继续展示可选项："
         if kind == "record_candidates":
@@ -76,6 +112,13 @@ class ContinuationCoordinator(AgentCoordinator):
         return "\n".join(lines)
 
     async def handle(self, *, msg: InboundMessage, session: Session) -> OutboundMessage | None:
+        """
+        用处: 处理入口函数。参数为输入消息 msg 以及上下文会话 session。
+
+        功能:
+            - 一旦匹配为 continuation 命令，则立即接管回复流程，阻断大语言模型请求。
+            - 提取元数据中的未展示尽的分页结果，计算最新的区间范围后触发重新展示。
+        """
         if not self._is_continuation(msg.content):
             return None
 
@@ -124,3 +167,5 @@ class ContinuationCoordinator(AgentCoordinator):
         self._record_direct_turn(session, msg, content)
         self._loop.sessions.save(session)
         return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content, metadata={**(msg.metadata or {}), "_tool_turn": True})
+
+#endregion

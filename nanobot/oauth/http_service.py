@@ -1,4 +1,8 @@
-"""In-process HTTP callback ingress for OAuth redirect_uri handling."""
+"""
+描述: 轻便的内嵌 HTTP 会话回调服务器。
+主要功能:
+    - 为飞书 Oauth2.0 登陆拦截器提供 redirect_uri 挂载点，拉起本地端口承接 Auth Code 并分发给认证解析。
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,13 @@ from .feishu import FeishuOAuthService
 
 
 class OAuthCallbackService:
-    """Lightweight in-process HTTP server for OAuth callback endpoints."""
+    """
+    用处: Oauth 客户端认证成功后的本地拦截器网关。
+
+    功能:
+        - 开启独立的 Http Server 线程监听指定的回调端口。
+        - 拦截从三方平台转发回来的 code 等信息，送入后端逻辑提取并返回美化的 HTML 给用户看结果。
+    """
 
     def __init__(
         self,

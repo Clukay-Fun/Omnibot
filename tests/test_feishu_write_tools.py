@@ -18,8 +18,8 @@ from nanobot.agent.tools.feishu_data.bitable_write import (
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.confirm_store import ConfirmTokenStore
 from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
-from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
-from nanobot.agent.skill_runtime.table_registry import TableRegistry
+from nanobot.agent.table_runtime.table_profile_synthesizer import TableProfileSynthesizer
+from nanobot.agent.table_runtime.table_registry import TableRegistry
 from nanobot.config.schema import FeishuDataBitableConfig, FeishuDataConfig
 from nanobot.providers.base import LLMResponse
 

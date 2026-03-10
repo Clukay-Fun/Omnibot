@@ -1,7 +1,7 @@
 [project]
 name = "nanobot-ai"
 version = "0.1.5"
-description = "Omnibot — nanobot fork optimized for Feishu/Lark: streaming cards, Bitable CRUD, SkillSpec LLM routing, multi-channel AI gateway"
+description = "Omnibot — nanobot fork optimized for Feishu/Lark: streaming cards, Bitable CRUD, reminders, and multi-channel AI gateway"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [

@@ -1,4 +1,9 @@
-"""Shell execution tool."""
+"""
+描述: 终端命令行执行工具模块。
+主要功能:
+    - 赋予大模型直接在操作系统宿主机执行 Shell 命令的强大能力。
+    - 采用黑白名单及超时限制作为基础的安全护栏。
+"""
 
 import asyncio
 import os
@@ -9,8 +14,16 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
+#region 终端执行器
+
 class ExecTool(Tool):
-    """Tool to execute shell commands."""
+    """
+    用处: 执行 Bash 或 Zsh 命令片段的工具类。
+
+    功能:
+        - 开辟独立子进程安全传递命令。
+        - 截断捕获超长返回日志并设置超时中断，防止悬挂（Hang）。
+    """
 
     def __init__(
         self,
@@ -44,7 +57,13 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        """
+        用处: 给 LLM 阅读的命令执行提示词。
+
+        功能:
+            - 强调在需要验证环境或是处理复杂文件任务时允许执行安全 Shell，但也要求一定程度的谨言慎行（Use with caution）。
+        """
+        return "执行终端 Shell 命令并返回日志输出。需要极其谨慎地使用以防止破坏文件系统。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -123,7 +142,13 @@ class ExecTool(Tool):
             return f"Error executing command: {str(e)}"
 
     def _guard_command(self, command: str, cwd: str) -> str | None:
-        """Best-effort safety guard for potentially destructive commands."""
+        """
+        用处: 高危命令过滤防线。参数 command: 即将执行命令, cwd: 当此执行目录。
+
+        功能:
+            - 使用正则表达式探测是否存在诸如 rm -rf, mkfs, 甚至 fork-bomb 这样的毁灭性输入。
+            - 尝试解析其中的绝对路径请求，若开启目录限制则予以阻断。
+        """
         cmd = command.strip()
         lower = cmd.lower()
 
@@ -156,3 +181,5 @@ class ExecTool(Tool):
         win_paths = re.findall(r"[A-Za-z]:\\[^\s\"'|><;]+", command)   # Windows: C:\...
         posix_paths = re.findall(r"(?:^|[\s|>])(/[^\s\"'>]+)", command) # POSIX: /absolute only
         return win_paths + posix_paths
+
+#endregion

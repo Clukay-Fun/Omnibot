@@ -1,4 +1,8 @@
-"""用于调度提醒和定时任务的 cron 工具。"""
+"""
+描述: 定时与调度工具。
+主要功能:
+    - 接入 cron 服务对象，允许 Agent 添加、查询或移除定时与重复性提醒任务。
+"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +16,12 @@ if TYPE_CHECKING:
 # region [定时任务工具实现]
 
 class CronTool(Tool):
-    """用于调度提醒和重复性任务的工具。"""
+    """
+    用处: 供大模型直接调用的任务调度入口。
+
+    功能:
+        - 将添加、拉取、删除等 action 指令翻译并传导至底层的 CronService 服务。
+    """
 
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
@@ -20,7 +29,12 @@ class CronTool(Tool):
         self._chat_id = ""
 
     def set_context(self, channel: str, chat_id: str) -> None:
-        """设置当前会话上下文用于消息投递。"""
+        """
+        用处: 为回调提供投递信息。参数 channel: 渠道，chat_id: 聊天房间ID。
+
+        功能:
+            - 设置任务触发后应向哪个会话回播提醒。
+        """
         self._channel = channel
         self._chat_id = chat_id
 
@@ -33,7 +47,13 @@ class CronTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Schedule reminders and recurring tasks. Actions: add, list, remove."
+        """
+        用处: 此项能力的描述。
+
+        功能:
+            - 向 LLM 申明其可以编排一次性或周期性提醒。
+        """
+        return "安排定时提醒和循环任务。支持的动作包括：添加（add）、列表查询（list）、移除（remove）。"
 
     @property
     def parameters(self) -> dict[str, Any]:

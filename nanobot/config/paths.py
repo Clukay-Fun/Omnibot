@@ -1,4 +1,8 @@
-"""Runtime path helpers derived from the active config context."""
+"""
+描述: 衍生于主环境上下文的统一文件路径分发层。
+主要功能:
+    - 将散落的数据落盘诉求（日志/多媒体/会话/工作空间）约束到 `~/.nanobot/` 等指定的相对安全范围中，并自带缺失自愈建立。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,12 @@ from nanobot.utils.helpers import ensure_dir
 
 
 def get_data_dir() -> Path:
-    """Return the instance-level runtime data directory."""
+    """
+    用处: 获得实例级数据落脚根目录。
+
+    功能:
+        - 基于当前的 `config.json` 获取隔离存储层，若无则主动连级补齐创建。
+    """
     return ensure_dir(get_config_path().parent)
 
 
@@ -35,7 +44,12 @@ def get_logs_dir() -> Path:
 
 
 def get_workspace_path(workspace: str | None = None) -> Path:
-    """Resolve and ensure the agent workspace path."""
+    """
+    用处: 定位智能体可读取/覆写的授权执行环境目录。
+
+    功能:
+        - 若传参为空就取默认 `~/.nanobot/workspace` 主沙盒。它也是本地命令行交互时的大本营基点。
+    """
     path = Path(workspace).expanduser() if workspace else Path.home() / ".nanobot" / "workspace"
     return ensure_dir(path)
 
