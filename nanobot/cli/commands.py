@@ -44,13 +44,12 @@ _SAVED_TERM_ATTRS = None  # 原始 termios 设置，在退出时恢复
 
 
 def _build_cron_service(store_path: Path | None = None):
-    from nanobot.cron.service import CronService as _CronService
+    from nanobot.cron.service import CronService
 
-    cron_service_cls = globals().get("CronService", _CronService)
     resolved_store_path = store_path or (get_state_path() / "cron" / "jobs.json")
     legacy_store_path = get_data_path() / "cron" / "jobs.json"
     legacy_paths = [] if legacy_store_path == resolved_store_path else [legacy_store_path]
-    return cron_service_cls(resolved_store_path, legacy_store_paths=legacy_paths)
+    return CronService(resolved_store_path, legacy_store_paths=legacy_paths)
 
 
 def _flush_pending_tty_input() -> None:

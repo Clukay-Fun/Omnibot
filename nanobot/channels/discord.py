@@ -1,7 +1,4 @@
-"""描述:
-主要功能:
-    - 提供基于 Discord Gateway 的频道收发实现。
-"""
+"""Discord channel implementation using Discord Gateway websocket."""
 
 import asyncio
 import json
@@ -15,60 +12,21 @@ from loguru import logger
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import DiscordConfig
+from nanobot.utils.helpers import split_message
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024  # 20MB
-MAX_MESSAGE_LEN = 2000  # Discord 单条消息的字符数限制
+MAX_MESSAGE_LEN = 2000  # Discord message character limit
 
-
-#region 辅助方法
-
-def _split_message(content: str, max_len: int = MAX_MESSAGE_LEN) -> list[str]:
-    """用处，参数
-
-    功能:
-        - 按长度上限拆分消息并优先在换行处断开。
-    """
-    if not content:
-        return []
-    if len(content) <= max_len:
-        return [content]
-    chunks: list[str] = []
-    while content:
-        if len(content) <= max_len:
-            chunks.append(content)
-            break
-        cut = content[:max_len]
-        pos = cut.rfind('\n')
-        if pos <= 0:
-            pos = cut.rfind(' ')
-        if pos <= 0:
-            pos = max_len
-        chunks.append(content[:pos])
-        content = content[pos:].lstrip()
-    return chunks
-
-
-#endregion
-
-#region Discord频道核心类
 
 class DiscordChannel(BaseChannel):
-    """用处，参数
-
-    功能:
-        - 维护 Gateway 连接并处理 Discord 消息收发。
-    """
+    """Discord channel using Gateway websocket."""
 
     name = "discord"
 
     def __init__(self, config: DiscordConfig, bus: MessageBus):
-        """用处，参数
-
-        功能:
-            - 初始化连接状态、心跳任务与 HTTP 客户端句柄。
-        """
         super().__init__(config, bus)
         self.config: DiscordConfig = config
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -76,9 +34,10 @@ class DiscordChannel(BaseChannel):
         self._heartbeat_task: asyncio.Task | None = None
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._http: httpx.AsyncClient | None = None
+        self._bot_user_id: str | None = None
 
     async def start(self) -> None:
-        """启动连接至 Discord gateway 服务的任务。"""
+        """Start the Discord gateway connection."""
         if not self.config.token:
             logger.error("Discord bot token not configured")
             return
@@ -101,7 +60,7 @@ class DiscordChannel(BaseChannel):
                     await asyncio.sleep(5)
 
     async def stop(self) -> None:
-        """停止 Discord 频道运行。"""
+        """Stop the Discord channel."""
         self._running = False
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
@@ -117,7 +76,7 @@ class DiscordChannel(BaseChannel):
             self._http = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """利用 Discord REST API 发送数据内容。"""
+        """Send a message through Discord REST API, including file attachments."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
             return
@@ -126,27 +85,43 @@ class DiscordChannel(BaseChannel):
         headers = {"Authorization": f"Bot {self.config.token}"}
 
         try:
-            chunks = _split_message(msg.content or "")
+            sent_media = False
+            failed_media: list[str] = []
+
+            # Send file attachments first
+            for media_path in msg.media or []:
+                if await self._send_file(url, headers, media_path, reply_to=msg.reply_to):
+                    sent_media = True
+                else:
+                    failed_media.append(Path(media_path).name)
+
+            # Send text content
+            chunks = split_message(msg.content or "", MAX_MESSAGE_LEN)
+            if not chunks and failed_media and not sent_media:
+                chunks = split_message(
+                    "\n".join(f"[attachment: {name} - send failed]" for name in failed_media),
+                    MAX_MESSAGE_LEN,
+                )
             if not chunks:
                 return
 
             for i, chunk in enumerate(chunks):
                 payload: dict[str, Any] = {"content": chunk}
 
-                # 针对多片段拆分的情形，仅为第一个发送片段设置消息引用(Reply 来源指向)
-                if i == 0 and msg.reply_to:
+                # Let the first successful attachment carry the reply if present.
+                if i == 0 and msg.reply_to and not sent_media:
                     payload["message_reference"] = {"message_id": msg.reply_to}
                     payload["allowed_mentions"] = {"replied_user": False}
 
                 if not await self._send_payload(url, headers, payload):
-                    break  # 短路中断失败后的余下片段送出请求
+                    break  # Abort remaining chunks on failure
         finally:
             await self._stop_typing(msg.chat_id)
 
     async def _send_payload(
         self, url: str, headers: dict[str, str], payload: dict[str, Any]
     ) -> bool:
-        """单次发送基于容忍 Rate-limit 限频重置机制的 Discord API 并发调用。返回布尔类型以标识真实触发状态。"""
+        """Send a single Discord API payload with retry on rate-limit. Returns True on success."""
         for attempt in range(3):
             try:
                 response = await self._http.post(url, headers=headers, json=payload)
@@ -165,12 +140,56 @@ class DiscordChannel(BaseChannel):
                     await asyncio.sleep(1)
         return False
 
-    async def _gateway_loop(self) -> None:
-        """用处，参数
+    async def _send_file(
+        self,
+        url: str,
+        headers: dict[str, str],
+        file_path: str,
+        reply_to: str | None = None,
+    ) -> bool:
+        """Send a file attachment via Discord REST API using multipart/form-data."""
+        path = Path(file_path)
+        if not path.is_file():
+            logger.warning("Discord file not found, skipping: {}", file_path)
+            return False
 
-        功能:
-            - 驱动网关循环并处理鉴权、心跳与事件分发。
-        """
+        if path.stat().st_size > MAX_ATTACHMENT_BYTES:
+            logger.warning("Discord file too large (>20MB), skipping: {}", path.name)
+            return False
+
+        payload_json: dict[str, Any] = {}
+        if reply_to:
+            payload_json["message_reference"] = {"message_id": reply_to}
+            payload_json["allowed_mentions"] = {"replied_user": False}
+
+        for attempt in range(3):
+            try:
+                with open(path, "rb") as f:
+                    files = {"files[0]": (path.name, f, "application/octet-stream")}
+                    data: dict[str, Any] = {}
+                    if payload_json:
+                        data["payload_json"] = json.dumps(payload_json)
+                    response = await self._http.post(
+                        url, headers=headers, files=files, data=data
+                    )
+                if response.status_code == 429:
+                    resp_data = response.json()
+                    retry_after = float(resp_data.get("retry_after", 1.0))
+                    logger.warning("Discord rate limited, retrying in {}s", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                logger.info("Discord file sent: {}", path.name)
+                return True
+            except Exception as e:
+                if attempt == 2:
+                    logger.error("Error sending Discord file {}: {}", path.name, e)
+                else:
+                    await asyncio.sleep(1)
+        return False
+
+    async def _gateway_loop(self) -> None:
+        """Main gateway loop: identify, heartbeat, dispatch events."""
         if not self._ws:
             return
 
@@ -190,25 +209,29 @@ class DiscordChannel(BaseChannel):
                 self._seq = seq
 
             if op == 10:
-                # HELLO事件: 启动 heartbeat 以及 identify 通知链路
+                # HELLO: start heartbeat and identify
                 interval_ms = payload.get("heartbeat_interval", 45000)
                 await self._start_heartbeat(interval_ms / 1000)
                 await self._identify()
             elif op == 0 and event_type == "READY":
                 logger.info("Discord gateway READY")
+                # Capture bot user ID for mention detection
+                user_data = payload.get("user") or {}
+                self._bot_user_id = user_data.get("id")
+                logger.info("Discord bot connected as user {}", self._bot_user_id)
             elif op == 0 and event_type == "MESSAGE_CREATE":
                 await self._handle_message_create(payload)
             elif op == 7:
-                # RECONNECT: 根据被动通知从循环中弹跳实现安全重连机制
+                # RECONNECT: exit loop to reconnect
                 logger.info("Discord gateway requested reconnect")
                 break
             elif op == 9:
-                # INVALID_SESSION: 指示当前登录 Session 已被判定失效，触发重新接入
+                # INVALID_SESSION: reconnect
                 logger.warning("Discord gateway invalid session")
                 break
 
     async def _identify(self) -> None:
-        """发送 IDENTIFY 特征数据体。"""
+        """Send IDENTIFY payload."""
         if not self._ws:
             return
 
@@ -227,7 +250,7 @@ class DiscordChannel(BaseChannel):
         await self._ws.send(json.dumps(identify))
 
     async def _start_heartbeat(self, interval_s: float) -> None:
-        """启动乃至重启长连接 Heartbeat 心跳任务机制。"""
+        """Start or restart the heartbeat loop."""
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
 
@@ -244,7 +267,7 @@ class DiscordChannel(BaseChannel):
         self._heartbeat_task = asyncio.create_task(heartbeat_loop())
 
     async def _handle_message_create(self, payload: dict[str, Any]) -> None:
-        """内部拦截处理经筛选的 Discord 送达消息。"""
+        """Handle incoming Discord messages."""
         author = payload.get("author") or {}
         if author.get("bot"):
             return
@@ -252,6 +275,7 @@ class DiscordChannel(BaseChannel):
         sender_id = str(author.get("id", ""))
         channel_id = str(payload.get("channel_id", ""))
         content = payload.get("content") or ""
+        guild_id = payload.get("guild_id")
 
         if not sender_id or not channel_id:
             return
@@ -259,9 +283,14 @@ class DiscordChannel(BaseChannel):
         if not self.is_allowed(sender_id):
             return
 
+        # Check group channel policy (DMs always respond if is_allowed passes)
+        if guild_id is not None:
+            if not self._should_respond_in_group(payload, content):
+                return
+
         content_parts = [content] if content else []
         media_paths: list[str] = []
-        media_dir = Path.home() / ".nanobot" / "media"
+        media_dir = get_media_dir("discord")
 
         for attachment in payload.get("attachments") or []:
             url = attachment.get("url")
@@ -295,13 +324,34 @@ class DiscordChannel(BaseChannel):
             media=media_paths,
             metadata={
                 "message_id": str(payload.get("id", "")),
-                "guild_id": payload.get("guild_id"),
+                "guild_id": guild_id,
                 "reply_to": reply_to,
             },
         )
 
+    def _should_respond_in_group(self, payload: dict[str, Any], content: str) -> bool:
+        """Check if bot should respond in a group channel based on policy."""
+        if self.config.group_policy == "open":
+            return True
+
+        if self.config.group_policy == "mention":
+            # Check if bot was mentioned in the message
+            if self._bot_user_id:
+                # Check mentions array
+                mentions = payload.get("mentions") or []
+                for mention in mentions:
+                    if str(mention.get("id")) == self._bot_user_id:
+                        return True
+                # Also check content for mention format <@USER_ID>
+                if f"<@{self._bot_user_id}>" in content or f"<@!{self._bot_user_id}>" in content:
+                    return True
+            logger.debug("Discord message in {} ignored (bot not mentioned)", payload.get("channel_id"))
+            return False
+
+        return True
+
     async def _start_typing(self, channel_id: str) -> None:
-        """针对接收频道触发定时循环发送输入状态 (TYPING INDICATOR) 的假象任务。"""
+        """Start periodic typing indicator for a channel."""
         await self._stop_typing(channel_id)
 
         async def typing_loop() -> None:
@@ -320,9 +370,7 @@ class DiscordChannel(BaseChannel):
         self._typing_tasks[channel_id] = asyncio.create_task(typing_loop())
 
     async def _stop_typing(self, channel_id: str) -> None:
-        """立刻终止相应频道的 TYPING INDICATOR 输入模拟任务。"""
+        """Stop typing indicator for a channel."""
         task = self._typing_tasks.pop(channel_id, None)
         if task:
             task.cancel()
-
-#endregion

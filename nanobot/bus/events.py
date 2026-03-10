@@ -1,21 +1,13 @@
-"""描述:
-主要功能:
-    - 定义消息总线的入站与出站事件结构。
-"""
+"""Event types for the message bus."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-#region 消息事件
 
 @dataclass
 class InboundMessage:
-    """用处，参数
-
-    功能:
-        - 表示来自频道侧的入站消息。
-    """
+    """Message received from a chat channel."""
 
     channel: str  # telegram, discord, slack, whatsapp
     sender_id: str  # User identifier
@@ -28,21 +20,13 @@ class InboundMessage:
 
     @property
     def session_key(self) -> str:
-        """用处，参数
-
-        功能:
-            - 生成会话唯一键并优先使用覆盖值。
-        """
+        """Unique key for session identification."""
         return self.session_key_override or f"{self.channel}:{self.chat_id}"
 
 
 @dataclass
 class OutboundMessage:
-    """用处，参数
-
-    功能:
-        - 表示需要发送到频道侧的外发消息。
-    """
+    """Message to send to a chat channel."""
 
     channel: str
     chat_id: str
@@ -52,4 +36,3 @@ class OutboundMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-#endregion

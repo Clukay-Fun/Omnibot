@@ -7,15 +7,99 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
+import unicodedata
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any
 
 from loguru import logger
-from telegram import BotCommand, ReplyParameters, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
-from telegram.request import HTTPXRequest
+
+try:
+    from telegram import BotCommand, ReplyParameters, Update
+    from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+    from telegram.request import HTTPXRequest
+except ModuleNotFoundError:  # pragma: no cover - exercised in environments without python-telegram-bot
+    @dataclass
+    class BotCommand:  # type: ignore[override]
+        command: str
+        description: str
+
+    class ReplyParameters:  # type: ignore[override]
+        def __init__(self, message_id: int, **kwargs: Any) -> None:
+            self.message_id = message_id
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class Update:  # type: ignore[override]
+        pass
+
+    class _FilterExpr:
+        def __or__(self, _other: Any) -> "_FilterExpr":
+            return self
+
+        def __and__(self, _other: Any) -> "_FilterExpr":
+            return self
+
+        def __invert__(self) -> "_FilterExpr":
+            return self
+
+    class _DocumentFilters:
+        ALL = _FilterExpr()
+
+    class _FiltersNamespace:
+        TEXT = _FilterExpr()
+        PHOTO = _FilterExpr()
+        VOICE = _FilterExpr()
+        AUDIO = _FilterExpr()
+        COMMAND = _FilterExpr()
+        Document = _DocumentFilters()
+
+    filters = _FiltersNamespace()  # type: ignore[assignment]
+
+    class CommandHandler:  # type: ignore[override]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _ = args, kwargs
+
+    class MessageHandler:  # type: ignore[override]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _ = args, kwargs
+
+    class ContextTypes:  # type: ignore[override]
+        DEFAULT_TYPE = Any
+
+    class _ApplicationBuilder:
+        def token(self, _token: str) -> "_ApplicationBuilder":
+            return self
+
+        def request(self, _request: Any) -> "_ApplicationBuilder":
+            return self
+
+        def get_updates_request(self, _request: Any) -> "_ApplicationBuilder":
+            return self
+
+        def proxy(self, _proxy: str) -> "_ApplicationBuilder":
+            return self
+
+        def get_updates_proxy(self, _proxy: str) -> "_ApplicationBuilder":
+            return self
+
+        def build(self) -> Any:
+            return SimpleNamespace()
+
+    class Application:  # type: ignore[override]
+        @staticmethod
+        def builder() -> _ApplicationBuilder:
+            return _ApplicationBuilder()
+
+    class HTTPXRequest:  # type: ignore[override]
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import TelegramConfig
 
 #region Telegram辅助方法
@@ -144,6 +228,33 @@ class TelegramChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
         self._media_group_buffers: dict[str, dict] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
+        self._message_threads: dict[tuple[str, int], int] = {}
+
+    def is_allowed(self, sender_id: str) -> bool:
+        """Preserve Telegram's legacy id|username allowlist matching."""
+        sender_str = str(sender_id)
+        if "|" in sender_str:
+            if sender_str.count("|") != 1:
+                return False
+
+            allow_list = getattr(self.config, "allow_from", [])
+            if not allow_list or "*" in allow_list:
+                return False
+
+            sid, username = sender_str.split("|", 1)
+            if not sid.isdigit() or not username:
+                return False
+
+            return sid in allow_list or username in allow_list or sender_str in allow_list
+
+        if super().is_allowed(sender_id):
+            return True
+
+        allow_list = getattr(self.config, "allow_from", [])
+        if not allow_list or "*" in allow_list:
+            return False
+
+        return False
 
     async def start(self) -> None:
         """用处，参数
@@ -158,10 +269,14 @@ class TelegramChannel(BaseChannel):
         self._running = True
 
         # Build the application with larger connection pool to avoid pool-timeout on long runs
-        req = HTTPXRequest(connection_pool_size=16, pool_timeout=5.0, connect_timeout=30.0, read_timeout=30.0)
+        req = HTTPXRequest(
+            connection_pool_size=16,
+            pool_timeout=5.0,
+            connect_timeout=30.0,
+            read_timeout=30.0,
+            proxy=self.config.proxy if self.config.proxy else None,
+        )
         builder = Application.builder().token(self.config.token).request(req).get_updates_request(req)
-        if self.config.proxy:
-            builder = builder.proxy(self.config.proxy).get_updates_proxy(self.config.proxy)
         self._app = builder.build()
         self._app.add_error_handler(self._on_error)
 
@@ -263,10 +378,14 @@ class TelegramChannel(BaseChannel):
             logger.error("Invalid chat_id: {}", msg.chat_id)
             return
 
+        metadata = msg.metadata or {}
         reply_params = None
+        message_thread_id = metadata.get("message_thread_id")
         if self.config.reply_to_message:
-            reply_to_message_id = msg.metadata.get("message_id")
+            reply_to_message_id = metadata.get("message_id")
             if reply_to_message_id:
+                if message_thread_id is None:
+                    message_thread_id = self._message_threads.get((msg.chat_id, int(reply_to_message_id)))
                 reply_params = ReplyParameters(
                     message_id=reply_to_message_id,
                     allow_sending_without_reply=True
@@ -286,6 +405,7 @@ class TelegramChannel(BaseChannel):
                     await sender(
                         chat_id=chat_id,
                         **{param: f},
+                        message_thread_id=message_thread_id,
                         reply_parameters=reply_params
                     )
             except Exception as e:
@@ -294,6 +414,7 @@ class TelegramChannel(BaseChannel):
                 await self._app.bot.send_message(
                     chat_id=chat_id,
                     text=f"[Failed to send: {filename}]",
+                    message_thread_id=message_thread_id,
                     reply_parameters=reply_params
                 )
 
@@ -306,6 +427,7 @@ class TelegramChannel(BaseChannel):
                         chat_id=chat_id,
                         text=html,
                         parse_mode="HTML",
+                        message_thread_id=message_thread_id,
                         reply_parameters=reply_params
                     )
                 except Exception as e:
@@ -314,6 +436,7 @@ class TelegramChannel(BaseChannel):
                         await self._app.bot.send_message(
                             chat_id=chat_id,
                             text=chunk,
+                            message_thread_id=message_thread_id,
                             reply_parameters=reply_params
                         )
                     except Exception as e2:
@@ -360,6 +483,16 @@ class TelegramChannel(BaseChannel):
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
 
+    @staticmethod
+    def _derive_topic_session_key(message) -> str | None:
+        chat = getattr(message, "chat", None)
+        chat_type = getattr(chat, "type", None)
+        thread_id = getattr(message, "message_thread_id", None)
+        chat_id = getattr(message, "chat_id", None)
+        if chat_type == "supergroup" and thread_id is not None and chat_id is not None:
+            return f"telegram:{chat_id}:topic:{thread_id}"
+        return None
+
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """用处，参数
 
@@ -387,9 +520,12 @@ class TelegramChannel(BaseChannel):
         user = update.effective_user
         chat_id = message.chat_id
         sender_id = self._sender_id(user)
+        message_thread_id = getattr(message, "message_thread_id", None)
 
         # Store chat_id for replies
         self._chat_ids[sender_id] = chat_id
+        if message_thread_id is not None:
+            self._message_threads[(str(chat_id), int(message.message_id))] = int(message_thread_id)
 
         # Build content from text and/or media
         content_parts = []
@@ -425,11 +561,11 @@ class TelegramChannel(BaseChannel):
                 ext = self._get_extension(media_type, getattr(media_file, 'mime_type', None))
 
                 # Save to workspace/media/
-                from pathlib import Path
-                media_dir = Path.home() / ".nanobot" / "media"
+                media_dir = get_media_dir()
                 media_dir.mkdir(parents=True, exist_ok=True)
 
-                file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
+                original_filename = getattr(media_file, "file_name", None)
+                file_path = media_dir / f"{media_file.file_id[:16]}{self._get_extension(media_type, getattr(media_file, 'mime_type', None), original_filename)}"
                 await file.download_to_drive(str(file_path))
 
                 media_paths.append(str(file_path))
@@ -491,11 +627,13 @@ class TelegramChannel(BaseChannel):
             media=media_paths,
             metadata={
                 "message_id": message.message_id,
+                "message_thread_id": message_thread_id,
                 "user_id": user.id,
                 "username": user.username,
                 "first_name": user.first_name,
                 "is_group": message.chat.type != "private"
-            }
+            },
+            session_key=self._derive_topic_session_key(message),
         )
 
     async def _flush_media_group(self, key: str) -> None:
@@ -560,7 +698,7 @@ class TelegramChannel(BaseChannel):
         """
         logger.error("Telegram error: {}", context.error)
 
-    def _get_extension(self, media_type: str, mime_type: str | None) -> str:
+    def _get_extension(self, media_type: str, mime_type: str | None, original_filename: str | None = None) -> str:
         """用处，参数
 
         功能:
@@ -573,6 +711,11 @@ class TelegramChannel(BaseChannel):
             }
             if mime_type in ext_map:
                 return ext_map[mime_type]
+
+        if original_filename and "." in original_filename:
+            suffix = original_filename[original_filename.find("."):]
+            if suffix:
+                return suffix
 
         type_map = {"image": ".jpg", "voice": ".ogg", "audio": ".mp3", "file": ""}
         return type_map.get(media_type, "")

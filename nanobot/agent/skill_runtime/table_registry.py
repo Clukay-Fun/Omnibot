@@ -37,7 +37,7 @@ class TableRegistry:
             - 初始化内置与工作区映射文件路径。
         """
         self._workspace = workspace
-        self._builtin_path = builtin_path or Path(__file__).resolve().parents[2] / "skills" / "table_registry.yaml"
+        self._builtin_path = builtin_path or Path(__file__).resolve().parents[2] / "skills" / "registry" / "table_registry.yaml"
         self._workspace_path = (workspace / "skills" / "table_registry.yaml") if workspace else None
         self._profile_cache = TableProfileCache(workspace=workspace)
         self._profile_synthesizer = profile_synthesizer
@@ -251,12 +251,12 @@ class TableRegistry:
         metadata: dict[str, Any],
     ) -> dict[str, Any]:
         display_name = str(metadata.get("display_name") or table_name or alias).strip() or alias
-        alias_items = metadata.get("aliases") if isinstance(metadata.get("aliases"), list) else []
-        configured_aliases = [
-            str(item).strip()
-            for item in alias_items
-            if isinstance(item, str) and str(item).strip()
-        ]
+        configured_aliases: list[str] = []
+        aliases_value = metadata.get("aliases")
+        if isinstance(aliases_value, list):
+            for item in aliases_value:
+                if isinstance(item, str) and item.strip():
+                    configured_aliases.append(item.strip())
         aliases: list[str] = []
         for item in [display_name, alias, *configured_aliases, *self._default_aliases(display_name, alias)]:
             candidate = str(item or "").strip()

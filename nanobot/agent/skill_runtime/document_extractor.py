@@ -99,7 +99,7 @@ def load_extract_templates(workspace_root: Path | None = None) -> dict[str, Extr
     """
     templates: dict[str, ExtractTemplate] = {}
 
-    builtin_dir = files("nanobot") / "skills" / "extract_templates"
+    builtin_dir = files("nanobot") / "skills" / "extract"
     for resource in builtin_dir.iterdir():
         if resource.name.endswith((".yaml", ".yml")):
             data = yaml.safe_load(resource.read_text(encoding="utf-8"))

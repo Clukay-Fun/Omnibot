@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
 import weakref
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
@@ -822,8 +824,14 @@ class AgentLoop:
         return preferred_name if preferred_name != "你" else "小律"
 
     @staticmethod
-    def _workspace_template_path(filename: str) -> Path:
-        return Path(__file__).resolve().parent.parent / "templates" / filename
+    def _read_packaged_workspace_template(filename: str) -> str:
+        resource = resource_files("nanobot") / "templates" / "workspace" / filename
+        try:
+            if resource.is_file():
+                return resource.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        return ""
 
     def _read_workspace_or_template_file(self, filename: str, runtime: PromptContext | None = None) -> str:
         if runtime is not None and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"}:
@@ -835,12 +843,16 @@ class AgentLoop:
                 except OSError:
                     pass
 
-        for path in (self.workspace / filename, self._workspace_template_path(filename)):
-            try:
-                if path.exists():
-                    return path.read_text(encoding="utf-8")
-            except OSError:
-                continue
+        path = self.workspace / filename
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+
+        packaged = self._read_packaged_workspace_template(filename)
+        if packaged:
+            return packaged
         return ""
 
     def _build_bootstrap_identity_summary(self, runtime: PromptContext | None = None) -> str:
@@ -1883,12 +1895,27 @@ class AgentLoop:
         timings: list[dict[str, int | str | bool]] = []
         thinking_done_sent = False
         thinking_detail_emitted = False
+        progress_signature = inspect.signature(on_progress) if on_progress is not None else None
+        progress_params = progress_signature.parameters if progress_signature is not None else {}
+        progress_accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in progress_params.values()
+        )
+        progress_supports_phase = progress_accepts_kwargs or "phase" in progress_params
+        progress_supports_tool_hint = progress_accepts_kwargs or "tool_hint" in progress_params
+        legacy_progress_mode = on_progress is not None and not progress_supports_phase
 
         async def _emit_progress(content: str, **kwargs: Any) -> None:
             if not on_progress:
                 return
+            filtered_kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if progress_accepts_kwargs
+                or (key == "phase" and progress_supports_phase)
+                or (key == "tool_hint" and progress_supports_tool_hint)
+            }
             try:
-                await on_progress(content, **kwargs)
+                await on_progress(content, **filtered_kwargs)
             except TypeError:
                 await on_progress(content)
 
@@ -2024,10 +2051,18 @@ class AgentLoop:
             })
 
             if response.has_tool_calls:
-                thinking_detail = self._build_thinking_detail(response)
-                if thinking_detail:
-                    await _emit_progress(thinking_detail, phase="thinking")
-                    thinking_detail_emitted = True
+                if not legacy_progress_mode:
+                    thinking_detail = self._build_thinking_detail(response)
+                    if thinking_detail:
+                        await _emit_progress(thinking_detail, phase="thinking")
+                        thinking_detail_emitted = True
+                else:
+                    visible_content = self._strip_think(response.content)
+                    if visible_content:
+                        await _emit_progress(visible_content)
+                    tool_hint = self._tool_hint(response.tool_calls)
+                    if tool_hint:
+                        await _emit_progress(tool_hint, tool_hint=True)
 
                 tool_call_dicts = [
                     {
@@ -2051,7 +2086,7 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     args_preview = self._short_text(tool_call.arguments, limit=160)
-                    if args_preview:
+                    if not legacy_progress_mode and args_preview:
                         template = self._runtime_text.prompt_text(
                             "progress", "call_tool_with_args", "调用 {tool}，参数：{args}"
                         )
@@ -2060,7 +2095,7 @@ class AgentLoop:
                             phase="thinking",
                         )
                         thinking_detail_emitted = True
-                    else:
+                    elif not legacy_progress_mode:
                         template = self._runtime_text.prompt_text(
                             "progress", "call_tool_no_args", "正在调用 {tool} ..."
                         )
@@ -2126,7 +2161,7 @@ class AgentLoop:
                                 if pending_preview is not None
                                 else self._short_text(followup_result, limit=200)
                             )
-                    if result_preview:
+                    if not legacy_progress_mode and result_preview:
                         template = self._runtime_text.prompt_text(
                             "progress", "tool_result", "{tool} 结果：{result}"
                         )
@@ -2135,7 +2170,7 @@ class AgentLoop:
                             phase="thinking",
                         )
                         thinking_detail_emitted = True
-                    else:
+                    elif not legacy_progress_mode:
                         template = self._runtime_text.prompt_text(
                             "progress", "tool_done", "{tool} 完成，继续思考中..."
                         )
@@ -2162,11 +2197,12 @@ class AgentLoop:
                 if final_content is not None:
                     break
 
-                await _emit_progress(
-                    self._runtime_text.prompt_text("progress", "data_ready", "已获取数据，正在整理答案..."),
-                    phase="thinking",
-                )
-                thinking_detail_emitted = True
+                if not legacy_progress_mode:
+                    await _emit_progress(
+                        self._runtime_text.prompt_text("progress", "data_ready", "已获取数据，正在整理答案..."),
+                        phase="thinking",
+                    )
+                    thinking_detail_emitted = True
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -2183,7 +2219,7 @@ class AgentLoop:
                     )
                     thinking_done_sent = True
 
-                if on_progress and clean and not published_stream:
+                if not legacy_progress_mode and on_progress and clean and not published_stream:
                     await _emit_progress(clean, phase="answer")
 
                 messages = self.context.add_assistant_message(
@@ -2200,6 +2236,8 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
+        if legacy_progress_mode:
+            return final_content, tools_used, messages
         return final_content, tools_used, messages, timings
 
     async def run(self) -> None:
@@ -2950,12 +2988,20 @@ class AgentLoop:
                         continue
                     entry["content"] = restored
                 if isinstance(content, list):
-                    entry["content"] = [
-                        {"type": "text", "text": "[image]"} if (
-                            c.get("type") == "image_url"
-                            and c.get("image_url", {}).get("url", "").startswith("data:image/")
-                        ) else c for c in content
-                    ]
+                    cleaned_content: list[dict[str, Any]] = []
+                    for c in content:
+                        if not isinstance(c, dict):
+                            cleaned_content.append(c)
+                            continue
+                        if c.get("type") == "text" and str(c.get("text") or "").startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                            continue
+                        if c.get("type") == "image_url" and c.get("image_url", {}).get("url", "").startswith("data:image/"):
+                            cleaned_content.append({"type": "text", "text": "[image]"})
+                            continue
+                        cleaned_content.append(c)
+                    if not cleaned_content:
+                        continue
+                    entry["content"] = cleaned_content
             entry.setdefault("timestamp", datetime.now().isoformat())
             session.messages.append(entry)
         session.updated_at = datetime.now()

@@ -86,9 +86,10 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
     from importlib.resources import files as pkg_files
     try:
         tpl = pkg_files("nanobot") / "templates"
+        workspace_tpl = tpl / "workspace"
     except Exception:
         return []
-    if not tpl.is_dir():
+    if not tpl.is_dir() or not workspace_tpl.is_dir():
         return []
 
     added: list[str] = []
@@ -100,10 +101,10 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         dest.write_text(src.read_text(encoding="utf-8") if src else "", encoding="utf-8")
         added.append(str(dest.relative_to(workspace)))
 
-    for item in tpl.iterdir():
+    for item in workspace_tpl.iterdir():
         if item.name.endswith(".md"):
             _write(item, workspace / item.name)
-    _write(tpl / "runtime_texts.yaml", workspace / "runtime_texts.yaml")
+    _write(workspace_tpl / "runtime_texts.yaml", workspace / "runtime_texts.yaml")
     _write(tpl / "memory" / "MEMORY.md", workspace / "MEMORY.md")
     _write(tpl / "memory" / "MEMORY.md", workspace / "memory" / "MEMORY.md")
     _write(None, workspace / "memory" / "HISTORY.md")
@@ -115,7 +116,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         pass
 
     try:
-        extract_tpl = pkg_files("nanobot") / "skills" / "extract_templates"
+        extract_tpl = pkg_files("nanobot") / "skills" / "extract"
         if extract_tpl.is_dir():
             for item in extract_tpl.iterdir():
                 if item.name.endswith((".yaml", ".yml")):
@@ -124,7 +125,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         pass
 
     try:
-        table_registry_tpl = pkg_files("nanobot") / "skills" / "table_registry.yaml"
+        table_registry_tpl = pkg_files("nanobot") / "skills" / "registry" / "table_registry.yaml"
         if table_registry_tpl.is_file():
             _write(table_registry_tpl, workspace / "skills" / "table_registry.yaml")
     except Exception:

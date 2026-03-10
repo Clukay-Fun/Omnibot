@@ -1,9 +1,10 @@
+.worktrees/
 .assets
 .env
 *.pyc
 dist/
 build/
-docs/
+docs/plans/
 *.egg-info/
 *.egg
 *.pyc
@@ -19,5 +20,6 @@ __pycache__/
 poetry.lock
 .pytest_cache/
 botpy.log
+/config.json
 tests/
 .ruff_cache/

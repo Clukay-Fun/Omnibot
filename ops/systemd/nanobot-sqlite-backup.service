@@ -6,4 +6,4 @@ After=network.target
 Type=oneshot
 # Update paths for your deployment
 WorkingDirectory=/opt/omnibot
-ExecStart=/usr/bin/python3.11 /opt/omnibot/scripts/ops/sqlite_backup_rotate.py
+ExecStart=/usr/bin/python3.11 /opt/omnibot/ops/maintenance/sqlite_backup_rotate.py

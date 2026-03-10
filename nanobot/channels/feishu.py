@@ -429,6 +429,10 @@ def _extract_post_content(content_json: dict) -> tuple[str, list[str]]:
         text = " ".join(text_parts).strip() if text_parts else None
         return text, image_keys
 
+    post_wrapper = content_json.get("post")
+    if isinstance(post_wrapper, dict):
+        content_json = post_wrapper
+
     # Try direct format first
     if "content" in content_json:
         text, images = extract_from_lang(content_json)
@@ -849,25 +853,42 @@ class FeishuChannel(BaseChannel):
         self._cron_service.stop()
         logger.info("Feishu bot stopped")
 
-    def _register_optional_event(self, builder: Any, names: list[str], handler: Any) -> Any:
+    def _register_optional_event(self_or_builder: Any, builder_or_names: Any, names_or_handler: Any = None, handler: Any = None) -> Any:
+        if handler is None:
+            owner = None
+            builder = self_or_builder
+            names = builder_or_names
+            handler = names_or_handler
+        else:
+            owner = self_or_builder
+            builder = builder_or_names
+            names = names_or_handler
+
+        if isinstance(names, str):
+            names = [names]
+        elif not isinstance(names, list):
+            names = list(names or [])
+
         for name in names:
             register = getattr(builder, name, None)
             if callable(register):
                 logger.info("Feishu optional event registered: {}", name)
-                self._event_registration_report.append({
-                    "requested": names,
-                    "method": name,
-                    "status": "registered",
-                })
-                self._persist_event_registration_report()
+                if owner is not None and hasattr(owner, "_event_registration_report"):
+                    owner._event_registration_report.append({
+                        "requested": names,
+                        "method": name,
+                        "status": "registered",
+                    })
+                    owner._persist_event_registration_report()
                 return register(handler)
         logger.debug("Feishu optional event not available: {}", "/".join(names))
-        self._event_registration_report.append({
-            "requested": names,
-            "method": None,
-            "status": "skipped",
-        })
-        self._persist_event_registration_report()
+        if owner is not None and hasattr(owner, "_event_registration_report"):
+            owner._event_registration_report.append({
+                "requested": names,
+                "method": None,
+                "status": "skipped",
+            })
+            owner._persist_event_registration_report()
         return builder
 
     def _register_optional_noop_events(self, builder: Any) -> Any:
@@ -944,6 +965,33 @@ class FeishuChannel(BaseChannel):
 
     # 飞书卡片中表格数量上限（超出后以 markdown 文本形式保留）
     _MAX_CARD_TABLES = 5
+
+    @staticmethod
+    def _split_elements_by_table_limit(elements: list[dict]) -> list[list[dict]]:
+        """Split card elements so each group contains at most one table element."""
+        if not elements:
+            return [[]]
+
+        groups: list[list[dict]] = []
+        pending: list[dict] = []
+
+        for element in elements:
+            is_table = isinstance(element, dict) and element.get("tag") == "table"
+            if not is_table:
+                pending.append(element)
+                continue
+
+            if groups:
+                groups.append([*pending, element])
+            else:
+                groups.append([*pending, element])
+            pending = []
+
+        if not groups:
+            return [pending]
+
+        groups[-1].extend(pending)
+        return groups
 
     def _build_card_elements(self, content: str) -> list[dict]:
         """将文本内容拆分为包含 div/markdown 与 table 等 Feishu 卡片所需的结构化元素。"""
