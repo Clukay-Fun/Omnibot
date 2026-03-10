@@ -7,7 +7,6 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import SkillSpecConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -144,7 +143,6 @@ async def test_ordinary_feishu_queries_bypass_pre_llm_routing(tmp_path, content,
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
     if tool is not None:
         loop.tools.register(tool())
@@ -167,7 +165,6 @@ async def test_feishu_followup_overview_inherits_previous_query_context(tmp_path
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     loop.tools.register(_FakeTableListTool())
 
@@ -191,7 +188,6 @@ async def test_continuation_pages_recent_directory_hits_without_llm(tmp_path) ->
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     session = loop.sessions.get_or_create("feishu:ou_chat")
     session.metadata["recent_directory_hits"] = [
@@ -224,7 +220,6 @@ async def test_continuation_keeps_global_selection_numbers_on_later_pages(tmp_pa
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     session = loop.sessions.get_or_create("feishu:ou_chat")
     session.metadata["result_selection"] = {
@@ -252,7 +247,6 @@ async def test_prepare_create_ambiguous_result_returns_to_main_llm(tmp_path) -> 
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     loop.tools.register(_FakePrepareCreateTool())
 

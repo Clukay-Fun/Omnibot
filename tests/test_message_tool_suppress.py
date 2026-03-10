@@ -13,7 +13,7 @@ from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ChannelsConfig, FeishuConfig, SkillSpecConfig
+from nanobot.config.schema import ChannelsConfig, FeishuConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -229,7 +229,7 @@ class TestAgentSlashCommands:
     @pytest.mark.asyncio
     async def test_legacy_workflow_mode_metadata_no_longer_hides_tools(self, tmp_path: Path) -> None:
         provider = _WorkflowProvider()
-        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path, skillspec_config=SkillSpecConfig(enabled=False))
+        loop = AgentLoop(bus=MessageBus(), provider=provider, workspace=tmp_path)
         loop.tools.register(_DummyTool())
         session = loop.sessions.get_or_create("cli:chat")
         session.metadata["workflow_mode"] = "plan"
@@ -259,7 +259,6 @@ async def test_bootstrap_turn_preserves_original_user_message_in_session_history
                 onboarding_guide_once=True,
             )
         ),
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(

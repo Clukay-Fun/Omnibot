@@ -7,7 +7,7 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.user_state import UserMemoryStore
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import ChannelsConfig, FeishuConfig, SkillSpecConfig
+from nanobot.config.schema import ChannelsConfig, FeishuConfig
 from nanobot.providers.base import LLMResponse
 
 
@@ -41,7 +41,6 @@ def _build_loop(tmp_path):
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
     return loop, provider
 
@@ -63,7 +62,6 @@ async def test_non_blocking_onboarding_prompts_once_without_blocking_dialogue(tm
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     first = await loop._process_message(
@@ -134,7 +132,6 @@ async def test_setup_reentry_uses_bootstrap_confirmation_text(tmp_path) -> None:
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(
@@ -172,7 +169,6 @@ async def test_private_first_message_uses_bootstrap_llm_as_normal_reply(tmp_path
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(
@@ -225,7 +221,6 @@ async def test_private_setup_reentry_is_model_driven_not_fixed_guide(tmp_path) -
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(
@@ -263,7 +258,6 @@ async def test_private_p2p_chat_create_bootstrap_is_model_driven(tmp_path) -> No
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(
@@ -342,7 +336,6 @@ Update these files with what you learned:
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(
@@ -389,7 +382,6 @@ async def test_private_setup_seeds_user_persona_files_from_workspace_defaults(tm
         provider=provider,
         workspace=tmp_path,
         channels_config=channels,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     response = await loop._process_message(

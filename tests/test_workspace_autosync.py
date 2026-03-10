@@ -7,7 +7,7 @@ from nanobot.agent.documents.document_extractor import load_extract_templates
 from nanobot.agent.table_runtime.table_registry import TableRegistry
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.feishu import FeishuChannel
-from nanobot.config.schema import FeishuConfig, SkillSpecConfig
+from nanobot.config.schema import FeishuConfig
 from nanobot.providers.base import LLMResponse
 from nanobot.utils.helpers import sync_workspace_templates
 
@@ -26,7 +26,6 @@ def test_agent_loop_auto_syncs_missing_workspace_templates(tmp_path) -> None:
         bus=MessageBus(),
         provider=cast(Any, _DummyProvider()),
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
 
     assert (tmp_path / "BOOTSTRAP.md").exists()
@@ -94,7 +93,6 @@ def test_agent_loop_reads_packaged_workspace_template_when_workspace_copy_missin
         bus=MessageBus(),
         provider=cast(Any, _DummyProvider()),
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=True),
     )
     (tmp_path / "BOOTSTRAP.md").unlink()
 

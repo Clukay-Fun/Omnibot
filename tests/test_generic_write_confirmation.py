@@ -7,7 +7,6 @@ from nanobot.agent.loop import AgentLoop
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import SkillSpecConfig
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 
 
@@ -166,7 +165,6 @@ def _build_loop(tmp_path, provider: _ScriptedProvider) -> AgentLoop:
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     return loop
 
@@ -201,7 +199,6 @@ async def test_directory_query_reaches_main_llm_without_coordinator_short_circui
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     directory_tool = _FakeDirectorySearchTool()
     loop.tools.register(directory_tool)
@@ -224,7 +221,6 @@ async def test_named_lookup_reaches_main_llm_without_coordinator_short_circuit(t
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     directory_tool = _FakeDirectorySearchTool()
     loop.tools.register(directory_tool)
@@ -430,7 +426,6 @@ async def test_followup_without_pending_write_falls_back_to_normal_flow(tmp_path
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     session = loop.sessions.get_or_create("cli:chat")
     session.add_message("user", "你好")
@@ -500,7 +495,6 @@ async def test_pending_write_free_text_followup_falls_back_to_main_llm(tmp_path)
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
-        skillspec_config=SkillSpecConfig(enabled=False),
     )
     create_tool = _FakeCreateTool()
     loop.tools.register(create_tool)

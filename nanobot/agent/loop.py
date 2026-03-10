@@ -51,9 +51,7 @@ if TYPE_CHECKING:
         ChannelsConfig,
         ExecToolConfig,
         FeishuDataConfig,
-        ProviderConfig,
         ResponseTemplateConfig,
-        SkillSpecConfig,
     )
     from nanobot.cron.service import CronService
     from nanobot.oauth.feishu import FeishuOAuthService
@@ -105,12 +103,8 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         feishu_data_config: "FeishuDataConfig | None" = None,
         response_template_config: "ResponseTemplateConfig | None" = None,
-        skillspec_config: "SkillSpecConfig | None" = None,
-        skillspec_embedding_provider_config: "ProviderConfig | None" = None,
         llm_timeout_seconds: float = 90.0,
         stage_heartbeat_seconds: float = 15.0,
-        skillspec_render_primary_timeout_seconds: float = 12.0,
-        skillspec_render_retry_timeout_seconds: float = 6.0,
         feishu_oauth_service: "FeishuOAuthService | None" = None,
         state_db_path: Path | None = None,
         sqlite_options: SQLiteConnectionOptions | None = None,
@@ -1621,82 +1615,6 @@ class AgentLoop:
         logger.info("Coordinator hit: {} session={} source={}", name, session_key, source)
 
     @staticmethod
-    def _looks_like_feishu_query_prompt(text: str) -> bool:
-        lowered = text.strip().lower()
-        if not lowered:
-            return False
-        query_tokens = (
-            "通讯录",
-            "联系人",
-            "同事",
-            "open_id",
-            "邮箱",
-            "手机号",
-            "电话",
-            "表格",
-            "多维表格",
-            "bitable",
-            "字段",
-            "schema",
-            "视图",
-            "table_id",
-            "日历",
-            "日程",
-            "会议",
-            "空闲",
-            "任务",
-            "待办",
-            "聊天记录",
-            "消息历史",
-            "周工作计划",
-            "工作计划表",
-            "查看",
-            "列出",
-            "展示",
-            "导出",
-            "最近20条",
-            "最近 20 条",
-            "全部内容",
-            "所有内容",
-        )
-        return any(token in lowered for token in query_tokens) or bool(
-            re.match(r"^\s*(?:帮我)?(?:查|找|搜|看)(?:一下)?\s*[\w.@\-\u4e00-\u9fff]{2,80}\s*$", text)
-        )
-
-    @classmethod
-    def _inherits_feishu_query_context(cls, session: Session | None, text: str) -> bool:
-        normalized = re.sub(r"\s+", "", text.strip().lower())
-        if normalized not in {
-            "概览",
-            "全量",
-            "全部",
-            "全部内容",
-            "所有",
-            "所有内容",
-            "最近20条",
-            "最近10条",
-            "最近5条",
-            "最近20",
-            "最近10",
-            "最近5",
-            "详情",
-            "详细",
-        }:
-            return False
-        if session is None:
-            return False
-        recent_selected_table = session.metadata.get("recent_selected_table")
-        if isinstance(recent_selected_table, dict) and recent_selected_table:
-            return True
-        for item in reversed(session.messages[-8:]):
-            if not isinstance(item, dict) or item.get("role") != "user":
-                continue
-            content = item.get("content")
-            if isinstance(content, str) and cls._looks_like_feishu_query_prompt(content):
-                return True
-        return False
-
-    @staticmethod
     def _tool_exposure_context_for_message(msg: InboundMessage, *, session: Session | None = None) -> ToolExposureContext:
         metadata = dict(msg.metadata or {})
         text = msg.content.strip().lower()
@@ -1709,8 +1627,6 @@ class AgentLoop:
                 mode = "main_write_commit"
             elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
                 mode = "main_write_prepare"
-            elif AgentLoop._looks_like_feishu_query_prompt(msg.content) or AgentLoop._inherits_feishu_query_context(session, msg.content):
-                mode = "main_feishu_query"
             else:
                 mode = "main_chat_readonly"
         return ToolExposureContext(
