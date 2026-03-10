@@ -10,12 +10,6 @@ from nanobot.feishu.types import TranslatedFeishuMessage
 
 
 class _FakeClient:
-    def __init__(self) -> None:
-        self.reactions: list[tuple[str, str]] = []
-
-    def add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
-        self.reactions.append((message_id, emoji_type))
-
     def download_image_sync(self, message_id: str, image_key: str):
         return b"image-bytes", f"{image_key}.jpg"
 
@@ -26,7 +20,7 @@ class _FakeClient:
 @pytest.mark.asyncio
 async def test_media_loader_downloads_post_images(tmp_path: Path) -> None:
     client = _FakeClient()
-    loader = FeishuInboundMediaLoader(lambda: client, groq_api_key="", react_emoji="THUMBSUP")
+    loader = FeishuInboundMediaLoader(lambda: client, groq_api_key="")
     translated = TranslatedFeishuMessage(
         sender_id="ou_user_1",
         chat_id="ou_user_1",
@@ -43,7 +37,6 @@ async def test_media_loader_downloads_post_images(tmp_path: Path) -> None:
     with patch("nanobot.feishu.media.get_media_dir", return_value=tmp_path):
         await loader.load_translated_media(None, translated)
 
-    assert client.reactions == [("om_1", "THUMBSUP")]
     assert len(translated.media) == 1
     assert translated.content.endswith("[image: img_1.jpg]")
 
@@ -51,7 +44,7 @@ async def test_media_loader_downloads_post_images(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_media_loader_downloads_file_message(tmp_path: Path) -> None:
     client = _FakeClient()
-    loader = FeishuInboundMediaLoader(lambda: client, groq_api_key="", react_emoji="THUMBSUP")
+    loader = FeishuInboundMediaLoader(lambda: client, groq_api_key="")
     translated = TranslatedFeishuMessage(
         sender_id="ou_user_1",
         chat_id="ou_user_1",

@@ -45,30 +45,6 @@ class FeishuClient:
     def resolve_receive_id_type(receive_id: str) -> str:
         return "chat_id" if receive_id.startswith("oc_") else "open_id"
 
-    def add_reaction_sync(self, message_id: str, emoji_type: str) -> None:
-        """Sync helper for adding reaction (runs in thread pool)."""
-        from lark_oapi.api.im.v1 import CreateMessageReactionRequest, CreateMessageReactionRequestBody, Emoji
-
-        try:
-            request = (
-                CreateMessageReactionRequest.builder()
-                .message_id(message_id)
-                .request_body(
-                    CreateMessageReactionRequestBody.builder()
-                    .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
-                    .build()
-                )
-                .build()
-            )
-            response = self.sdk_client.im.v1.message_reaction.create(request)
-
-            if not response.success():
-                logger.warning("Failed to add reaction: code={}, msg={}", response.code, response.msg)
-            else:
-                logger.debug("Added {} reaction to message {}", emoji_type, message_id)
-        except Exception as e:
-            logger.warning("Error adding reaction: {}", e)
-
     def upload_image_sync(self, file_path: str) -> str | None:
         """Upload an image to Feishu and return the image_key."""
         from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageRequestBody
@@ -183,8 +159,66 @@ class FeishuClient:
             logger.exception("Error downloading {} {}", resource_type, file_key)
             return None, None
 
-    def send_message_sync(self, receive_id_type: str, receive_id: str, msg_type: str, content: str) -> bool:
-        """Send a single message (text/image/file/interactive) synchronously."""
+    def reply_message_sync(
+        self,
+        message_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_in_thread: bool = False,
+    ) -> str | None:
+        """Reply to a Feishu message and return the new message_id."""
+        from lark_oapi.api.im.v1 import ReplyMessageRequest, ReplyMessageRequestBody
+
+        try:
+            request = (
+                ReplyMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    ReplyMessageRequestBody.builder()
+                    .msg_type(msg_type)
+                    .content(content)
+                    .reply_in_thread(reply_in_thread)
+                    .build()
+                )
+                .build()
+            )
+            response = self.sdk_client.im.v1.message.reply(request)
+            if not response.success():
+                logger.error(
+                    "Failed to reply with Feishu {} message: code={}, msg={}, log_id={}",
+                    msg_type,
+                    response.code,
+                    response.msg,
+                    response.get_log_id(),
+                )
+                return None
+            replied_id = getattr(response.data, "message_id", None)
+            logger.debug("Feishu {} reply created for source {}", msg_type, message_id)
+            return str(replied_id) if replied_id else None
+        except Exception as e:
+            logger.error("Error replying with Feishu {} message: {}", msg_type, e)
+            return None
+
+    def _create_or_reply_message_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        reply_to: str | None = None,
+        reply_in_thread: bool = False,
+    ) -> str | None:
+        """Create a new message or reply to an existing message."""
+        if reply_to:
+            return self.reply_message_sync(
+                reply_to,
+                msg_type,
+                content,
+                reply_in_thread=reply_in_thread,
+            )
+
         from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
         try:
@@ -203,15 +237,91 @@ class FeishuClient:
             response = self.sdk_client.im.v1.message.create(request)
             if not response.success():
                 logger.error(
-                    "Failed to send Feishu {} message: code={}, msg={}, log_id={}",
+                    "Failed to create Feishu {} message: code={}, msg={}, log_id={}",
                     msg_type,
                     response.code,
                     response.msg,
                     response.get_log_id(),
                 )
+                return None
+            message_id = getattr(response.data, "message_id", None)
+            logger.debug("Feishu {} message created for {}", msg_type, receive_id)
+            return str(message_id) if message_id else None
+        except Exception as e:
+            logger.error("Error creating Feishu {} message: {}", msg_type, e)
+            return None
+
+    def patch_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
+        """Patch an existing Feishu message."""
+        from lark_oapi.api.im.v1 import PatchMessageRequest, PatchMessageRequestBody
+
+        try:
+            request = (
+                PatchMessageRequest.builder()
+                .message_id(message_id)
+                .request_body(
+                    PatchMessageRequestBody.builder()
+                    .content(content)
+                    .build()
+                )
+                .build()
+            )
+            response = self.sdk_client.im.v1.message.patch(request)
+            if not response.success():
+                logger.error(
+                    "Failed to patch Feishu {} message {}: code={}, msg={}, log_id={}",
+                    msg_type,
+                    message_id,
+                    response.code,
+                    response.msg,
+                    response.get_log_id(),
+                )
                 return False
-            logger.debug("Feishu {} message sent to {}", msg_type, receive_id)
+            logger.debug("Patched Feishu {} message {}", msg_type, message_id)
             return True
         except Exception as e:
-            logger.error("Error sending Feishu {} message: {}", msg_type, e)
+            logger.error("Error patching Feishu {} message {}: {}", msg_type, message_id, e)
             return False
+
+    def create_message_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        reply_to: str | None = None,
+        *,
+        reply_in_thread: bool = False,
+    ) -> str | None:
+        """Create a Feishu message and return its message_id."""
+        return self._create_or_reply_message_sync(
+            receive_id_type,
+            receive_id,
+            msg_type,
+            content,
+            reply_to=reply_to,
+            reply_in_thread=reply_in_thread,
+        )
+
+    def send_message_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        reply_to: str | None = None,
+        *,
+        reply_in_thread: bool = False,
+    ) -> bool:
+        """Send a single message (text/image/file/interactive) synchronously."""
+        return (
+            self.create_message_sync(
+                receive_id_type,
+                receive_id,
+                msg_type,
+                content,
+                reply_to,
+                reply_in_thread=reply_in_thread,
+            )
+            is not None
+        )

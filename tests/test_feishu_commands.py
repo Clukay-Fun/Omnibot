@@ -21,6 +21,7 @@ def _translated(command: str) -> TranslatedFeishuMessage:
         chat_id="ou_user_1",
         content=command,
         metadata={
+            "message_id": "om_1",
             "tenant_key": "tenant-1",
             "user_open_id": "ou_user_1",
             "chat_type": "p2p",
@@ -46,6 +47,7 @@ async def test_help_command_replies_without_publishing_inbound(tmp_path: Path) -
     assert isinstance(outbound, OutboundMessage)
     assert "/clear" in outbound.content
     assert "/forget" in outbound.content
+    assert outbound.reply_to == "om_1"
 
 
 @pytest.mark.asyncio
@@ -100,6 +102,7 @@ async def test_clear_command_clears_session_and_archives_in_background(tmp_path:
     outbound = respond.await_args.args[0]
     assert isinstance(outbound, OutboundMessage)
     assert "cleared" in outbound.content.lower()
+    assert outbound.reply_to == "om_1"
 
     release.set()
     await archive_service.wait_for_idle()
@@ -123,3 +126,4 @@ async def test_forget_command_clears_user_memory(tmp_path: Path) -> None:
     respond.assert_awaited_once()
     outbound = respond.await_args.args[0]
     assert "forgot" in outbound.content.lower()
+    assert outbound.reply_to == "om_1"

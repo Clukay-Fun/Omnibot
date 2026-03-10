@@ -26,6 +26,11 @@ class FeishuCommandHandler:
         self.session_manager = session_manager
         self.archive_service = archive_service
 
+    @staticmethod
+    def _reply_to(translated: TranslatedFeishuMessage) -> str | None:
+        reply_to = translated.metadata.get("message_id")
+        return str(reply_to) if reply_to else None
+
     async def handle(self, translated: TranslatedFeishuMessage) -> bool:
         command = translated.content.strip().lower()
         if command in {"/clear", "/new"}:
@@ -48,6 +53,7 @@ class FeishuCommandHandler:
                     channel="feishu",
                     chat_id=translated.chat_id,
                     content="Cleared this short-term session. I will finish archiving recent context in the background.",
+                    reply_to=self._reply_to(translated),
                 )
             )
             return True
@@ -65,6 +71,7 @@ class FeishuCommandHandler:
                         "/new — Start a new conversation\n"
                         "/stop — Stop the current task"
                     ),
+                    reply_to=self._reply_to(translated),
                 )
             )
             return True
@@ -79,6 +86,7 @@ class FeishuCommandHandler:
                     channel="feishu",
                     chat_id=translated.chat_id,
                     content="Forgot your Feishu long-term memory for this tenant.",
+                    reply_to=self._reply_to(translated),
                 )
             )
             return True

@@ -19,14 +19,12 @@ class FeishuInboundMediaLoader:
 
     def __init__(
         self,
-        client_getter: Callable[[], FeishuClient | None],
+        client_getter: Callable[[], Any | None],
         *,
         groq_api_key: str,
-        react_emoji: str,
     ):
         self._client_getter = client_getter
         self.groq_api_key = groq_api_key
-        self.react_emoji = react_emoji
 
     async def load_translated_media(
         self,
@@ -37,9 +35,6 @@ class FeishuInboundMediaLoader:
         content_json = translated.metadata.get("content_json") or {}
         message_id = translated.metadata.get("message_id")
         content_parts = [translated.content] if translated.content else []
-
-        if message_id:
-            await self._add_reaction(str(message_id), self.react_emoji)
 
         if msg_type == "post":
             for img_key in translated.metadata.get("post_image_keys", []):
@@ -62,13 +57,6 @@ class FeishuInboundMediaLoader:
             content_text = await self._transcribe_audio(file_path, content_text)
 
         translated.content = content_text
-
-    async def _add_reaction(self, message_id: str, emoji_type: str) -> None:
-        client = self._client_getter()
-        if client is None:
-            return
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, client.add_reaction_sync, message_id, emoji_type)
 
     async def _download_and_save_media(
         self,

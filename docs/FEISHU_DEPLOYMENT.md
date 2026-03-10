@@ -24,7 +24,8 @@
       "mode": "websocket",
       "appId": "cli_xxx",
       "appSecret": "xxx",
-      "allowFrom": ["ou_YOUR_OPEN_ID"]
+      "allowFrom": ["*"],
+      "groupSessionMode": "shared"
     }
   }
 }
@@ -34,7 +35,7 @@
 
 - 如果你希望消息卡片在工具使用/思考期间动态更新进度，`sendProgress: true` 是必须的。
 - `sendToolHints: true` 是可选的，但如果你希望在卡片中显示 `tool_hint` (工具提示) 补丁，则推荐开启。
-- `allowFrom` 在初步部署期间应当作为一个严格的白名单。除非你真的想开放给所有人访问，否则才使用 `["*"]`。
+- `allowFrom` 填的是飞书用户 `open_id`。如果你暂时还不知道自己的 `open_id`，第一次接入建议先用 `["*"]` 完成引导，再收紧成显式白名单。
 
 ## 推荐的完整飞书配置
 
@@ -56,8 +57,8 @@
       "appSecret": "xxx",
       "verificationToken": "",
       "encryptKey": "",
-      "allowFrom": ["ou_YOUR_OPEN_ID"],
-      "groupSessionMode": "per_user",
+      "allowFrom": ["*"],
+      "groupSessionMode": "shared",
       "memoryDbPath": "~/.nanobot-feishu/feishu-memory.sqlite3",
       "dedupeDbPath": "~/.nanobot-feishu/feishu-dedupe.sqlite3",
       "sessionTtlSeconds": 86400,
@@ -77,8 +78,8 @@
 短期会话键名 (Session keys):
 
 - 单聊 (DM): `feishu:dm:{user_open_id}`
-- 群聊默认 (基于用户): `feishu:chat:{chat_id}:user:{user_open_id}`
-- 群聊共享模式: `feishu:chat:{chat_id}`
+- 群聊默认 (共享): `feishu:chat:{chat_id}`
+- 群聊按人隔离模式: `feishu:chat:{chat_id}:user:{user_open_id}`
 
 长期记忆 (Long-term memory):
 
@@ -87,6 +88,13 @@
 - 注入策略:
   - 单聊 (DM) 会注入 `profile + summary`
   - 群聊仅注入 `profile`
+
+关于 `allowFrom` 与 BOOTSTRAP：
+
+- `BOOTSTRAP.md` 的首次引导发生在消息已经通过 ACL 之后。
+- 当前系统不会在第一次对话后自动把 `open_id` 回写到配置文件。
+- 因此，如果你希望第一次对话就完成 BOOTSTRAP，引导期最省事的做法是 `allowFrom: ["*"]`。
+- 完成首次引导后，再根据日志里看到的 `open_id` 收紧为显式白名单。
 
 命令:
 
@@ -103,7 +111,7 @@
 
 当前飞书的流式输出是基于阶段级的进度事件，而不是 token 级别的 LLM 输出。
 
-- 第一个 `_progress` 事件会创建一张卡片
+- 第一个 `_progress` 事件会以回复用户原消息的方式创建一张卡片
 - 后续的 `_progress` / `_tool_hint` 事件会修补 (patch) 同一张卡片
 - 最终的回复会将卡片修补为完成状态
 - 如果修补失败，飞书会降级发送一条纯文本的最终消息

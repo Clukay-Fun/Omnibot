@@ -40,16 +40,18 @@ async def test_adapter_uses_dm_session_key_and_strips_mentions() -> None:
     assert translated is not None
     assert translated.session_key == "feishu:dm:ou_user_1"
     assert translated.content == "hello"
+    assert translated.metadata["turn_id"].startswith("feishu-turn-")
+    assert translated.metadata["stream_id"].startswith("feishu-stream-")
 
 
 @pytest.mark.asyncio
-async def test_adapter_uses_group_user_session_key_by_default() -> None:
+async def test_adapter_uses_shared_group_session_key_by_default() -> None:
     adapter = FeishuAdapter(FeishuConfig())
 
     translated = await adapter.translate_message(_message_payload(chat_type="group"))
 
     assert translated is not None
-    assert translated.session_key == "feishu:chat:oc_chat_1:user:ou_user_1"
+    assert translated.session_key == "feishu:chat:oc_chat_1"
     assert translated.metadata["tenant_key"] == "tenant-1"
 
 

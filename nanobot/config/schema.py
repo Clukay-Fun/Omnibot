@@ -46,15 +46,14 @@ class FeishuConfig(Base):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     webhook_path: str = "/feishu/events"
-    group_session_mode: Literal["per_user", "shared"] = "per_user"
+    group_session_mode: Literal["per_user", "shared"] = "shared"
     dedupe_memory_size: int = 1000
     dedupe_db_path: str = ""
     memory_db_path: str = ""
     session_ttl_seconds: int = 0
+    streaming_scope: Literal["off", "dm", "all"] = "dm"
+    stream_throttle_seconds: float = 0.5
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
-    react_emoji: str = (
-        "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
-    )
 
 
 class DingTalkConfig(Base):

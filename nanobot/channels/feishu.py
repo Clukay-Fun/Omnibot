@@ -1,14 +1,10 @@
 """Thin Feishu channel shim that wires the Feishu pipeline into BaseChannel."""
-
 from __future__ import annotations
-
 import asyncio
 import importlib.util
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
 from loguru import logger
-
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -56,6 +52,7 @@ class FeishuChannel(BaseChannel):
         self._webhook_server: FeishuWebhookServer | None = None
         runtime = build_feishu_runtime(config=config, bus=bus, workspace=self.workspace, groq_api_key=groq_api_key, client_getter=lambda: self._client, inbound_publish=self._handle_message, session_manager=session_manager, provider=provider, model=model, memory_window=memory_window)
         self._outbound = runtime.outbound
+        self._streaming = runtime.streaming
         self._archive_service = runtime.archive_service
         self._handler = runtime.handler
         self._router: FeishuRouter = runtime.router
@@ -86,6 +83,7 @@ class FeishuChannel(BaseChannel):
 
     async def stop(self) -> None:
         self._running = False
+        await self._streaming.wait_for_idle()
         if self._ws_bridge is not None:
             self._ws_bridge.stop()
         if self._webhook_server is not None:
@@ -93,6 +91,8 @@ class FeishuChannel(BaseChannel):
         logger.info("Feishu bot stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
+        if await self._streaming.handle(msg):
+            return
         await self._outbound.send(msg)
 
     def _on_message_sync(self, data: Any) -> None:

@@ -21,7 +21,7 @@ class FeishuOutboundMessenger:
     _AUDIO_EXTS = {".opus"}
     _VIDEO_EXTS = {".mp4", ".mov", ".avi"}
 
-    def __init__(self, client_getter: Callable[[], FeishuClient | None]):
+    def __init__(self, client_getter: Callable[[], Any | None]):
         self._client_getter = client_getter
 
     async def send(self, msg: OutboundMessage) -> None:
@@ -33,17 +33,26 @@ class FeishuOutboundMessenger:
         try:
             receive_id_type = FeishuClient.resolve_receive_id_type(msg.chat_id)
             loop = asyncio.get_running_loop()
+            reply_to = self._reply_target(msg)
 
             for file_path in msg.media:
                 if not os.path.isfile(file_path):
                     logger.warning("Media file not found: {}", file_path)
                     continue
-                await self._send_media(loop, client, receive_id_type, msg.chat_id, file_path)
+                await self._send_media(loop, client, receive_id_type, msg.chat_id, file_path, reply_to=reply_to)
 
             if msg.content and msg.content.strip():
-                await self._send_content(loop, client, receive_id_type, msg.chat_id, msg.content)
+                await self._send_content(loop, client, receive_id_type, msg.chat_id, msg.content, reply_to=reply_to)
         except Exception as exc:
             logger.error("Error sending Feishu message: {}", exc)
+
+    @staticmethod
+    def _reply_target(msg: OutboundMessage) -> str | None:
+        if msg.reply_to:
+            return msg.reply_to
+        metadata = msg.metadata or {}
+        reply_to = metadata.get("message_id")
+        return str(reply_to) if reply_to else None
 
     async def _send_media(
         self,
@@ -52,6 +61,8 @@ class FeishuOutboundMessenger:
         receive_id_type: str,
         chat_id: str,
         file_path: str,
+        *,
+        reply_to: str | None = None,
     ) -> None:
         ext = os.path.splitext(file_path)[1].lower()
         if ext in self._IMAGE_EXTS:
@@ -64,6 +75,7 @@ class FeishuOutboundMessenger:
                     chat_id,
                     "image",
                     json.dumps({"image_key": key}, ensure_ascii=False),
+                    reply_to,
                 )
             return
 
@@ -78,6 +90,7 @@ class FeishuOutboundMessenger:
             chat_id,
             msg_type,
             json.dumps({"file_key": key}, ensure_ascii=False),
+            reply_to,
         )
 
     async def _send_content(
@@ -87,6 +100,8 @@ class FeishuOutboundMessenger:
         receive_id_type: str,
         chat_id: str,
         content: str,
+        *,
+        reply_to: str | None = None,
     ) -> None:
         fmt = FeishuRenderer.detect_msg_format(content)
         if fmt == "text":
@@ -97,6 +112,7 @@ class FeishuOutboundMessenger:
                 chat_id,
                 "text",
                 json.dumps({"text": content.strip()}, ensure_ascii=False),
+                reply_to,
             )
             return
 
@@ -108,6 +124,7 @@ class FeishuOutboundMessenger:
                 chat_id,
                 "post",
                 FeishuRenderer.markdown_to_post(content),
+                reply_to,
             )
             return
 
@@ -121,4 +138,5 @@ class FeishuOutboundMessenger:
                 chat_id,
                 "interactive",
                 json.dumps(card, ensure_ascii=False),
+                reply_to,
             )

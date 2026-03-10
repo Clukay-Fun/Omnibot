@@ -17,6 +17,7 @@ from nanobot.feishu.media import FeishuInboundMediaLoader
 from nanobot.feishu.memory import FeishuUserMemoryStore
 from nanobot.feishu.outbound import FeishuOutboundMessenger
 from nanobot.feishu.router import FeishuRouter
+from nanobot.feishu.streaming import FeishuCardStreamer
 from nanobot.feishu.ttl import FeishuTTLManager
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ class FeishuRuntime:
     outbound: FeishuOutboundMessenger
     handler: FeishuEventHandler
     router: FeishuRouter
+    streaming: FeishuCardStreamer
     archive_service: FeishuAsyncArchiveService | None
 
 
@@ -58,8 +60,13 @@ def build_feishu_runtime(
 
     adapter = FeishuAdapter(config, ttl_manager=ttl_manager, overflow_manager=archive_service, overflow_keep_messages=memory_window)
     command_handler = FeishuCommandHandler(memory_store=memory_store, respond=bus.publish_outbound, session_manager=session_manager, archive_service=archive_service)
-    media_loader = FeishuInboundMediaLoader(client_getter, groq_api_key=groq_api_key, react_emoji=config.react_emoji)
+    media_loader = FeishuInboundMediaLoader(client_getter, groq_api_key=groq_api_key)
     outbound = FeishuOutboundMessenger(client_getter)
+    streaming = FeishuCardStreamer(
+        client_getter=client_getter,
+        scope=config.streaming_scope,
+        throttle_seconds=config.stream_throttle_seconds,
+    )
     handler = FeishuEventHandler(adapter=adapter, publish=inbound_publish, media_loader=media_loader.load_translated_media, command_handler=command_handler, memory_store=memory_store)
     router = FeishuRouter(handler=handler, dedupe=FeishuEventDedupe(memory=FeishuLRUDedupe(max_size=config.dedupe_memory_size), store=FeishuSQLiteDedupe(dedupe_path)))
-    return FeishuRuntime(outbound=outbound, handler=handler, router=router, archive_service=archive_service)
+    return FeishuRuntime(outbound=outbound, handler=handler, router=router, streaming=streaming, archive_service=archive_service)

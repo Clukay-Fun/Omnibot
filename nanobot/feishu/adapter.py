@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from uuid import uuid4
 from typing import Any
 
 from nanobot.config.schema import FeishuConfig
@@ -89,6 +90,8 @@ class FeishuAdapter:
             "raw_chat_id": chat_id,
             "user_open_id": sender_id,
             "content_json": content_json,
+            "turn_id": f"feishu-turn-{uuid4().hex}",
+            "stream_id": f"feishu-stream-{uuid4().hex}",
         }
         if image_keys:
             metadata["post_image_keys"] = image_keys
