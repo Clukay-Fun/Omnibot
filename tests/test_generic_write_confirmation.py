@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from nanobot.agent.loop import AgentLoop
+from nanobot.agent.table_flow import PreparedTableWriteFollowup, TableWriteGuard
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
@@ -124,6 +125,108 @@ class _FakePrepareCreateTool(Tool):
         return json.dumps(self.payload, ensure_ascii=False)
 
 
+class _BranchingPrepareCreateTool(Tool):
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def name(self) -> str:
+        return "bitable_prepare_create"
+
+    @property
+    def description(self) -> str:
+        return "branching prepare create"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"request_text": {"type": "string"}}}
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        request_text = str(kwargs.get("request_text") or "").strip()
+        table_hint = str(kwargs.get("table_hint") or "").strip()
+        if not table_hint:
+            return json.dumps(
+                {
+                    "request_text": request_text,
+                    "needs_table_confirmation": True,
+                    "candidates": [
+                        {"table_id": "tbl_case", "name": "案件项目总库", "score": 2.1},
+                        {"table_id": "tbl_week", "name": "团队周工作计划表", "score": 1.9},
+                    ],
+                },
+                ensure_ascii=False,
+            )
+        fields = {"工作内容": "整理合同台账"}
+        if "房怡康" in request_text:
+            fields["负责人"] = "房怡康"
+        return json.dumps(
+            {
+                "request_text": request_text,
+                "needs_table_confirmation": False,
+                "selected_table": {"table_id": "tbl_week", "name": "团队周工作计划表"},
+                "draft_fields": dict(fields),
+                "identity_strategy": ["负责人", "周次"] if "负责人" in fields else [],
+                "record_lookup": {"attempted": False, "matched": 0, "records": []},
+                "operation_guess": "create_new",
+                "needs_record_confirmation": False,
+                "next_step": {
+                    "tool": "bitable_create",
+                    "mode": "dry_run",
+                    "arguments": {"table_id": "tbl_week", "fields": dict(fields)},
+                },
+            },
+            ensure_ascii=False,
+        )
+
+
+class _RefreshingCreateTool(_FakeCreateTool):
+    def __init__(self) -> None:
+        super().__init__()
+        self._dry_run_count = 0
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        if kwargs.get("confirm_token"):
+            return json.dumps({"success": True, "record_id": "rec-created"}, ensure_ascii=False)
+        self._dry_run_count += 1
+        return json.dumps(
+            {
+                "dry_run": True,
+                "preview": {
+                    "action": "create",
+                    "table_id": kwargs.get("table_id", "tbl_default"),
+                    "fields": kwargs.get("fields", {}),
+                },
+                "confirm_token": f"tok-create-{self._dry_run_count}",
+            },
+            ensure_ascii=False,
+        )
+
+
+class _ExpiringCreateTool(_RefreshingCreateTool):
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(dict(kwargs))
+        if kwargs.get("confirm_token"):
+            return json.dumps(
+                {"error": "confirm_token 无效、已过期或操作负载不匹配。请重新发起 dry_run。"},
+                ensure_ascii=False,
+            )
+        self._dry_run_count += 1
+        return json.dumps(
+            {
+                "dry_run": True,
+                "preview": {
+                    "action": "create",
+                    "table_id": kwargs.get("table_id", "tbl_default"),
+                    "fields": kwargs.get("fields", {}),
+                },
+                "confirm_token": f"tok-refresh-{self._dry_run_count}",
+            },
+            ensure_ascii=False,
+        )
+
+
 class _FakeDirectorySearchTool(Tool):
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -190,6 +293,87 @@ class _CoordinatorOnlyProvider:
 
     def get_default_model(self) -> str:
         return "dummy"
+
+
+def _seed_table_write_preview(
+    session,
+    *,
+    tool_name: str = "bitable_create",
+    token: str = "tok-old",
+    table_id: str = "tbl_contract",
+    table_name: str = "合同管理",
+    fields: dict[str, Any] | None = None,
+    request_text: str = "新增合同，合同编号 HT-001",
+) -> None:
+    preview_fields = dict(fields or {"合同编号": "HT-001"})
+    session.metadata["pending_write"] = {
+        "tool": tool_name,
+        "token": token,
+        "args": {"table_id": table_id, "fields": dict(preview_fields)},
+        "preview": {"action": "create", "table_id": table_id, "fields": dict(preview_fields)},
+    }
+    session.metadata["table_flow"] = {
+        "kind": "write_preview",
+        "request_text": request_text,
+        "selected_table": {"table_id": table_id, "name": table_name},
+    }
+
+
+def test_table_write_guard_extracts_prepared_followup() -> None:
+    guard = TableWriteGuard()
+
+    followup = guard.extract_prepared_followup(
+        tool_name="bitable_prepare_create",
+        result=json.dumps(
+            {
+                "needs_table_confirmation": False,
+                "needs_record_confirmation": False,
+                "next_step": {
+                    "tool": "bitable_update",
+                    "arguments": {"table_id": "tbl_week", "record_id": "rec_1", "fields": {"工作内容": "整理合同台账"}},
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert followup == PreparedTableWriteFollowup(
+        tool="bitable_update",
+        arguments={"table_id": "tbl_week", "record_id": "rec_1", "fields": {"工作内容": "整理合同台账"}},
+    )
+
+
+def test_table_write_guard_skips_followup_when_confirmation_needed() -> None:
+    guard = TableWriteGuard()
+
+    followup = guard.extract_prepared_followup(
+        tool_name="bitable_prepare_create",
+        result=json.dumps(
+            {
+                "needs_table_confirmation": False,
+                "needs_record_confirmation": True,
+                "next_step": {
+                    "tool": "bitable_update",
+                    "arguments": {"record_id": "rec_1"},
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    assert followup is None
+
+
+def test_table_write_guard_preserves_delete_record_id() -> None:
+    guard = TableWriteGuard()
+
+    args = guard.build_pending_write_args(
+        tool_name="bitable_delete",
+        raw_args={"record_id": "rec_delete_1", "confirm_token": "tok-old"},
+        payload={"preview": {"action": "delete", "table_id": "tbl_week"}},
+    )
+
+    assert args == {"record_id": "rec_delete_1", "table_id": "tbl_week"}
 
 
 @pytest.mark.asyncio
@@ -420,6 +604,151 @@ async def test_prepare_create_auto_executes_suggested_create_without_second_llm_
 
 
 @pytest.mark.asyncio
+async def test_table_confirmation_selection_executes_followup_without_llm(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="bitable_prepare_create",
+                        arguments={"request_text": "帮我新增工作记录"},
+                    )
+                ],
+            )
+        ]
+    )
+    loop = _build_loop(tmp_path, provider)
+    prepare_tool = _BranchingPrepareCreateTool()
+    create_tool = _RefreshingCreateTool()
+    loop.tools.register(prepare_tool)
+    loop.tools.register(create_tool)
+
+    first = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我新增工作记录")
+    )
+
+    assert first is not None
+    assert "团队周工作计划表" in first.content
+    assert provider.calls == 1
+
+    second = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="2")
+    )
+
+    assert second is not None
+    assert "确认" in second.content
+    assert provider.calls == 1
+    assert prepare_tool.calls == [
+        {"request_text": "帮我新增工作记录"},
+        {"request_text": "帮我新增工作记录", "table_hint": "团队周工作计划表"},
+    ]
+    assert len(create_tool.calls) == 1
+    assert create_tool.calls[0]["table_id"] == "tbl_week"
+
+    session = loop.sessions.get_or_create("cli:chat")
+    pending = session.metadata.get("pending_write") or {}
+    assert pending["tool"] == "bitable_create"
+    assert session.metadata.get("table_flow", {}).get("kind") == "write_preview"
+
+
+@pytest.mark.asyncio
+async def test_record_confirmation_selection_executes_update_preview_without_llm(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="bitable_prepare_create",
+                        arguments={"request_text": "帮我更新房怡康本周工作计划"},
+                    )
+                ],
+            )
+        ]
+    )
+    loop = _build_loop(tmp_path, provider)
+    prepare_tool = _FakePrepareCreateTool(
+        {
+            "request_text": "帮我更新房怡康本周工作计划",
+            "needs_table_confirmation": False,
+            "selected_table": {"table_id": "tbl_week", "name": "团队周工作计划表"},
+            "draft_fields": {"姓名": "房怡康", "周次": "本周", "工作内容": "整理合同台账"},
+            "identity_strategy": ["姓名", "周次"],
+            "record_lookup": {
+                "attempted": True,
+                "matched": 2,
+                "records": [
+                    {"record_id": "rec_week_1", "fields": {"姓名": "房怡康", "周次": "本周"}},
+                    {"record_id": "rec_week_2", "fields": {"姓名": "房怡康", "周次": "本周"}},
+                ],
+            },
+            "operation_guess": "ambiguous_existing",
+            "needs_record_confirmation": True,
+            "next_step": None,
+        }
+    )
+    update_tool = _FakeUpdateTool()
+    loop.tools.register(prepare_tool)
+    loop.tools.register(update_tool)
+
+    first = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我更新房怡康本周工作计划")
+    )
+
+    assert first is not None
+    assert "rec_week_1" in first.content
+    assert provider.calls == 1
+
+    second = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="2")
+    )
+
+    assert second is not None
+    assert "确认" in second.content
+    assert provider.calls == 1
+    assert len(update_tool.calls) == 1
+    assert update_tool.calls[0]["record_id"] == "rec_week_2"
+    assert update_tool.calls[0]["fields"] == {"工作内容": "整理合同台账"}
+
+
+@pytest.mark.asyncio
+async def test_table_confirmation_cancel_clears_pending_state_without_llm(tmp_path) -> None:
+    provider = _ScriptedProvider(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call-1",
+                        name="bitable_prepare_create",
+                        arguments={"request_text": "帮我新增工作记录"},
+                    )
+                ],
+            )
+        ]
+    )
+    loop = _build_loop(tmp_path, provider)
+    loop.tools.register(_BranchingPrepareCreateTool())
+
+    _ = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="帮我新增工作记录")
+    )
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="取消")
+    )
+
+    assert response is not None
+    assert "取消" in response.content
+    assert provider.calls == 1
+    session = loop.sessions.get_or_create("cli:chat")
+    assert session.metadata.get("table_flow") in ({}, None)
+    assert session.metadata.get("result_selection") in ({}, None)
+
+
+@pytest.mark.asyncio
 async def test_followup_without_pending_write_falls_back_to_normal_flow(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
@@ -489,34 +818,91 @@ async def test_write_promise_context_is_not_recorded(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pending_write_free_text_followup_falls_back_to_main_llm(tmp_path) -> None:
+async def test_table_pending_write_free_text_followup_refreshes_preview_without_llm(tmp_path) -> None:
     provider = _CoordinatorOnlyProvider()
     loop = AgentLoop(
         bus=MessageBus(),
         provider=provider,
         workspace=tmp_path,
     )
-    create_tool = _FakeCreateTool()
+    prepare_tool = _BranchingPrepareCreateTool()
+    create_tool = _RefreshingCreateTool()
+    loop.tools.register(prepare_tool)
     loop.tools.register(create_tool)
 
     session = loop.sessions.get_or_create("cli:chat")
-    session.metadata["pending_write"] = {
-        "tool": "bitable_create",
-        "token": "tok-old",
-        "args": {"table_id": "tbl_week", "fields": {"日期": "2026-03-08", "未完成事项": "A"}},
-        "preview": {"action": "create", "table_id": "tbl_week", "fields": {"日期": "2026-03-08", "未完成事项": "A"}},
-    }
+    _seed_table_write_preview(session)
     loop.sessions.save(session)
 
     response = await loop._process_message(
-        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="确认，人员是房怡康")
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="负责人改成房怡康")
     )
 
     assert response is not None
-    assert response.content == "llm-fallback"
-    assert provider.calls == 1
-    assert create_tool.calls == []
+    assert "确认" in response.content
+    assert "房怡康" in response.content
+    assert provider.calls == 0
+    assert len(prepare_tool.calls) == 1
+    assert prepare_tool.calls[0]["table_hint"] == "合同管理"
+    assert len(create_tool.calls) == 1
 
     pending = loop.sessions.get_or_create("cli:chat").metadata.get("pending_write") or {}
-    assert pending["token"] == "tok-old"
-    assert pending["args"]["fields"] == {"日期": "2026-03-08", "未完成事项": "A"}
+    assert pending["token"] == "tok-create-1"
+    assert pending["args"]["fields"]["负责人"] == "房怡康"
+
+
+@pytest.mark.asyncio
+async def test_table_pending_write_retry_refreshes_preview_without_llm(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+    )
+    create_tool = _RefreshingCreateTool()
+    loop.tools.register(create_tool)
+
+    session = loop.sessions.get_or_create("cli:chat")
+    _seed_table_write_preview(session, token="tok-old")
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="重试")
+    )
+
+    assert response is not None
+    assert "已更新写入预览" in response.content
+    assert provider.calls == 0
+    assert len(create_tool.calls) == 1
+
+    pending = loop.sessions.get_or_create("cli:chat").metadata.get("pending_write") or {}
+    assert pending["token"] == "tok-create-1"
+
+
+@pytest.mark.asyncio
+async def test_table_pending_write_confirm_with_stale_token_refreshes_preview(tmp_path) -> None:
+    provider = _CoordinatorOnlyProvider()
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=provider,
+        workspace=tmp_path,
+    )
+    create_tool = _ExpiringCreateTool()
+    loop.tools.register(create_tool)
+
+    session = loop.sessions.get_or_create("cli:chat")
+    _seed_table_write_preview(session, token="tok-stale")
+    loop.sessions.save(session)
+
+    response = await loop._process_message(
+        InboundMessage(channel="cli", sender_id="u1", chat_id="chat", content="确认")
+    )
+
+    assert response is not None
+    assert "已更新写入预览" in response.content
+    assert provider.calls == 0
+    assert len(create_tool.calls) == 2
+    assert create_tool.calls[0]["confirm_token"] == "tok-stale"
+
+    pending = loop.sessions.get_or_create("cli:chat").metadata.get("pending_write") or {}
+    assert pending["token"] == "tok-refresh-1"

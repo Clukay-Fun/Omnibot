@@ -28,6 +28,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
 from nanobot.agent.prompt_context import PromptContext
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
+from nanobot.agent.table_flow import TableFlowCoordinator, TableWriteGuard
 from nanobot.agent.user_state import UserMemoryStore
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.turn_runtime import TurnRuntime
@@ -268,7 +269,9 @@ class AgentLoop:
         self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
         self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
+        self._table_write_guard = TableWriteGuard()
         self._pending_write_coordinator = PendingWriteCoordinator(self)
+        self._table_flow_coordinator = TableFlowCoordinator(self)
         self._continuation_coordinator = ContinuationCoordinator(self)
 
     @staticmethod
@@ -1576,6 +1579,15 @@ class AgentLoop:
     ) -> str | None:
         if session is None:
             return None
+        captured = self._table_flow_coordinator.on_tool_result(
+            session=session,
+            tool_name=tool_name,
+            raw_args=raw_args,
+            result=result,
+        )
+        if captured is not None:
+            self._log_coordinator_hit(self._table_flow_coordinator.name, session.key, "tool_result")
+            return captured.final_content
         captured = self._pending_write_coordinator.on_tool_result(
             session=session,
             tool_name=tool_name,
@@ -1586,29 +1598,6 @@ class AgentLoop:
             self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "tool_result")
             return captured.final_content
         return None
-
-    @staticmethod
-    def _prepared_write_followup(tool_name: str, result: str) -> dict[str, Any] | None:
-        if tool_name != "bitable_prepare_create":
-            return None
-        try:
-            payload = json.loads(result)
-        except Exception:
-            return None
-        if not isinstance(payload, dict):
-            return None
-        if payload.get("needs_table_confirmation") or payload.get("needs_record_confirmation"):
-            return None
-        next_step = payload.get("next_step")
-        if not isinstance(next_step, dict):
-            return None
-        followup_tool = str(next_step.get("tool") or "").strip()
-        arguments = next_step.get("arguments")
-        if followup_tool not in {"bitable_create", "bitable_update", "bitable_delete"}:
-            return None
-        if not isinstance(arguments, dict):
-            return None
-        return {"tool": followup_tool, "arguments": dict(arguments)}
 
     @staticmethod
     def _log_coordinator_hit(name: str, session_key: str, source: str) -> None:
@@ -1895,13 +1884,16 @@ class AgentLoop:
                         if pending_preview is not None
                         else self._short_text(result, limit=200)
                     )
-                    prepared_followup = self._prepared_write_followup(tool_call.name, result)
+                    prepared_followup = self._table_write_guard.extract_prepared_followup(
+                        tool_name=tool_call.name,
+                        result=result,
+                    )
                     if prepared_followup is not None:
                         messages = self.context.add_tool_result(
                             messages, tool_call.id, tool_call.name, result
                         )
-                        followup_tool = str(prepared_followup.get("tool") or "").strip()
-                        followup_args = dict(prepared_followup.get("arguments") or {})
+                        followup_tool = prepared_followup.tool
+                        followup_args = dict(prepared_followup.arguments)
                         if followup_tool and followup_args:
                             template = self._runtime_text.prompt_text(
                                 "progress", "tool_done", "{tool} 完成，继续思考中..."
@@ -2547,6 +2539,10 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
+        table_flow_outbound = await self._table_flow_coordinator.handle(msg=msg, session=session)
+        if table_flow_outbound is not None:
+            self._log_coordinator_hit(self._table_flow_coordinator.name, session.key, "message")
+            return table_flow_outbound
         pending_outbound = await self._pending_write_coordinator.handle(msg=msg, session=session)
         if pending_outbound is not None:
             self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "message")

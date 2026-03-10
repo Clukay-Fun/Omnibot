@@ -241,7 +241,7 @@ async def test_continuation_keeps_global_selection_numbers_on_later_pages(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_prepare_create_ambiguous_result_returns_to_main_llm(tmp_path) -> None:
+async def test_prepare_create_ambiguous_result_short_circuits_into_table_confirmation(tmp_path) -> None:
     provider = _ToolCallingProvider()
     loop = AgentLoop(
         bus=MessageBus(),
@@ -255,6 +255,13 @@ async def test_prepare_create_ambiguous_result_returns_to_main_llm(tmp_path) -> 
     )
 
     assert response is not None
-    assert response.content == "llm-after-tool"
+    assert "案件项目总库" in response.content
+    assert "团队周工作计划表" in response.content
+    assert "取消" in response.content
+    assert provider.calls == 1
     session = loop.sessions.get_or_create("feishu:ou_chat")
-    assert session.metadata.get("result_selection") in ({}, None)
+    table_flow = session.metadata.get("table_flow") or {}
+    assert table_flow["kind"] == "table_confirmation"
+    assert len(table_flow["candidates"]) == 2
+    selection = session.metadata.get("result_selection") or {}
+    assert selection["kind"] == "table_candidates"

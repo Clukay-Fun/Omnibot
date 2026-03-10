@@ -17,6 +17,7 @@ from nanobot.agent.pending_write import (
     extract_pending_write_command,
     format_pending_write_preview,
 )
+from nanobot.agent.table_flow import TableWriteGuard
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.session.manager import Session
 
@@ -34,6 +35,7 @@ class PendingWriteCoordinator(AgentCoordinator):
     """
     def __init__(self, agent: AgentLoop) -> None:
         super().__init__(agent)
+        self._table_write_guard = TableWriteGuard()
 
     @property
     def _loop(self) -> AgentLoop:
@@ -86,32 +88,6 @@ class PendingWriteCoordinator(AgentCoordinator):
         session.add_message("user", msg.content)
         session.add_message("assistant", assistant_content)
 
-    @staticmethod
-    def _pending_write_args_from_payload(
-        *,
-        tool_name: str,
-        raw_args: dict[str, Any],
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """
-        用处: 根据真实的 Dry Run 返回载荷更新并抽取最终待执行的工具参数字典。
-
-        功能:
-            - 补充多维表格的 `table_id` 或 `record_id`、写入字段等缺失但对正式写入至关重要的信息，同时剔除老旧 `confirm_token` 防止冲突。
-        """
-        args = dict(raw_args)
-        args.pop("confirm_token", None)
-        preview: dict[str, Any] = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
-        if isinstance(preview.get("fields"), dict):
-            args["fields"] = dict(preview["fields"])
-        for key in ("table_id", "record_id"):
-            value = preview.get(key)
-            if value not in (None, ""):
-                args[key] = value
-        if tool_name == "bitable_delete" and "record_id" in raw_args:
-            args.setdefault("record_id", raw_args.get("record_id"))
-        return args
-
     def on_tool_result(
         self,
         *,
@@ -130,12 +106,12 @@ class PendingWriteCoordinator(AgentCoordinator):
         payload = extract_json_object(result)
         if not payload or payload.get("dry_run") is not True or not payload.get("confirm_token"):
             return None
-        preview: dict[str, Any] = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        preview_value = payload.get("preview")
+        preview: dict[str, Any] = dict(preview_value) if isinstance(preview_value, dict) else {}
         if preview.get("table_id"):
             metadata = dict(session.metadata or {})
-            previous: dict[str, Any] = (
-                metadata.get("recent_selected_table") if isinstance(metadata.get("recent_selected_table"), dict) else {}
-            )
+            previous_value = metadata.get("recent_selected_table")
+            previous: dict[str, Any] = dict(previous_value) if isinstance(previous_value, dict) else {}
             metadata["recent_selected_table"] = {
                 **dict(previous),
                 "table_id": str(preview.get("table_id") or ""),
@@ -145,7 +121,11 @@ class PendingWriteCoordinator(AgentCoordinator):
         pending = {
             "tool": tool_name,
             "token": str(payload.get("confirm_token") or ""),
-            "args": self._pending_write_args_from_payload(tool_name=tool_name, raw_args=raw_args, payload=payload),
+            "args": self._table_write_guard.build_pending_write_args(
+                tool_name=tool_name,
+                raw_args=raw_args,
+                payload=payload,
+            ),
             "preview": preview,
             "created_at": self._loop._now_iso(),
         }
