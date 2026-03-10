@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 # 默认的内置技能目录（相对于当前文件）
-BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
+BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills" / "builtin"
 
 
 # region [技能加载核心类]

@@ -39,10 +39,12 @@
     "feishu": {
       "auth": {
         "appId": "",
-        "appSecret": ""
+        "appSecret": "",
+        "encryptKey": "",
+        "verificationToken": ""
       },
       "api": {
-        "apiBase": "https://open.feishu.cn"
+        "apiBase": "https://open.feishu.cn/open-apis"
       },
       "storage": {
         "stateDbPath": "",

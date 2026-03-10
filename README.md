@@ -22,7 +22,14 @@
 
 ## ⚙️ 飞书通道配置 (channels.feishu)
 
-在 `~/.nanobot/config.json` 中配置飞书通道：
+仓库根目录仅提供示例文件 `config.example.json`。实际运行时，请复制到 `~/.nanobot/config.json`（或直接使用环境变量）后再按需修改：
+
+```bash
+mkdir -p ~/.nanobot
+cp config.example.json ~/.nanobot/config.json
+```
+
+然后在 `~/.nanobot/config.json` 中配置飞书通道。下方为了易读使用 YAML 风格展示等价结构；精确 JSON 示例以 `config.example.json` 为准：
 
 ```yaml
 channels:
@@ -94,6 +101,8 @@ agents:
     query_rewrite_enabled: false  # 查询结果默认不做二次简化改写
 ```
 
+如果你以前在仓库根目录放过本地 `./config.json`，请迁移到 `~/.nanobot/config.json`；根目录现在只保留示例文件 `config.example.json`。
+
 > **流式最佳实践**：推荐配置 `stream_answer_warmup_chars=24`、`stream_answer_warmup_ms=300`、`stream_card_min_update_ms=120` 和 `stream_card_print_frequency_ms=50` 以获得最丝滑的视觉体验。
 
 可选地，你也可以编辑 `~/.nanobot/workspace/runtime_texts.yaml` 来覆盖 onboarding 等运行期文案；只写需要改的键，未写部分会继续使用内置默认值。
@@ -151,10 +160,10 @@ Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将
 ## 🚀 部署与发版 (CI & Release)
 
 - **持续集成**：默认采用 GitHub Actions 建立专门服务于飞书 SDK 交互兼容的 `.github/workflows/ci.yml` 验证环境体系，并启用 Ruff 强制代码风格审查（超过 300+ pytest 并发跑通认证）。
-- **流程规范**：标准化打包分发流经由 `.github/workflows/release.yml` 处理释放流程并投递到 GitHub Release 或 PyPI 以供版本追踪与回退；需严格遵循 `RELEASE_CHECKLIST.md` 内容清单控制发行质量。
+- **流程规范**：标准化打包分发流经由 `.github/workflows/release.yml` 处理释放流程并投递到 GitHub Release 或 PyPI 以供版本追踪与回退；需严格遵循 `docs/release/RELEASE_CHECKLIST.md` 内容清单控制发行质量。
 
 ## 📘 生产运维手册
 
-- 生产配置、联调脚本、灰度/回滚、监控告警详见 `OPERATIONS_FEISHU.md`。
+- 生产配置、联调脚本、灰度/回滚、监控告警详见 `docs/guides/OPERATIONS_FEISHU.md`。
 - 生产环境变量模板详见 `ops/env/feishu-production.env.example`。
 - 本地联调环境变量模板详见 `ops/env/feishu-local.env.example`。

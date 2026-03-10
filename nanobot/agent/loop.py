@@ -9,6 +9,7 @@ import time
 import weakref
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
@@ -822,8 +823,14 @@ class AgentLoop:
         return preferred_name if preferred_name != "你" else "小律"
 
     @staticmethod
-    def _workspace_template_path(filename: str) -> Path:
-        return Path(__file__).resolve().parent.parent / "templates" / filename
+    def _read_packaged_workspace_template(filename: str) -> str:
+        resource = resource_files("nanobot") / "templates" / "workspace" / filename
+        try:
+            if resource.is_file():
+                return resource.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+        return ""
 
     def _read_workspace_or_template_file(self, filename: str, runtime: PromptContext | None = None) -> str:
         if runtime is not None and filename in {"BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"}:
@@ -835,12 +842,16 @@ class AgentLoop:
                 except OSError:
                     pass
 
-        for path in (self.workspace / filename, self._workspace_template_path(filename)):
-            try:
-                if path.exists():
-                    return path.read_text(encoding="utf-8")
-            except OSError:
-                continue
+        path = self.workspace / filename
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+        except OSError:
+            pass
+
+        packaged = self._read_packaged_workspace_template(filename)
+        if packaged:
+            return packaged
         return ""
 
     def _build_bootstrap_identity_summary(self, runtime: PromptContext | None = None) -> str:

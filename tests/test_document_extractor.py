@@ -37,6 +37,13 @@ def test_load_templates_with_workspace_override(tmp_path: Path) -> None:
     assert templates["invoice"].template_id == "invoice_workspace"
 
 
+def test_load_templates_includes_packaged_builtin_extract_assets() -> None:
+    templates = load_extract_templates()
+
+    assert templates["invoice"].template_id == "invoice_minimal"
+    assert templates["contract"].template_id == "contract_minimal"
+
+
 def test_load_templates_prefers_workspace_extract_over_skillspec_extract(tmp_path: Path) -> None:
     skillspec_extract = tmp_path / "skillspec" / "extract"
     workspace_extract = tmp_path / "extract"

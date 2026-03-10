@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -77,25 +78,38 @@ class MemoryStore:
     _PRIVATE_PERSONA_FILES = ("BOOTSTRAP.md", "SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md")
 
     @staticmethod
-    def _template_root() -> Path:
-        return Path(__file__).resolve().parent.parent / "templates"
+    def _packaged_markdown_resource(filename: str):
+        templates = resource_files("nanobot") / "templates"
+        if filename == "MEMORY.md":
+            return templates / "memory" / "MEMORY.md"
+        return templates / "workspace" / filename
 
     def _shared_markdown_path(self, filename: str) -> Path | None:
         candidates: list[Path] = []
         if filename == "MEMORY.md":
-            candidates.extend(
-                [
-                    self.memory_file,
-                    self.legacy_memory_file,
-                    self._template_root() / "memory" / "MEMORY.md",
-                ]
-            )
+            candidates.extend([self.memory_file, self.legacy_memory_file])
         else:
-            candidates.extend([self.workspace / filename, self._template_root() / filename])
+            candidates.append(self.workspace / filename)
 
         for candidate in candidates:
             if candidate.exists():
                 return candidate
+        return None
+
+    def _shared_markdown_text(self, filename: str) -> str | None:
+        source = self._shared_markdown_path(filename)
+        if source is not None:
+            try:
+                return source.read_text(encoding="utf-8")
+            except OSError:
+                return None
+
+        resource = self._packaged_markdown_resource(filename)
+        try:
+            if resource.is_file():
+                return resource.read_text(encoding="utf-8")
+        except OSError:
+            return None
         return None
 
     def feishu_user_persona_dir(self, open_id: str) -> Path:
@@ -112,11 +126,12 @@ class MemoryStore:
             return target
 
         source = self._shared_markdown_path(filename)
-        if source is None:
+        content = self._shared_markdown_text(filename)
+        if content is None:
             return target
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        target.write_text(content, encoding="utf-8")
         return target
 
     def ensure_feishu_user_persona_files(self, open_id: str) -> list[Path]:

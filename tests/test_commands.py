@@ -1,6 +1,8 @@
 import shutil
 import sys
 import types
+import json
+import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -67,6 +69,7 @@ from nanobot.storage import SQLiteStore
 from nanobot.utils.helpers import sync_workspace_templates
 
 runner = CliRunner()
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -105,6 +108,7 @@ def test_onboard_fresh_install(mock_paths):
     assert "Created config" in result.stdout
     assert "Created workspace" in result.stdout
     assert "nanobot is ready" in result.stdout
+    assert "~/.nanobot/config.json" in result.stdout
     assert config_file.exists()
     assert (workspace_dir / "AGENTS.md").exists()
     assert (workspace_dir / "memory" / "MEMORY.md").exists()
@@ -152,6 +156,53 @@ def test_onboard_existing_workspace_safe_create(mock_paths):
     assert "Created workspace" not in result.stdout
     assert "Created AGENTS.md" in result.stdout
     assert (workspace_dir / "AGENTS.md").exists()
+
+
+def test_repo_uses_config_example_instead_of_tracked_runtime_config():
+    sample_path = REPO_ROOT / "config.example.json"
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    operations = (REPO_ROOT / "docs" / "guides" / "OPERATIONS_FEISHU.md").read_text(encoding="utf-8")
+
+    assert sample_path.exists()
+
+    payload = json.loads(sample_path.read_text(encoding="utf-8"))
+    assert payload["agents"]["defaults"]["workspace"] == "~/.nanobot/workspace"
+    assert payload["integrations"]["feishu"]["auth"]["appId"] == ""
+    assert payload["integrations"]["feishu"]["auth"]["appSecret"] == ""
+    assert payload["integrations"]["feishu"]["auth"]["encryptKey"] == ""
+    assert payload["integrations"]["feishu"]["auth"]["verificationToken"] == ""
+    assert payload["integrations"]["feishu"]["api"]["apiBase"] == "https://open.feishu.cn/open-apis"
+    assert "/config.json" in gitignore
+    assert "config.example.json" in readme
+    assert "~/.nanobot/config.json" in readme
+    assert "config.example.json" in operations
+    assert "~/.nanobot/config.json" in operations
+
+    if shutil.which("git") and (REPO_ROOT / ".git").exists():
+        tracked_root_config = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "config.json"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        staged_root_config_removal = subprocess.run(
+            ["git", "diff", "--cached", "--name-status", "--", "config.json"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        worktree_root_config_removal = subprocess.run(
+            ["git", "diff", "--name-only", "--", "config.json"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert (
+            tracked_root_config.returncode != 0
+            or "D\tconfig.json" in staged_root_config_removal.stdout
+            or "config.json" in worktree_root_config_removal.stdout
+        )
 
 
 def test_config_matches_github_copilot_codex_with_hyphen_prefix():

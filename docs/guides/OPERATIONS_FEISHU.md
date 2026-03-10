@@ -10,8 +10,11 @@ This runbook captures P0 production setup, smoke checks, rollout/rollback, and m
   - Add allowed hosts in `integrations.feishu.oauth.allowedRedirectDomains`.
 - Secrets via environment variables
   - Inject `app_id/app_secret/encrypt_key/verification_token` via env vars.
-  - Do not commit real credentials to `config.json`.
+  - Use `config.example.json` only as a sanitized reference; keep the real runtime file at `~/.nanobot/config.json`.
+  - If you still have a legacy repo-local `./config.json`, move it to `~/.nanobot/config.json`.
+  - Do not commit real credentials to `config.example.json` or any local `config.json` copy.
   - Template files:
+    - Runtime config sample: `config.example.json`
     - Production: `ops/env/feishu-production.env.example`
     - Local test: `ops/env/feishu-local.env.example`
 - Feishu OAuth scope minimization
@@ -30,7 +33,7 @@ This runbook captures P0 production setup, smoke checks, rollout/rollback, and m
     - `sqliteBackupDir`
     - `sqliteBackupIntervalHours`
     - `sqliteBackupRetentionDays`
-  - Backup executor script: `scripts/ops/sqlite_backup_rotate.py`
+  - Backup executor script: `ops/maintenance/sqlite_backup_rotate.py`
 - Retention and compliance
   - `channels.feishu.auditEventRetentionDays`
   - `channels.feishu.auditMessageIndexRetentionDays`
@@ -48,15 +51,15 @@ This runbook captures P0 production setup, smoke checks, rollout/rollback, and m
 
 ## 2) Smoke Scripts (P0)
 
-Use `scripts/ops/feishu_smoke.py` with one scenario at a time:
+Use `ops/feishu/feishu_smoke.py` with one scenario at a time:
 
 ```bash
-python3.11 scripts/ops/feishu_smoke.py oauth_smoke --actor-open-id ou_xxx --chat-id oc_xxx
-python3.11 scripts/ops/feishu_smoke.py bitable_flow_smoke --fields-json '{"事项":"联调冒烟"}' --cleanup
-python3.11 scripts/ops/feishu_smoke.py calendar_task_sync_smoke --cleanup
-python3.11 scripts/ops/feishu_smoke.py message_history_smoke --chat-id oc_xxx --sender-open-id ou_xxx
-python3.11 scripts/ops/feishu_smoke.py audit_query_smoke --chat-id oc_xxx --retention-days 1
-python3.11 scripts/ops/feishu_smoke.py memory_flush_smoke --threshold 3
+python3.11 ops/feishu/feishu_smoke.py oauth_smoke --actor-open-id ou_xxx --chat-id oc_xxx
+python3.11 ops/feishu/feishu_smoke.py bitable_flow_smoke --fields-json '{"事项":"联调冒烟"}' --cleanup
+python3.11 ops/feishu/feishu_smoke.py calendar_task_sync_smoke --cleanup
+python3.11 ops/feishu/feishu_smoke.py message_history_smoke --chat-id oc_xxx --sender-open-id ou_xxx
+python3.11 ops/feishu/feishu_smoke.py audit_query_smoke --chat-id oc_xxx --retention-days 1
+python3.11 ops/feishu/feishu_smoke.py memory_flush_smoke --threshold 3
 ```
 
 Expected result: each command prints JSON with `"ok": true`.
@@ -64,13 +67,13 @@ Expected result: each command prints JSON with `"ok": true`.
 SQLite backup can be scheduled with cron (example every 24h):
 
 ```bash
-0 3 * * * /usr/bin/python3.11 /path/to/repo/scripts/ops/sqlite_backup_rotate.py
+0 3 * * * /usr/bin/python3.11 /path/to/repo/ops/maintenance/sqlite_backup_rotate.py
 ```
 
 Install the cron job automatically:
 
 ```bash
-PYTHON_BIN=/usr/bin/python3.11 SCHEDULE="0 3 * * *" ./scripts/ops/install_sqlite_backup_cron.sh
+PYTHON_BIN=/usr/bin/python3.11 SCHEDULE="0 3 * * *" ./ops/maintenance/install_sqlite_backup_cron.sh
 ```
 
 Or install with systemd:

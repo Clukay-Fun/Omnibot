@@ -42,6 +42,13 @@ tables:
     assert len(payload["entries"]) == 1
 
 
+def test_table_registry_loads_packaged_builtin_registry_asset(tmp_path):
+    registry = TableRegistry(workspace=tmp_path)
+
+    assert registry.map_field("case_registry", "status") == "案件状态"
+    assert registry.get_table_metadata("case_registry")["display_name"] == "案件项目总库"
+
+
 def test_table_registry_invalidates_profile_when_schema_changes(tmp_path):
     workspace_registry = tmp_path / "skills" / "table_registry.yaml"
     workspace_registry.parent.mkdir(parents=True, exist_ok=True)
