@@ -44,11 +44,9 @@ def test_load_templates_includes_packaged_builtin_extract_assets() -> None:
     assert templates["contract"].template_id == "contract_minimal"
 
 
-def test_load_templates_prefers_workspace_extract_over_skillspec_extract(tmp_path: Path) -> None:
+def test_load_templates_ignores_legacy_skillspec_extract(tmp_path: Path) -> None:
     skillspec_extract = tmp_path / "skillspec" / "extract"
-    workspace_extract = tmp_path / "extract"
     skillspec_extract.mkdir(parents=True)
-    workspace_extract.mkdir(parents=True)
 
     (skillspec_extract / "invoice.yaml").write_text(
         "\n".join(
@@ -64,24 +62,10 @@ def test_load_templates_prefers_workspace_extract_over_skillspec_extract(tmp_pat
         ),
         encoding="utf-8",
     )
-    (workspace_extract / "invoice.yaml").write_text(
-        "\n".join(
-            [
-                "id: invoice_workspace",
-                "document_type: invoice",
-                "fields:",
-                "  - name: invoice_number",
-                "    required: true",
-                "    patterns:",
-                "      - 'Invoice ID[: ]+([A-Z0-9-]+)'",
-            ]
-        ),
-        encoding="utf-8",
-    )
 
     templates = load_extract_templates(tmp_path)
 
-    assert templates["invoice"].template_id == "invoice_workspace"
+    assert templates["invoice"].template_id == "invoice_minimal"
 
 
 def test_load_templates_ignores_invalid_workspace_override(tmp_path: Path) -> None:

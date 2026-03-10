@@ -34,6 +34,7 @@ def test_agent_loop_auto_syncs_missing_workspace_templates(tmp_path) -> None:
     assert (tmp_path / "MEMORY.md").exists()
     assert (tmp_path / "runtime_texts.yaml").exists()
     assert (tmp_path / "memory" / "HISTORY.md").exists()
+    assert not (tmp_path / "skillspec").exists()
 
 
 def test_feishu_channel_auto_syncs_missing_workspace_templates(tmp_path) -> None:
@@ -45,6 +46,7 @@ def test_feishu_channel_auto_syncs_missing_workspace_templates(tmp_path) -> None
     assert (tmp_path / "MEMORY.md").exists()
     assert (tmp_path / "runtime_texts.yaml").exists()
     assert (tmp_path / "memory" / "feishu" / "users").exists()
+    assert not (tmp_path / "skillspec").exists()
 
 
 def test_packaged_workspace_templates_are_grouped_by_domain() -> None:
@@ -85,6 +87,7 @@ def test_sync_workspace_templates_keeps_external_layout_unchanged(tmp_path) -> N
     assert history_path.is_file()
     assert history_path.read_text(encoding="utf-8") == ""
     assert not (tmp_path / "workspace").exists()
+    assert not (tmp_path / "skillspec").exists()
 
 
 def test_agent_loop_reads_packaged_workspace_template_when_workspace_copy_missing(tmp_path) -> None:

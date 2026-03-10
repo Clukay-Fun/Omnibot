@@ -59,7 +59,8 @@ The runtime workspace keeps its user-facing paths stable even though the package
 - Workspace overrides continue to win over packaged defaults:
   - `skills/table_registry.yaml` overrides the built-in registry.
   - `extract/*.yaml` overrides built-in extraction templates.
-  - `skillspec/` may still exist in older workspaces as a compatibility path for legacy extract overrides.
+  - Older workspaces may still contain `skillspec/` as a historical leftover, but runtime code does not read extract overrides from it.
+  - If an old workspace still stores custom extract templates under `skillspec/extract/`, move those YAML files to `extract/`.
 
 Compatibility rule: repository/package reorganization must not require users to move existing workspace files unless a migration is explicitly documented.
 

@@ -147,7 +147,6 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
 def bootstrap_workspace_dirs(workspace: Path) -> None:
     """Create runtime directories required by current features."""
-    ensure_dir(workspace / "skillspec")
     ensure_dir(workspace / "memory" / "users")
     ensure_dir(workspace / "memory" / "feishu" / "users")
     ensure_dir(workspace / "memory" / "feishu" / "chats")

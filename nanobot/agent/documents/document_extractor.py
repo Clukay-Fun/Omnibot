@@ -235,7 +235,6 @@ def _workspace_template_dirs(workspace_root: Path) -> list[Path]:
         - 返回可能蕴含有定义集所在的预留路径坐标集。
     """
     return [
-        workspace_root / "skillspec" / "extract",
         workspace_root / "extract",
     ]
 
