@@ -3,8 +3,11 @@
     - 校验命令行定时任务子命令的参数校验行为。
 """
 
+from pathlib import Path
+
 from typer.testing import CliRunner
 
+from nanobot.cli import commands
 from nanobot.cli.commands import app
 
 runner = CliRunner()
@@ -40,6 +43,32 @@ def test_cron_add_rejects_invalid_timezone(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 1
     assert "Error: unknown timezone 'America/Vancovuer'" in result.stdout
     assert not (tmp_path / "cron" / "jobs.json").exists()
+
+
+def test_cron_list_uses_legacy_store_compat_paths(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeCronService:
+        def __init__(self, store_path: Path, legacy_store_paths=None):
+            captured["store_path"] = store_path
+            captured["legacy_store_paths"] = list(legacy_store_paths or [])
+
+        def list_jobs(self, include_disabled: bool = False):
+            _ = include_disabled
+            return []
+
+    state_root = tmp_path / "state"
+    data_root = tmp_path / "data"
+
+    monkeypatch.setattr(commands, "get_state_path", lambda: state_root)
+    monkeypatch.setattr(commands, "get_data_path", lambda: data_root, raising=False)
+    monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCronService)
+
+    result = runner.invoke(app, ["cron", "list"])
+
+    assert result.exit_code == 0
+    assert captured["store_path"] == state_root / "cron" / "jobs.json"
+    assert captured["legacy_store_paths"] == [data_root / "cron" / "jobs.json"]
 
 
 #endregion
