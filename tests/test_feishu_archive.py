@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from nanobot.feishu.archive import FEISHU_ARCHIVED_UNTIL_KEY, FeishuAsyncArchiveService
+from nanobot.feishu.memory import FeishuUserMemoryStore
+from nanobot.providers.base import LLMResponse, ToolCallRequest
+from nanobot.session.manager import SessionManager
+
+
+def _make_archive_service(tmp_path: Path) -> tuple[FeishuAsyncArchiveService, SessionManager, FeishuUserMemoryStore, MagicMock]:
+    session_manager = SessionManager(tmp_path)
+    memory_store = FeishuUserMemoryStore(tmp_path / "feishu-memory.sqlite3")
+    provider = MagicMock()
+    service = FeishuAsyncArchiveService(
+        memory_store=memory_store,
+        session_manager=session_manager,
+        provider=provider,
+        model="test-model",
+    )
+    return service, session_manager, memory_store, provider
+
+
+@pytest.mark.asyncio
+async def test_overflow_archive_persists_summary_and_updates_cursor(tmp_path: Path) -> None:
+    service, session_manager, memory_store, provider = _make_archive_service(tmp_path)
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call-1",
+                    name="save_feishu_user_memory",
+                    arguments={
+                        "profile": "likes coffee",
+                        "summary": "older messages archived",
+                    },
+                )
+            ],
+        )
+    )
+
+    session = session_manager.get_or_create("feishu:dm:ou_user_1")
+    for i in range(8):
+        session.add_message("user" if i % 2 == 0 else "assistant", f"msg-{i}")
+    session_manager.save(session)
+
+    queued = await service.maybe_enqueue_overflow(
+        "feishu:dm:ou_user_1",
+        "tenant-1",
+        "ou_user_1",
+        keep_messages=4,
+    )
+
+    assert queued is True
+    await service.wait_for_idle()
+
+    record = memory_store.get("tenant-1", "ou_user_1")
+    assert record is not None
+    assert record.summary == "older messages archived"
+
+    session_after = session_manager.get_or_create("feishu:dm:ou_user_1")
+    assert len(session_after.messages) == 8
+    assert session_after.metadata[FEISHU_ARCHIVED_UNTIL_KEY] == 4
+
+
+@pytest.mark.asyncio
+async def test_overflow_archive_waits_for_next_message_before_requeue(tmp_path: Path) -> None:
+    service, session_manager, _memory_store, provider = _make_archive_service(tmp_path)
+
+    release = AsyncMock()
+
+    async def _chat_with_retry(**_kwargs):
+        await release()
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call-1",
+                    name="save_feishu_user_memory",
+                    arguments={"profile": "p", "summary": "s"},
+                )
+            ],
+        )
+
+    provider.chat_with_retry = AsyncMock(side_effect=_chat_with_retry)
+
+    session = session_manager.get_or_create("feishu:dm:ou_user_1")
+    for i in range(8):
+        session.add_message("user" if i % 2 == 0 else "assistant", f"msg-{i}")
+    session_manager.save(session)
+
+    first = await service.maybe_enqueue_overflow("feishu:dm:ou_user_1", "tenant-1", "ou_user_1", keep_messages=4)
+    second = await service.maybe_enqueue_overflow("feishu:dm:ou_user_1", "tenant-1", "ou_user_1", keep_messages=4)
+
+    assert first is True
+    assert second is False
+    await service.wait_for_idle()

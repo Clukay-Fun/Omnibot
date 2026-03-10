@@ -1,4 +1,4 @@
-"""Tests for FeishuChannel._split_elements_by_table_limit.
+"""Tests for FeishuRenderer.split_elements_by_table_limit.
 
 Feishu cards reject messages that contain more than one table element
 (API error 11310: card table number over limit).  The helper splits a flat
@@ -6,7 +6,7 @@ list of card elements into groups so that each group contains at most one
 table, allowing nanobot to send multiple cards instead of failing.
 """
 
-from nanobot.channels.feishu import FeishuChannel
+from nanobot.feishu.renderer import FeishuRenderer
 
 
 def _md(text: str) -> dict:
@@ -22,7 +22,7 @@ def _table() -> dict:
     }
 
 
-split = FeishuChannel._split_elements_by_table_limit
+split = FeishuRenderer.split_elements_by_table_limit
 
 
 def test_empty_list_returns_single_empty_group() -> None:

@@ -71,3 +71,23 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert "Channel: cli" in user_content
     assert "Chat ID: direct" in user_content
     assert "Return exactly: OK" in user_content
+
+
+def test_extra_context_is_merged_into_user_message(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    messages = builder.build_messages(
+        history=[],
+        current_message="Answer briefly",
+        channel="feishu",
+        chat_id="oc_chat_1",
+        extra_context=["Profile: likes coffee", "Summary: discussed billing"],
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, str)
+    assert "[Extra Context" in user_content
+    assert "Profile: likes coffee" in user_content
+    assert "Summary: discussed billing" in user_content
+    assert "Answer briefly" in user_content

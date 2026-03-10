@@ -23,9 +23,10 @@ class ChannelManager:
     - Route outbound messages
     """
 
-    def __init__(self, config: Config, bus: MessageBus):
+    def __init__(self, config: Config, bus: MessageBus, **shared_services: Any):
         self.config = config
         self.bus = bus
+        self.shared_services = shared_services
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
 
@@ -76,6 +77,13 @@ class ChannelManager:
                 self.channels["feishu"] = FeishuChannel(
                     self.config.channels.feishu, self.bus,
                     groq_api_key=self.config.providers.groq.api_key,
+                    gateway_host=self.config.gateway.host,
+                    gateway_port=self.config.gateway.port,
+                    workspace=self.config.workspace_path,
+                    session_manager=self.shared_services.get("session_manager"),
+                    provider=self.shared_services.get("provider"),
+                    model=self.shared_services.get("model"),
+                    memory_window=int(self.shared_services.get("memory_window") or 0),
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:

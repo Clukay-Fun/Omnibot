@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("telegram")
+
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.telegram import TelegramChannel

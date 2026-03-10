@@ -1,4 +1,5 @@
-from nanobot.channels.feishu import FeishuChannel, _extract_post_content
+from nanobot.channels.feishu import _extract_post_content
+from nanobot.feishu.websocket import register_optional_event
 
 
 def test_extract_post_content_supports_post_wrapper_shape() -> None:
@@ -45,7 +46,7 @@ def test_register_optional_event_keeps_builder_when_method_missing() -> None:
         pass
 
     builder = Builder()
-    same = FeishuChannel._register_optional_event(builder, "missing", object())
+    same = register_optional_event(builder, "missing", object())
     assert same is builder
 
 
@@ -59,7 +60,7 @@ def test_register_optional_event_calls_supported_method() -> None:
 
     builder = Builder()
     handler = object()
-    same = FeishuChannel._register_optional_event(builder, "register_event", handler)
+    same = register_optional_event(builder, "register_event", handler)
 
     assert same is builder
     assert called == [handler]
