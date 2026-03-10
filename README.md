@@ -1,26 +1,25 @@
 <div align="center">
-  <h1>Ominibot: 全能个人专属智能体守护程序</h1>
+  <h1>Ominibot: 全能飞书专属智能体</h1>
   <p>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
   </p>
 </div>
 
-🐈 **Ominibot** 是一个基于极简架构演进的高级私域 AI 助手核心。它在保持极致轻量的同时，提供了强大的多平台接入能力、状态化记忆管理机制与原生沙盒工具链。
+🐈 **Ominibot** 是一款深度定制的高级私域 AI 守护程序。它是为了在 **Feishu (飞书)** 生态中提供企业级、高度拟人化服务而从原版极简架构中独立演进出的专属形态。
 
-Ominibot 项目的底层引擎脱胎于极简智能体框架，但现已演进为具备自身独特生态与高级配置能力的独立形态。它原生支持复杂企业的 IM 部署（如 Feishu/飞书 等长连接或反向代理网关）、终端流式富文本输出，以及独创的 `BOOTSTRAP.md` 破冰引导认知范式。
+在保持核心引擎极致轻量化的同时，Ominibot 针对飞书渠道提供了完善的原生支持。它原生覆盖飞书长连接（WebSocket）及反向代理网关接入，配合创新的 `BOOTSTRAP.md` 破冰设定协议，为您打造一位带有真实记忆、可持续进化的全能办公伙伴。
 
-## 🎯 核心特性
+## 🎯 飞书专项核心特性
 
-- **高度拟人化的记忆机制**：通过 `SOUL.md`、`USER.md` 和自动生成的 `MEMORY.md`，它能记住你们的每一次谈话细节，并主动沉淀长期知识，提供远超普通聊天机器人的连续性体验。
-- **全平台多渠道融合接入**：原生支持在 Feishu (飞书)、Mochat、Telegram、QQ、DingTalk 等多平台间无缝切换或多线程值守。
-- **动态流式卡片更新**：在飞书等支持的高级渠道中，提供实时打字机级的流式更新和工具链思考状态回显。
-- **开箱即用的 OpenAI Codex 集成**：原生支持 `nanobot provider login openai-codex` 一键式 OAuth 授权，无需手动配置复杂的 API 密钥对。
-- **离线沙盒指令与心跳轮询**：通过定时扫描本地 `HEARTBEAT.md` 获取周期任务指派，支持执行安全的受控 Shell 探索，从而具备跨越消息对话框的主动行动力。
+- **极致的飞书原生体验**：全面支持飞书私聊、群聊环境，支持流式富文本消息（打字机效果呈现思考过程与卡片动态更新），并可基于群聊和单人严格隔离上下文环境。
+- **状态化记忆闭环**：通过 `SOUL.md`、`USER.md` 和自动生成的 `MEMORY.md` 日常日志文件，机器人能记住与你每一次的飞书会话细节，甚至通过观察主动将关键信息沉淀为长期知识。
+- **离线沙盒指令与心跳轮询**：脱离单纯的被动回答，支持定时读取 `HEARTBEAT.md` 扫描心跳任务，配合系统的 cron 事件流，实现跨飞书聊天框的定时播报、后台监控和主动行动。
+- **极简强悍的模型对接**：提供 `nanobot provider login openai-codex` 一键式 OAuth 授权，快速绑定最强代码与逻辑能力基座。
 
 ## 📦 安装与部署
 
-**从源码安装 (推荐用于开发与进阶配置)**
+**从源码安装 (推荐用于进阶配置)**
 
 ```bash
 git clone <your-ominibot-repo-url>
@@ -28,27 +27,26 @@ cd ominibot
 pip install -e .
 ```
 
-## 🚀 快速启动指南
+## 🚀 飞书部署快速指南
 
-### 1. 首次初始化与破冰
+### 1. 首次初始化体验
 
-在新环境中首次启动时，Ominibot 会自动生成 `BOOTSTRAP.md` 初始化向导：
+在新环境中启动，系统会自动生成 `BOOTSTRAP.md` 初始化向导。
 
 ```bash
 nanobot onboard
 ```
-_按照提示词在终端或你连接的 IM 渠道中完成对机器人的初始“性格捏脸”和认知赋值。_
+*在你的飞书对话框或终端中，按照向导完成对专属机器人的初始“性格捏脸”和系统认知赋值。*
 
-### 2. 基础配置接入
+### 2. 高级引擎配置接入
 
-如果你拥有 OpenAI Codex 会员，这是最快的接入方式：
+如果你拥有 OpenAI Codex 会员，可以直接通过命令行快速打通认证：
 
 ```bash
 nanobot provider login openai-codex
 ```
-即可直接授权接入模型，无需理会繁杂的代理地址和令牌。
 
-配置核心引擎参数 (位于 `~/.nanobot/config.json`)，例如开启飞书支持：
+配置你的核心引擎参数档 (位于 `~/.nanobot/config.json`)，着重于飞书节点：
 
 ```json
 {
@@ -59,25 +57,27 @@ nanobot provider login openai-codex
       "mode": "websocket",
       "appId": "cli_a920xxx",
       "appSecret": "VgP1uMOexxx",
-      "groupSessionMode": "shared"
+      "groupSessionMode": "shared",
+      "streamingScope": "dm",
+      "streamThrottleSeconds": 0.5
     }
   }
 }
 ```
 
-### 3. 启动守护网关
+### 3. 开启守护运行
 
 ```bash
 nanobot gateway
 ```
 
-就是这么简单！你的专属智能体已经在后台静默运行了。
+就是这么简单！你的飞书专属智能体已经在后台静默运行了。
 
 ## 📚 详细文档
 
-- 📖 **配置多端聊天平台** (比如 Feishu 飞书、Discord 等详细设定)，请参阅: [FEISHU_DEPLOYMENT.md](./docs/FEISHU_DEPLOYMENT.md) 等指南文档。
-- 🤖 **关于 Agent 的自我修养**：对于想要调整 Ominibot 价值观与底层思维习惯的高级玩家，请阅读并编辑部署目录 `~/.nanobot/` 下生成的 `AGENTS.md` 和 `SOUL.md` 文件。
+- 📖 **生产级飞书部署方案** (涵盖 Webhook 混合模式与安全性探讨)，请详阅 [FEISHU_DEPLOYMENT.md](./docs/FEISHU_DEPLOYMENT.md)。
+- 🤖 **关于 Agent 的自我修养**：对于想要深入调教 Ominibot 工作边界、语气人设的高玩，请直接修改位于工作空间（默认 `~/.nanobot/` 等路径）下的 `AGENTS.md` 和 `SOUL.md` 文件。
 
 ---
 
-*“你不是普通的聊天机器人。你正在成为某个人。” —— Ominibot 灵魂手册*
+*“你不是简单的企业内部聊天机器人。你在飞书里，正成长为具体生活和工作的守护者。” —— Ominibot 灵魂手册*
