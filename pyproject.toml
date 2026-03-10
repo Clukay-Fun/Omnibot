@@ -1,13 +1,14 @@
 [project]
 name = "nanobot-ai"
-version = "0.1.4.post4"
-description = "A lightweight personal AI assistant framework"
+version = "0.1.5"
+description = "Omnibot — nanobot fork optimized for Feishu/Lark: streaming cards, Bitable CRUD, SkillSpec LLM routing, multi-channel AI gateway"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
+    {name = "Omnibot contributors"},
     {name = "nanobot contributors"}
 ]
-keywords = ["ai", "agent", "chatbot"]
+keywords = ["ai", "agent", "chatbot", "feishu", "lark", "bitable", "omnibot", "nanobot"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -30,7 +31,7 @@ dependencies = [
     "rich>=14.0.0,<15.0.0",
     "croniter>=6.0.0,<7.0.0",
     "dingtalk-stream>=0.24.0,<1.0.0",
-    "python-telegram-bot[socks]>=22.6,<23.0",
+    "python-telegram-bot[socks]>=22.0,<23.0",
     "lark-oapi>=1.5.0,<2.0.0",
     "socksio>=1.0.0,<2.0.0",
     "python-socketio>=5.16.0,<6.0.0",
@@ -42,8 +43,7 @@ dependencies = [
     "prompt-toolkit>=3.0.50,<4.0.0",
     "mcp>=1.26.0,<2.0.0",
     "json-repair>=0.57.0,<1.0.0",
-    "chardet>=3.0.2,<6.0.0",
-    "openai>=2.8.0",
+    "PyYAML>=6.0.2,<7.0.0",
 ]
 
 [project.optional-dependencies]
@@ -56,9 +56,6 @@ dev = [
     "pytest>=9.0.0,<10.0.0",
     "pytest-asyncio>=1.3.0,<2.0.0",
     "ruff>=0.1.0",
-    "matrix-nio[e2e]>=0.25.2",
-    "mistune>=3.0.0,<4.0.0",
-    "nh3>=0.2.17,<1.0.0",
 ]
 
 [project.scripts]
@@ -79,20 +76,22 @@ packages = ["nanobot"]
 include = [
     "nanobot/**/*.py",
     "nanobot/templates/**/*.md",
+    "nanobot/templates/**/*.json",
+    "nanobot/templates/**/*.yaml",
+    "nanobot/templates/**/*.yml",
     "nanobot/skills/**/*.md",
     "nanobot/skills/**/*.sh",
+    "nanobot/skills/**/*.yaml",
+    "nanobot/skills/**/*.yml",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "nanobot/",
-    "bridge/",
     "README.md",
     "LICENSE",
 ]
 
-[tool.hatch.build.targets.wheel.force-include]
-"bridge" = "nanobot/bridge"
 
 [tool.ruff]
 line-length = 100

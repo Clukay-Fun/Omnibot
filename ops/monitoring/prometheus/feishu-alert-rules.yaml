@@ -1,0 +1,72 @@
+groups:
+  - name: nanobot-feishu
+    rules:
+      - alert: NanobotFeishuOAuthSuccessRateLow
+        expr: oauth_success_rate < 0.98
+        for: 10m
+        labels:
+          severity: high
+          service: nanobot-feishu
+        annotations:
+          summary: OAuth success rate is below 98%
+          description: Hold rollout and inspect callback/refresh failure reasons.
+
+      - alert: NanobotFeishuToolSuccessRateLow
+        expr: tools_success_rate < 0.97
+        for: 10m
+        labels:
+          severity: high
+          service: nanobot-feishu
+        annotations:
+          summary: Tool success rate is below 97%
+          description: Disable non-core feature flags and inspect upstream failures.
+
+      - alert: NanobotFeishuLatencyP95High
+        expr: ingress_processing_latency_p95_seconds > 2
+        for: 10m
+        labels:
+          severity: high
+          service: nanobot-feishu
+        annotations:
+          summary: Feishu P95 processing latency is above 2s
+          description: Throttle optional tools and inspect slow dependencies.
+
+      - alert: NanobotFeishu429RatioHigh
+        expr: feishu_api_429_ratio > 0.05
+        for: 10m
+        labels:
+          severity: high
+          service: nanobot-feishu
+        annotations:
+          summary: Feishu API 429 ratio is above 5%
+          description: Enable degradation mode and keep Bitable core path only.
+
+      - alert: NanobotFeishu5xxRatioHigh
+        expr: feishu_api_5xx_ratio > 0.03
+        for: 10m
+        labels:
+          severity: high
+          service: nanobot-feishu
+        annotations:
+          summary: Feishu API 5xx ratio is above 3%
+          description: Degrade optional tools and evaluate rollback.
+
+      - alert: NanobotFeishuMemoryQueueBacklog
+        expr: memory_writeback_queue_depth > 200
+        for: 10m
+        labels:
+          severity: medium
+          service: nanobot-feishu
+        annotations:
+          summary: Memory writeback queue backlog is high
+          description: Check SQLite locking and write throughput.
+
+      - alert: NanobotFeishuCrossUserContamination
+        expr: business_cross_user_contamination_count > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: nanobot-feishu
+        annotations:
+          summary: Cross-user contamination signal detected
+          description: Disable optional tools immediately and trigger incident response.

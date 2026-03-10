@@ -1,4 +1,7 @@
-"""Channel manager for coordinating chat channels."""
+"""描述:
+主要功能:
+    - 统一管理频道初始化、生命周期与消息分发。
+"""
 
 from __future__ import annotations
 
@@ -7,23 +10,25 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
 
+#region 频道管理器
 
 class ChannelManager:
-    """
-    Manages chat channels and coordinates message routing.
+    """用处，参数
 
-    Responsibilities:
-    - Initialize enabled channels (Telegram, WhatsApp, etc.)
-    - Start/stop channels
-    - Route outbound messages
+    功能:
+        - 协调频道实例并处理统一的外发调度。
     """
 
     def __init__(self, config: Config, bus: MessageBus):
+        """用处，参数
+
+        功能:
+            - 保存配置和总线并加载启用频道。
+        """
         self.config = config
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
@@ -32,7 +37,11 @@ class ChannelManager:
         self._init_channels()
 
     def _init_channels(self) -> None:
-        """Initialize channels based on config."""
+        """用处，参数
+
+        功能:
+            - 按配置创建可用频道实例。
+        """
 
         # Telegram channel
         if self.config.channels.telegram.enabled:
@@ -73,9 +82,15 @@ class ChannelManager:
         if self.config.channels.feishu.enabled:
             try:
                 from nanobot.channels.feishu import FeishuChannel
+                feishu_state_db_path = self.config.resolve_feishu_state_db_path()
+                feishu_sqlite_options = self.config.resolve_feishu_sqlite_options()
                 self.channels["feishu"] = FeishuChannel(
-                    self.config.channels.feishu, self.bus,
-                    groq_api_key=self.config.providers.groq.api_key,
+                    self.config.channels.feishu,
+                    self.bus,
+                    workspace=self.config.workspace_path,
+                    feishu_data_config=self.config.tools.feishu_data,
+                    state_db_path=feishu_state_db_path,
+                    sqlite_options=feishu_sqlite_options,
                 )
                 logger.info("Feishu channel enabled")
             except ImportError as e:
@@ -150,25 +165,25 @@ class ChannelManager:
             except ImportError as e:
                 logger.warning("Matrix channel not available: {}", e)
 
-        self._validate_allow_from()
-
-    def _validate_allow_from(self) -> None:
-        for name, ch in self.channels.items():
-            if getattr(ch.config, "allow_from", None) == []:
-                raise SystemExit(
-                    f'Error: "{name}" has empty allowFrom (denies all). '
-                    f'Set ["*"] to allow everyone, or add specific user IDs.'
-                )
-
     async def _start_channel(self, name: str, channel: BaseChannel) -> None:
-        """Start a channel and log any exceptions."""
+        """用处，参数
+
+        功能:
+            - 启动单个频道并处理异常日志。
+        """
         try:
             await channel.start()
         except Exception as e:
             logger.error("Failed to start channel {}: {}", name, e)
 
+#region 生命周期与分发
+
     async def start_all(self) -> None:
-        """Start all channels and the outbound dispatcher."""
+        """用处，参数
+
+        功能:
+            - 启动调度任务并并发启动全部频道。
+        """
         if not self.channels:
             logger.warning("No channels enabled")
             return
@@ -186,7 +201,11 @@ class ChannelManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     async def stop_all(self) -> None:
-        """Stop all channels and the dispatcher."""
+        """用处，参数
+
+        功能:
+            - 停止调度任务并关闭全部频道。
+        """
         logger.info("Stopping all channels...")
 
         # Stop dispatcher
@@ -206,7 +225,11 @@ class ChannelManager:
                 logger.error("Error stopping {}: {}", name, e)
 
     async def _dispatch_outbound(self) -> None:
-        """Dispatch outbound messages to the appropriate channel."""
+        """用处，参数
+
+        功能:
+            - 轮询外发队列并路由到目标频道。
+        """
         logger.info("Outbound dispatcher started")
 
         while True:
@@ -236,12 +259,24 @@ class ChannelManager:
             except asyncio.CancelledError:
                 break
 
+#endregion
+
+#region 查询接口
+
     def get_channel(self, name: str) -> BaseChannel | None:
-        """Get a channel by name."""
+        """用处，参数
+
+        功能:
+            - 返回指定名称对应的频道实例。
+        """
         return self.channels.get(name)
 
     def get_status(self) -> dict[str, Any]:
-        """Get status of all channels."""
+        """用处，参数
+
+        功能:
+            - 汇总每个频道的启用与运行状态。
+        """
         return {
             name: {
                 "enabled": True,
@@ -252,5 +287,13 @@ class ChannelManager:
 
     @property
     def enabled_channels(self) -> list[str]:
-        """Get list of enabled channel names."""
+        """用处，参数
+
+        功能:
+            - 返回当前可用频道名称列表。
+        """
         return list(self.channels.keys())
+
+#endregion
+
+#endregion

@@ -1,0 +1,67 @@
+version: 1
+service: nanobot-feishu
+owner: feishu-oncall
+
+alerts:
+  - id: oauth_success_rate_low
+    severity: high
+    metric: oauth.success_rate
+    condition: "< 0.98"
+    window: 10m
+    action: "block rollout and inspect callback/token refresh failures"
+
+  - id: tool_success_rate_low
+    severity: high
+    metric: tools.success_rate
+    condition: "< 0.97"
+    window: 10m
+    action: "disable non-core feature flags and inspect provider errors"
+
+  - id: processing_p95_high
+    severity: high
+    metric: ingress.processing_latency_p95_seconds
+    condition: "> 2"
+    window: 10m
+    action: "throttle optional tools and inspect external dependency latency"
+
+  - id: feishu_429_high
+    severity: high
+    metric: feishu.api_429_ratio
+    condition: "> 0.05"
+    window: 10m
+    action: "enable degradation mode (keep Bitable core path only)"
+
+  - id: feishu_5xx_high
+    severity: high
+    metric: feishu.api_5xx_ratio
+    condition: "> 0.03"
+    window: 10m
+    action: "degrade non-core tools and evaluate rollback"
+
+  - id: memory_queue_backlog
+    severity: medium
+    metric: memory.writeback_queue_depth
+    condition: "> 200"
+    window: 10m
+    action: "increase flush throughput and inspect blocking I/O"
+
+  - id: memory_flush_failures
+    severity: high
+    metric: memory.flush_failure_rate
+    condition: "> 0.02"
+    window: 10m
+    action: "pause rollout and inspect sqlite locks/disk errors"
+
+  - id: audit_cleanup_failures
+    severity: medium
+    metric: audit.cleanup_failure_count
+    condition: "> 0"
+    window: 30m
+    action: "run manual cleanup and inspect retention task"
+
+  - id: cross_user_contamination_detected
+    severity: critical
+    metric: business.cross_user_contamination_count
+    condition: "> 0"
+    window: 1m
+    action: "immediately disable optional tools and trigger incident response"

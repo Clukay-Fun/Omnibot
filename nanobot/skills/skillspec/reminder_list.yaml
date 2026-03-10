@@ -1,0 +1,37 @@
+meta:
+  id: reminder_list
+  version: "0.1"
+  title: List reminders
+  description: List active reminders for current user with bridge metadata.
+  owner: built_in
+  domain: productivity
+  match:
+    regex: "(提醒列表|查看提醒|我的提醒|提醒有哪些)"
+    keywords:
+      - 提醒列表
+      - 查看提醒
+      - 我的提醒
+      - 提醒有哪些
+params:
+  type: object
+  properties:
+    include_cancelled:
+      type: boolean
+      default: false
+action:
+  kind: reminder_list
+response:
+  type: structured
+  template: |
+    {% if reminders %}
+    当前提醒 {{ reminders | length }} 条：
+    {% for item in reminders %}
+    - {{ item.id }} | {{ item.due_at }} | {{ item.text }} | {{ item.status }}
+    {% endfor %}
+    {% else %}
+    暂无提醒。
+    {% endif %}
+error:
+  code: REMINDER_LIST_ERROR
+  message: 无法读取提醒列表。
+  retryable: true

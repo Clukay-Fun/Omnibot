@@ -1,0 +1,67 @@
+meta:
+  id: doc_recognize
+  version: "0.1"
+  title: Document recognition and field extraction
+  description: Parse uploaded documents via MinerU, classify document type, and extract structured fields.
+  owner: built_in
+  domain: legal_ops
+params:
+  type: object
+  required:
+    - paths
+  properties:
+    paths:
+      type: array
+      description: Absolute or workspace-relative document paths to process.
+      items:
+        type: string
+      min_items: 1
+      max_items: 5
+    write_confirm:
+      type: boolean
+      description: If true, ask for user confirmation before writing extracted fields to downstream systems.
+      default: true
+    target_table:
+      type: string
+      description: Optional destination table name for confirmed write action.
+action:
+  kind: document_pipeline
+  target: process_document
+  args:
+    paths: "{{ params.paths }}"
+    skill_id: "doc_recognize"
+    user_context: "{{ runtime.user_context }}"
+  write_bridge:
+    enabled: true
+    tool: bitable_create
+    confirm_required: true
+    confirm_respect_preference: true
+    args:
+      table_id: "{{ params.target_table }}"
+      fields:
+        source_path: "{{ result.results[0].path }}"
+        document_type: "{{ result.results[0].document_type }}"
+        extracted_fields: "{{ result.results[0].extracted_fields }}"
+    preview:
+      document_type: "{{ result.results[0].document_type }}"
+      source_path: "{{ result.results[0].path }}"
+      extracted_fields: "{{ result.results[0].extracted_fields }}"
+response:
+  type: structured
+  template: |
+    Recognized {{ result.results | length }} document(s).
+    {% for item in result.results %}
+    - {{ item.path }} => {{ item.document_type }} (classification={{ item.classification_confidence }}, extraction={{ item.extraction_confidence }})
+    {% if item.extracted_fields %}  fields={{ item.extracted_fields }}{% endif %}
+    {% if item.errors %}  warnings={{ item.errors }}{% endif %}
+    {% endfor %}
+    {% if result.errors %}
+    Global warnings: {{ result.errors }}
+    {% endif %}
+    {% if params.write_confirm %}
+    Reply `confirm` to continue write action{% if params.target_table %} to {{ params.target_table }}{% endif %}.
+    {% endif %}
+error:
+  code: DOC_PIPELINE_ERROR
+  message: Document recognition failed. Please verify file quality and formats.
+  retryable: true

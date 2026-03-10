@@ -1,12 +1,20 @@
-"""Cron types."""
+"""描述:
+主要功能:
+    - 定义定时任务调度的数据结构。
+"""
 
 from dataclasses import dataclass, field
 from typing import Literal
 
+#region 定时任务类型
 
 @dataclass
 class CronSchedule:
-    """Schedule definition for a cron job."""
+    """用处，参数
+
+    功能:
+        - 描述任务触发方式与时间规则。
+    """
     kind: Literal["at", "every", "cron"]
     # For "at": timestamp in ms
     at_ms: int | None = None
@@ -20,7 +28,11 @@ class CronSchedule:
 
 @dataclass
 class CronPayload:
-    """What to do when the job runs."""
+    """用处，参数
+
+    功能:
+        - 描述任务触发后的执行内容与投递目标。
+    """
     kind: Literal["system_event", "agent_turn"] = "agent_turn"
     message: str = ""
     # Deliver response to channel
@@ -31,7 +43,11 @@ class CronPayload:
 
 @dataclass
 class CronJobState:
-    """Runtime state of a job."""
+    """用处，参数
+
+    功能:
+        - 保存任务运行时状态与最近结果。
+    """
     next_run_at_ms: int | None = None
     last_run_at_ms: int | None = None
     last_status: Literal["ok", "error", "skipped"] | None = None
@@ -40,7 +56,11 @@ class CronJobState:
 
 @dataclass
 class CronJob:
-    """A scheduled job."""
+    """用处，参数
+
+    功能:
+        - 表示完整的单个定时任务对象。
+    """
     id: str
     name: str
     enabled: bool = True
@@ -54,6 +74,13 @@ class CronJob:
 
 @dataclass
 class CronStore:
-    """Persistent store for cron jobs."""
+    """用处，参数
+
+    功能:
+        - 表示定时任务持久化存储结构。
+    """
     version: int = 1
     jobs: list[CronJob] = field(default_factory=list)
+
+
+#endregion

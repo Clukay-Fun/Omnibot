@@ -1,4 +1,7 @@
-"""WhatsApp channel implementation using Node.js bridge."""
+"""描述:
+主要功能:
+    - 提供通过 Node.js 桥接层接入 WhatsApp 的频道实现。
+"""
 
 import asyncio
 import json
@@ -12,18 +15,23 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import WhatsAppConfig
 
+#region WhatsApp频道
 
 class WhatsAppChannel(BaseChannel):
-    """
-    WhatsApp channel that connects to a Node.js bridge.
+    """用处，参数
 
-    The bridge uses @whiskeysockets/baileys to handle the WhatsApp Web protocol.
-    Communication between Python and Node.js is via WebSocket.
+    功能:
+        - 维护桥接连接并处理 WhatsApp 消息收发。
     """
 
     name = "whatsapp"
 
     def __init__(self, config: WhatsAppConfig, bus: MessageBus):
+        """用处，参数
+
+        功能:
+            - 初始化频道状态与消息去重缓存。
+        """
         super().__init__(config, bus)
         self.config: WhatsAppConfig = config
         self._ws = None
@@ -31,7 +39,11 @@ class WhatsAppChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
 
     async def start(self) -> None:
-        """Start the WhatsApp channel by connecting to the bridge."""
+        """用处，参数
+
+        功能:
+            - 连接桥接服务并持续监听入站事件。
+        """
         import websockets
 
         bridge_url = self.config.bridge_url
@@ -69,7 +81,11 @@ class WhatsAppChannel(BaseChannel):
                     await asyncio.sleep(5)
 
     async def stop(self) -> None:
-        """Stop the WhatsApp channel."""
+        """用处，参数
+
+        功能:
+            - 停止频道并关闭当前连接。
+        """
         self._running = False
         self._connected = False
 
@@ -78,7 +94,11 @@ class WhatsAppChannel(BaseChannel):
             self._ws = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through WhatsApp."""
+        """用处，参数
+
+        功能:
+            - 通过桥接服务发送消息到 WhatsApp。
+        """
         if not self._ws or not self._connected:
             logger.warning("WhatsApp bridge not connected")
             return
@@ -94,7 +114,11 @@ class WhatsAppChannel(BaseChannel):
             logger.error("Error sending WhatsApp message: {}", e)
 
     async def _handle_bridge_message(self, raw: str) -> None:
-        """Handle a message from the bridge."""
+        """用处，参数
+
+        功能:
+            - 解析桥接事件并路由到对应处理分支。
+        """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -168,3 +192,6 @@ class WhatsAppChannel(BaseChannel):
 
         elif msg_type == "error":
             logger.error("WhatsApp bridge error: {}", data.get('error'))
+
+
+#endregion

@@ -1,4 +1,7 @@
-"""Base channel interface for chat platforms."""
+"""描述:
+主要功能:
+    - 定义频道实现的统一抽象接口。
+"""
 
 from abc import ABC, abstractmethod
 from typing import Any
@@ -8,24 +11,22 @@ from loguru import logger
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 
+#region 频道基类
 
 class BaseChannel(ABC):
-    """
-    Abstract base class for chat channel implementations.
+    """用处，参数
 
-    Each channel (Telegram, Discord, etc.) should implement this interface
-    to integrate with the nanobot message bus.
+    功能:
+        - 约束各频道的启动、停止、发送与入站处理行为。
     """
 
     name: str = "base"
 
     def __init__(self, config: Any, bus: MessageBus):
-        """
-        Initialize the channel.
+        """用处，参数
 
-        Args:
-            config: Channel-specific configuration.
-            bus: The message bus for communication.
+        功能:
+            - 保存配置与消息总线并初始化运行状态。
         """
         self.config = config
         self.bus = bus
@@ -33,40 +34,51 @@ class BaseChannel(ABC):
 
     @abstractmethod
     async def start(self) -> None:
-        """
-        Start the channel and begin listening for messages.
+        """用处，参数
 
-        This should be a long-running async task that:
-        1. Connects to the chat platform
-        2. Listens for incoming messages
-        3. Forwards messages to the bus via _handle_message()
+        功能:
+            - 启动频道连接并进入消息监听循环。
         """
         pass
 
     @abstractmethod
     async def stop(self) -> None:
-        """Stop the channel and clean up resources."""
+        """用处，参数
+
+        功能:
+            - 停止频道并释放连接资源。
+        """
         pass
 
     @abstractmethod
     async def send(self, msg: OutboundMessage) -> None:
-        """
-        Send a message through this channel.
+        """用处，参数
 
-        Args:
-            msg: The message to send.
+        功能:
+            - 将外发消息投递到具体平台。
         """
         pass
 
     def is_allowed(self, sender_id: str) -> bool:
-        """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
+        """用处，参数
+
+        功能:
+            - 根据 allow_list 规则判断发送者是否可用。
+        """
         allow_list = getattr(self.config, "allow_from", [])
+
+        # 如果没有配置 allow_list，默认允许所有人
         if not allow_list:
-            logger.warning("{}: allow_from is empty — all access denied", self.name)
-            return False
-        if "*" in allow_list:
             return True
-        return str(sender_id) in allow_list
+
+        sender_str = str(sender_id)
+        if sender_str in allow_list:
+            return True
+        if "|" in sender_str:
+            for part in sender_str.split("|"):
+                if part and part in allow_list:
+                    return True
+        return False
 
     async def _handle_message(
         self,
@@ -77,18 +89,10 @@ class BaseChannel(ABC):
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
     ) -> None:
-        """
-        Handle an incoming message from the chat platform.
+        """用处，参数
 
-        This method checks permissions and forwards to the bus.
-
-        Args:
-            sender_id: The sender's identifier.
-            chat_id: The chat/channel identifier.
-            content: Message text content.
-            media: Optional list of media URLs.
-            metadata: Optional channel-specific metadata.
-            session_key: Optional session key override (e.g. thread-scoped sessions).
+        功能:
+            - 校验权限并把入站消息写入总线。
         """
         if not self.is_allowed(sender_id):
             logger.warning(
@@ -112,5 +116,11 @@ class BaseChannel(ABC):
 
     @property
     def is_running(self) -> bool:
-        """Check if the channel is running."""
+        """用处，参数
+
+        功能:
+            - 返回频道当前运行状态。
+        """
         return self._running
+
+#endregion

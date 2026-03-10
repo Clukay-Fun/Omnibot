@@ -1,4 +1,4 @@
-"""Spawn tool for creating background subagents."""
+"""用于创建后台子代理（Subagents）的派生工具。"""
 
 from typing import TYPE_CHECKING, Any
 
@@ -6,10 +6,13 @@ from nanobot.agent.tools.base import Tool
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
+    from nanobot.agent.turn_runtime import TurnRuntime
 
+
+# region [子代理派生工具]
 
 class SpawnTool(Tool):
-    """Tool to spawn a subagent for background task execution."""
+    """用于派生后台子代理执行任务的工具。"""
 
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
@@ -18,10 +21,15 @@ class SpawnTool(Tool):
         self._session_key = "cli:direct"
 
     def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the origin context for subagent announcements."""
+        """设置子代理向最初来源通报结果的上下文。"""
         self._origin_channel = channel
         self._origin_chat_id = chat_id
         self._session_key = f"{channel}:{chat_id}"
+
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self._origin_channel = runtime.channel
+        self._origin_chat_id = runtime.chat_id
+        self._session_key = runtime.session_key or f"{runtime.channel}:{runtime.chat_id}"
 
     @property
     def name(self) -> str:
@@ -30,9 +38,9 @@ class SpawnTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done."
+            "派生（Spawn）一个子代理以在后台处理任务。"
+            "当任务复杂或耗时较长、且可以独立运行时使用。"
+            "子代理将完成任务并在完成后报告。"
         )
 
     @property
@@ -42,22 +50,38 @@ class SpawnTool(Tool):
             "properties": {
                 "task": {
                     "type": "string",
-                    "description": "The task for the subagent to complete",
+                    "description": "需要子代理完成的任务",
                 },
                 "label": {
                     "type": "string",
-                    "description": "Optional short label for the task (for display)",
+                    "description": "可选的任务简短标签（用于显示）",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "可选子代理模式，如 subagent_plan 或 subagent_apply。",
+                },
+                "grant": {
+                    "type": "object",
+                    "description": "可选显式授权对象，例如 {allowed_tools:[...] }。",
                 },
             },
             "required": ["task"],
         }
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
-        """Spawn a subagent to execute the given task."""
+    async def execute(self, **kwargs: Any) -> str:
+        """派生子代理在后台执行指定的任务。"""
+        task = str(kwargs.get("task") or "")
+        label = kwargs.get("label")
+        mode = kwargs.get("mode")
+        grant = kwargs.get("grant") if isinstance(kwargs.get("grant"), dict) else None
         return await self._manager.spawn(
             task=task,
             label=label,
             origin_channel=self._origin_channel,
             origin_chat_id=self._origin_chat_id,
             session_key=self._session_key,
+            mode=mode or "subagent_plan",
+            grant=grant,
         )
+
+# endregion

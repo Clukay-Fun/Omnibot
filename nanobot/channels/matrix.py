@@ -1,4 +1,7 @@
-"""Matrix (Element) channel — inbound sync + outbound message/media delivery."""
+"""描述:
+主要功能:
+    - 提供 Matrix (Element) 频道的双向消息收发能力。
+"""
 
 import asyncio
 import logging
@@ -14,7 +17,6 @@ try:
     from nio import (
         AsyncClient,
         AsyncClientConfig,
-        ContentRepositoryConfigError,
         DownloadError,
         InviteEvent,
         JoinError,
@@ -38,11 +40,11 @@ except ImportError as e:
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_data_dir, get_media_dir
+from nanobot.config.loader import get_data_dir
 from nanobot.utils.helpers import safe_filename
 
 TYPING_NOTICE_TIMEOUT_MS = 30_000
-# Must stay below TYPING_NOTICE_TIMEOUT_MS so the indicator doesn't expire mid-processing.
+# 必须小于 TYPING_NOTICE_TIMEOUT_MS 以防止提示状态在我们仍忙于解决请求中间过程的途中心跳过期。
 TYPING_KEEPALIVE_INTERVAL_MS = 20_000
 MATRIX_HTML_FORMAT = "org.matrix.custom.html"
 _ATTACH_MARKER = "[attachment: {}]"
@@ -73,8 +75,10 @@ MATRIX_ALLOWED_HTML_ATTRIBUTES: dict[str, set[str]] = {
 MATRIX_ALLOWED_URL_SCHEMES = {"https", "http", "matrix", "mailto", "mxc"}
 
 
+#region 辅助方法
+
 def _filter_matrix_html_attribute(tag: str, attr: str, value: str) -> str | None:
-    """Filter attribute values to a safe Matrix-compatible subset."""
+    """筛除过滤提取 Matrix 所支持认可且可以平稳使用的安全性限制较严格的一小部分特定的 HTML 属性集合列表值。"""
     if tag == "a" and attr == "href":
         return value if value.lower().startswith(("https://", "http://", "matrix:", "mailto:")) else None
     if tag == "img" and attr == "src":
@@ -96,14 +100,14 @@ MATRIX_HTML_CLEANER = nh3.Cleaner(
 
 
 def _render_markdown_html(text: str) -> str | None:
-    """Render markdown to sanitized HTML; returns None for plain text."""
+    """借助 Markdown 原文本编译产生进行过安全保障级别过滤限制控制后的可显示版面的安全纯 HTML 节点产物; 对于未有特殊标签存在的文本内容我们通过返回 None 实现对这种平铺情况不做改动和影响。"""
     try:
         formatted = MATRIX_HTML_CLEANER.clean(MATRIX_MARKDOWN(text)).strip()
     except Exception:
         return None
     if not formatted:
         return None
-    # Skip formatted_body for plain <p>text</p> to keep payload minimal.
+    # 对普通的直白只有简单段落构成包裹如 <p>text</p> 的轻度格式要求内容，绕开采用额外 formatted_body 以免导致有效消息被无用庞大的负荷装填增加所埋没有必要处理开销。
     if formatted.startswith("<p>") and formatted.endswith("</p>"):
         inner = formatted[3:-4]
         if "<" not in inner and ">" not in inner:
@@ -112,7 +116,7 @@ def _render_markdown_html(text: str) -> str | None:
 
 
 def _build_matrix_text_content(text: str) -> dict[str, object]:
-    """Build Matrix m.text payload with optional HTML formatted_body."""
+    """组织架构带有选择可配开关选项式的格式化了正文呈现支持 HTML 渲染排版在内的专供给 Matrix m.text 定制版使用的传递包裹负荷数据体系。"""
     content: dict[str, object] = {"msgtype": "m.text", "body": text, "m.mentions": {}}
     if html := _render_markdown_html(text):
         content["format"] = MATRIX_HTML_FORMAT
@@ -121,7 +125,7 @@ def _build_matrix_text_content(text: str) -> dict[str, object]:
 
 
 class _NioLoguruHandler(logging.Handler):
-    """Route matrix-nio stdlib logs into Loguru."""
+    """引导截断汇聚标准基础的 matrix-nio Python 生态通用日志数据使其被重定向导流至 Loguru。"""
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -135,15 +139,19 @@ class _NioLoguruHandler(logging.Handler):
 
 
 def _configure_nio_logging_bridge() -> None:
-    """Bridge matrix-nio logs to Loguru (idempotent)."""
+    """将 matrix-nio 的各种输出日志系统对接到 Loguru 体系上 (确保幂等形式的安全绑定执行手段)。"""
     nio_logger = logging.getLogger("nio")
     if not any(isinstance(h, _NioLoguruHandler) for h in nio_logger.handlers):
         nio_logger.handlers = [_NioLoguruHandler()]
         nio_logger.propagate = False
 
 
+#endregion
+
+#region Matrix频道核心类
+
 class MatrixChannel(BaseChannel):
-    """Matrix (Element) channel using long-polling sync."""
+    """通过采取使用长时间拉起持有关联等待反馈形态连接挂起操作来进行通信的底层驱动模式运行架构在之上的 Matrix (Element) 会话连接交流频道类封装。"""
 
     name = "matrix"
 
@@ -159,7 +167,7 @@ class MatrixChannel(BaseChannel):
         self._server_upload_limit_checked = False
 
     async def start(self) -> None:
-        """Start Matrix client and begin sync loop."""
+        """开始调配启动初始化客户端 Matrix ，继而迈入一直尝试同步处理连接监听消息通讯事务的循环作业。"""
         self._running = True
         _configure_nio_logging_bridge()
 
@@ -192,7 +200,7 @@ class MatrixChannel(BaseChannel):
         self._sync_task = asyncio.create_task(self._sync_loop())
 
     async def stop(self) -> None:
-        """Stop the Matrix channel with graceful sync shutdown."""
+        """借助柔和优雅并且合规安全的正常停闭状态通知途径全面闭合并切断停止对于当前的所属实例频道全部连接响应活动动作过程运转机制。"""
         self._running = False
         for room_id in list(self._typing_tasks):
             await self._stop_typing_keepalive(room_id, clear_typing=False)
@@ -212,7 +220,7 @@ class MatrixChannel(BaseChannel):
             await self.client.close()
 
     def _is_workspace_path_allowed(self, path: Path) -> bool:
-        """Check path is inside workspace (when restriction enabled)."""
+        """检查限制确认相关的具体指定处理的访问操作目标地址空间到底在不在我们的可用正常授权覆盖范围内的情况存在现象（主要发生在一旦相应工作空间使用设防屏障参数配置时）。"""
         if not self._restrict_to_workspace or not self._workspace:
             return True
         try:
@@ -222,7 +230,7 @@ class MatrixChannel(BaseChannel):
             return False
 
     def _collect_outbound_media_candidates(self, media: list[str]) -> list[Path]:
-        """Deduplicate and resolve outbound attachment paths."""
+        """对于要进行向网路对面发布上传的待推送各种附属资源的存储物理地址的目录内容开展检查过滤，以防各种反复相同的操作指向及保证相对稳定的引用文件安全获取机制解析合并与汇总输出。"""
         seen: set[str] = set()
         candidates: list[Path] = []
         for raw in media:
@@ -243,7 +251,7 @@ class MatrixChannel(BaseChannel):
         *, filename: str, mime: str, size_bytes: int,
         mxc_url: str, encryption_info: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build Matrix content payload for an uploaded file/image/audio/video."""
+        """拼装针对待完成提交传递上传环节的具体单个文档或各类照片图片文件乃至音影类记录所需的一套专门的匹配对应的格式结构化的包含信息数据的结构字典包裹包。"""
         prefix = mime.split("/")[0]
         msgtype = {"image": "m.image", "audio": "m.audio", "video": "m.video"}.get(prefix, "m.file")
         content: dict[str, Any] = {
@@ -263,7 +271,7 @@ class MatrixChannel(BaseChannel):
         return bool(getattr(room, "encrypted", False))
 
     async def _send_room_content(self, room_id: str, content: dict[str, Any]) -> None:
-        """Send m.room.message with E2EE options."""
+        """发送夹带着端对端全加密 E2EE 加成防护设置条件的标准交互交流式基础 m.room.message 通讯通知反馈消息序列流。"""
         if not self.client:
             return
         kwargs: dict[str, Any] = {"room_id": room_id, "message_type": "m.room.message", "content": content}
@@ -272,7 +280,7 @@ class MatrixChannel(BaseChannel):
         await self.client.room_send(**kwargs)
 
     async def _resolve_server_upload_limit_bytes(self) -> int | None:
-        """Query homeserver upload limit once per channel lifecycle."""
+        """每个具体应用环境通道寿命的起止时期之中只会发生做过仅有那么一趟的网络服务器方规定所设想认可的当前数据上报的最大数据空间限制额度的访问确认反馈调拨验证操作。"""
         if self._server_upload_limit_checked:
             return self._server_upload_limit_bytes
         self._server_upload_limit_checked = True
@@ -289,7 +297,7 @@ class MatrixChannel(BaseChannel):
         return None
 
     async def _effective_media_limit_bytes(self) -> int:
-        """min(local config, server advertised) — 0 blocks all uploads."""
+        """选择最小限制范围条件作为实际运行安全值执行使用：即基于当前执行环境内自建限制控制和目标对向服务所要求的公开额度二者择取; 其中强制的零界定数值将会被理解做全局强制阻塞的闭锁含义。"""
         local_limit = max(int(self.config.max_media_bytes), 0)
         server_limit = await self._resolve_server_upload_limit_bytes()
         if server_limit is None:
@@ -300,7 +308,7 @@ class MatrixChannel(BaseChannel):
         self, room_id: str, path: Path, limit_bytes: int,
         relates_to: dict[str, Any] | None = None,
     ) -> str | None:
-        """Upload one local file to Matrix and send it as a media message. Returns failure marker or None."""
+        """接纳单笔物理地址的文件进入将其传导发送进至网络服务器之上随附发给相绑定对话终端目标的手段，如果在此步骤其中出现意外差错异常或违规，一经捕捉处理随后给出相关失败标签或什么都无（None）。"""
         if not self.client:
             return _ATTACH_UPLOAD_FAILED.format(path.name or _DEFAULT_ATTACH_NAME)
 
@@ -349,7 +357,7 @@ class MatrixChannel(BaseChannel):
         return None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send outbound content; clear typing for non-progress messages."""
+        """响应往服务端通道外部发送任何产出加工数据流内容结果指令的操作；与此同时清除释放之前一直在打字工作状态（并不做进展响应和回复结果以外的情景例外）的假模假样掩饰状态。"""
         if not self.client:
             return
         text = msg.content or ""
@@ -362,11 +370,7 @@ class MatrixChannel(BaseChannel):
                 limit_bytes = await self._effective_media_limit_bytes()
                 for path in candidates:
                     if fail := await self._upload_and_send_attachment(
-                        room_id=msg.chat_id,
-                        path=path,
-                        limit_bytes=limit_bytes,
-                        relates_to=relates_to,
-                    ):
+                        msg.chat_id, path, limit_bytes, relates_to):
                         failures.append(fail)
             if failures:
                 text = f"{text.rstrip()}\n{chr(10).join(failures)}" if text.strip() else "\n".join(failures)
@@ -390,7 +394,7 @@ class MatrixChannel(BaseChannel):
         self.client.add_response_callback(self._on_send_error, RoomSendError)
 
     def _log_response_error(self, label: str, response: Any) -> None:
-        """Log Matrix response errors — auth errors at ERROR level, rest at WARNING."""
+        """分化级数和分界类别来做异常提示信息通知归档机制的建立分级执行：将那些由认证等身份验证权限而波及诱发的报错问题标记至 ERROR, 对于任何其它的其余报错类型通通降格统一采用 WARNING 的方式应对打印记录和归档。"""
         code = getattr(response, "status_code", None)
         is_auth = code in {"M_UNKNOWN_TOKEN", "M_FORBIDDEN", "M_UNAUTHORIZED"}
         is_fatal = is_auth or getattr(response, "soft_logout", False)
@@ -406,7 +410,7 @@ class MatrixChannel(BaseChannel):
         self._log_response_error("send", response)
 
     async def _set_typing(self, room_id: str, typing: bool) -> None:
-        """Best-effort typing indicator update."""
+        """在合理限度范畴和能力尽可能控制内地针对被指明频道的目前书写回应回复状态发生变更多方广播同步。"""
         if not self.client:
             return
         try:
@@ -418,7 +422,7 @@ class MatrixChannel(BaseChannel):
             pass
 
     async def _start_typing_keepalive(self, room_id: str) -> None:
-        """Start periodic typing refresh (spec-recommended keepalive)."""
+        """执行激活被纳入到使用要求规格里面所以才予以实现的每隔周期时间即刻开启打字更新标识展示工作维持不断联线在线通知活跃信号发送系统任务机制。"""
         await self._stop_typing_keepalive(room_id, clear_typing=False)
         await self._set_typing(room_id, True)
         if not self._running:
@@ -454,7 +458,8 @@ class MatrixChannel(BaseChannel):
                 await asyncio.sleep(2)
 
     async def _on_room_invite(self, room: MatrixRoom, event: InviteEvent) -> None:
-        if self.is_allowed(event.sender):
+        allow_from = self.config.allow_from or []
+        if not allow_from or event.sender in allow_from:
             await self.client.join(room.room_id)
 
     def _is_direct_room(self, room: MatrixRoom) -> bool:
@@ -462,7 +467,7 @@ class MatrixChannel(BaseChannel):
         return isinstance(count, int) and count <= 2
 
     def _is_bot_mentioned(self, event: RoomMessage) -> bool:
-        """Check m.mentions payload for bot mention."""
+        """审查核对来自消息负载中的特有被设定专有的 m.mentions (代表提到呼叫指点标记指示信息数据项) 有没有明确包括我们的当前响应执行本体存在事实。"""
         source = getattr(event, "source", None)
         if not isinstance(source, dict):
             return False
@@ -475,7 +480,7 @@ class MatrixChannel(BaseChannel):
         return bool(self.config.allow_room_mentions and mentions.get("room") is True)
 
     def _should_process_message(self, room: MatrixRoom, event: RoomMessage) -> bool:
-        """Apply sender and room policy checks."""
+        """实行执行在群组管理操作机制下或特对针对私人通讯身份情况权限的约束确认检查验证。"""
         if not self.is_allowed(event.sender):
             return False
         if self._is_direct_room(room):
@@ -490,7 +495,9 @@ class MatrixChannel(BaseChannel):
         return False
 
     def _media_dir(self) -> Path:
-        return get_media_dir("matrix")
+        d = get_data_dir() / "media" / "matrix"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     @staticmethod
     def _event_source_content(event: RoomMessage) -> dict[str, Any]:
@@ -606,7 +613,7 @@ class MatrixChannel(BaseChannel):
     async def _fetch_media_attachment(
         self, room: MatrixRoom, event: MatrixMediaEvent,
     ) -> tuple[dict[str, Any] | None, str]:
-        """Download, decrypt if needed, and persist a Matrix attachment."""
+        """下载取回并于本地妥善安排安置（如有加密则还要负责破译恢复读取工作）一份专门给 Matrix 做匹配支持应用的附件。"""
         atype = self._event_attachment_type(event)
         mime = self._event_mime(event)
         filename = self._event_filename(event, atype)
@@ -649,7 +656,7 @@ class MatrixChannel(BaseChannel):
         return attachment, _ATTACH_MARKER.format(path)
 
     def _base_metadata(self, room: MatrixRoom, event: RoomMessage) -> dict[str, Any]:
-        """Build common metadata for text and media handlers."""
+        """用来将对于基础的文本和其它如媒介媒体类通信等各个环节下，都可以广泛通用通用的具有共同公共数据架构价值特点的关键性特征和性质的信息等都预早的先组合汇聚构成的一个公共使用共享包内容的基础。"""
         meta: dict[str, Any] = {"room": getattr(room, "display_name", room.room_id)}
         if isinstance(eid := getattr(event, "event_id", None), str) and eid:
             meta["event_id"] = eid
@@ -677,13 +684,11 @@ class MatrixChannel(BaseChannel):
         parts: list[str] = []
         if isinstance(body := getattr(event, "body", None), str) and body.strip():
             parts.append(body.strip())
-        if marker:
-            parts.append(marker)
+        parts.append(marker)
 
         await self._start_typing_keepalive(room.room_id)
         try:
             meta = self._base_metadata(room, event)
-            meta["attachments"] = []
             if attachment:
                 meta["attachments"] = [attachment]
             await self._handle_message(
@@ -695,3 +700,5 @@ class MatrixChannel(BaseChannel):
         except Exception:
             await self._stop_typing_keepalive(room.room_id, clear_typing=True)
             raise
+
+#endregion

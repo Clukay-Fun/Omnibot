@@ -1,4 +1,7 @@
-"""Email channel implementation using IMAP polling + SMTP replies."""
+"""描述:
+主要功能:
+    - 提供基于 IMAP/SMTP 的邮件收发频道实现。
+"""
 
 import asyncio
 import html
@@ -21,17 +24,13 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import EmailConfig
 
+#region Email频道核心类
 
 class EmailChannel(BaseChannel):
-    """
-    Email channel.
+    """用处，参数
 
-    Inbound:
-    - Poll IMAP mailbox for unread messages.
-    - Convert each message into an inbound event.
-
-    Outbound:
-    - Send responses via SMTP back to the sender address.
+    功能:
+        - 轮询邮件并转发为入站消息，同时支持 SMTP 回复。
     """
 
     name = "email"
@@ -55,11 +54,11 @@ class EmailChannel(BaseChannel):
         self.config: EmailConfig = config
         self._last_subject_by_chat: dict[str, str] = {}
         self._last_message_id_by_chat: dict[str, str] = {}
-        self._processed_uids: set[str] = set()  # Capped to prevent unbounded growth
+        self._processed_uids: set[str] = set()  # 为了防止无限增长而设有上限控制
         self._MAX_PROCESSED_UIDS = 100000
 
     async def start(self) -> None:
-        """Start polling IMAP for inbound emails."""
+        """启动 IMAP 轮询监听任务，处理传入的电子邮件。"""
         if not self.config.consent_granted:
             logger.warning(
                 "Email channel disabled: consent_granted is false. "
@@ -99,11 +98,11 @@ class EmailChannel(BaseChannel):
             await asyncio.sleep(poll_seconds)
 
     async def stop(self) -> None:
-        """Stop polling loop."""
+        """停止轮询循环。"""
         self._running = False
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send email via SMTP."""
+        """通过 SMTP 发送电子邮件。"""
         if not self.config.consent_granted:
             logger.warning("Skip email send: consent_granted is false")
             return
@@ -117,11 +116,11 @@ class EmailChannel(BaseChannel):
             logger.warning("Email channel missing recipient address")
             return
 
-        # Determine if this is a reply (recipient has sent us an email before)
+        # 判断这是否为一次回复操作（之前目标收件人向我们发送过邮件）
         is_reply = to_addr in self._last_subject_by_chat
         force_send = bool((msg.metadata or {}).get("force_send"))
 
-        # autoReplyEnabled only controls automatic replies, not proactive sends
+        # autoReplyEnabled 仅对自动回复的限制生效，并不限制主动发送
         if is_reply and not self.config.auto_reply_enabled and not force_send:
             logger.info("Skip automatic email reply to {}: auto_reply_enabled is false", to_addr)
             return
@@ -151,6 +150,11 @@ class EmailChannel(BaseChannel):
             raise
 
     def _validate_config(self) -> bool:
+        """用处，参数
+
+        功能:
+            - 校验邮件通道所需配置项是否完整。
+        """
         missing = []
         if not self.config.imap_host:
             missing.append("imap_host")
@@ -171,6 +175,11 @@ class EmailChannel(BaseChannel):
         return True
 
     def _smtp_send(self, msg: EmailMessage) -> None:
+        """用处，参数
+
+        功能:
+            - 按配置通过 SMTP 或 SMTP_SSL 发送邮件。
+        """
         timeout = 30
         if self.config.smtp_use_ssl:
             with smtplib.SMTP_SSL(
@@ -189,7 +198,7 @@ class EmailChannel(BaseChannel):
             smtp.send_message(msg)
 
     def _fetch_new_messages(self) -> list[dict[str, Any]]:
-        """Poll IMAP and return parsed unread messages."""
+        """执行 IMAP 轮询并返回所有初步解析过的未读邮件队列。"""
         return self._fetch_messages(
             search_criteria=("UNSEEN",),
             mark_seen=self.config.mark_seen,
@@ -204,9 +213,9 @@ class EmailChannel(BaseChannel):
         limit: int = 20,
     ) -> list[dict[str, Any]]:
         """
-        Fetch messages in [start_date, end_date) by IMAP date search.
+        通过 IMAP 的日期搜索条件抓取在 [start_date, end_date) 区间内的邮件。
 
-        This is used for historical summarization tasks (e.g. "yesterday").
+        常用于针对历史阶段的大致总结归纳任务（例如查询 "昨天" 的邮件）。
         """
         if end_date <= start_date:
             return []
@@ -230,7 +239,7 @@ class EmailChannel(BaseChannel):
         dedupe: bool,
         limit: int,
     ) -> list[dict[str, Any]]:
-        """Fetch messages by arbitrary IMAP search criteria."""
+        """依托任意指定的 IMAP 搜索标准抓取邮件序列。"""
         messages: list[dict[str, Any]] = []
         mailbox = self.config.imap_mailbox or "INBOX"
 
@@ -306,9 +315,9 @@ class EmailChannel(BaseChannel):
 
                 if dedupe and uid:
                     self._processed_uids.add(uid)
-                    # mark_seen is the primary dedup; this set is a safety net
+                    # mark_seen 才是基础排重条件; 这里的处理仅为额外的安全缓冲网
                     if len(self._processed_uids) > self._MAX_PROCESSED_UIDS:
-                        # Evict a random half to cap memory; mark_seen is the primary dedup
+                        # 随机淘汰抛弃一半数据以管控内存; 虽然 mark_seen 通常是主处理机制
                         self._processed_uids = set(list(self._processed_uids)[len(self._processed_uids) // 2:])
 
                 if mark_seen:
@@ -323,12 +332,17 @@ class EmailChannel(BaseChannel):
 
     @classmethod
     def _format_imap_date(cls, value: date) -> str:
-        """Format date for IMAP search (always English month abbreviations)."""
+        """将对象格式化为合乎 IMAP 检索标准的短格式时间（固定为全英文的月份缩写）。"""
         month = cls._IMAP_MONTHS[value.month - 1]
         return f"{value.day:02d}-{month}-{value.year}"
 
     @staticmethod
     def _extract_message_bytes(fetched: list[Any]) -> bytes | None:
+        """用处，参数
+
+        功能:
+            - 从 IMAP fetch 结果中提取原始邮件字节。
+        """
         for item in fetched:
             if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
                 return bytes(item[1])
@@ -336,6 +350,11 @@ class EmailChannel(BaseChannel):
 
     @staticmethod
     def _extract_uid(fetched: list[Any]) -> str:
+        """用处，参数
+
+        功能:
+            - 从 IMAP fetch 响应头中解析 UID。
+        """
         for item in fetched:
             if isinstance(item, tuple) and item and isinstance(item[0], (bytes, bytearray)):
                 head = bytes(item[0]).decode("utf-8", errors="ignore")
@@ -346,6 +365,11 @@ class EmailChannel(BaseChannel):
 
     @staticmethod
     def _decode_header_value(value: str) -> str:
+        """用处，参数
+
+        功能:
+            - 解码 MIME 头字段为可读字符串。
+        """
         if not value:
             return ""
         try:
@@ -355,7 +379,7 @@ class EmailChannel(BaseChannel):
 
     @classmethod
     def _extract_text_body(cls, msg: Any) -> str:
-        """Best-effort extraction of readable body text."""
+        """尽最大的努力去抽取出拥有可读性的正文文本主体内容。"""
         if msg.is_multipart():
             plain_parts: list[str] = []
             html_parts: list[str] = []
@@ -401,8 +425,15 @@ class EmailChannel(BaseChannel):
         return html.unescape(text)
 
     def _reply_subject(self, base_subject: str) -> str:
+        """用处，参数
+
+        功能:
+            - 生成回复邮件主题并处理前缀。
+        """
         subject = (base_subject or "").strip() or "nanobot reply"
         prefix = self.config.subject_prefix or "Re: "
         if subject.lower().startswith("re:"):
             return subject
         return f"{prefix}{subject}"
+
+#endregion

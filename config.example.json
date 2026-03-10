@@ -1,0 +1,86 @@
+{
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace"
+    },
+    "skillspec": {
+      "queryRewriteEnabled": false
+    }
+  },
+  "gateway": {
+    "host": "0.0.0.0",
+    "port": 18790
+  },
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "replyToMessage": true,
+      "replyInThread": false,
+      "streamCardEnabled": true,
+      "activationPrivatePolicy": "always",
+      "activationGroupPolicy": "mention",
+      "activationTopicPolicy": "always",
+      "onboardingEnabled": true,
+      "onboardingBlocking": false,
+      "onboardingGuideOnce": true,
+      "onboardingReentryCommands": [
+        "/setup",
+        "重新设置"
+      ],
+      "auditCleanupIntervalSeconds": 21600,
+      "auditEventRetentionDays": 365,
+      "auditMessageIndexRetentionDays": 365,
+      "memoryFlushThresholdPrivate": 3,
+      "memoryFlushThresholdGroup": 5,
+      "memoryForceFlushOnTopicEnd": true
+    }
+  },
+  "integrations": {
+    "feishu": {
+      "auth": {
+        "appId": "",
+        "appSecret": "",
+        "encryptKey": "",
+        "verificationToken": ""
+      },
+      "api": {
+        "apiBase": "https://open.feishu.cn/open-apis"
+      },
+      "storage": {
+        "stateDbPath": "",
+        "sqliteJournalMode": "WAL",
+        "sqliteSynchronous": "NORMAL",
+        "sqliteBusyTimeoutMs": 5000,
+        "sqliteBackupDir": "",
+        "sqliteBackupIntervalHours": 24,
+        "sqliteBackupRetentionDays": 7
+      },
+      "oauth": {
+        "enabled": true,
+        "publicBaseUrl": "https://your-domain.example.com",
+        "callbackPath": "/oauth/feishu/callback",
+        "bindHost": "0.0.0.0",
+        "bindPort": 18790,
+        "scopes": [],
+        "stateTtlSeconds": 600,
+        "refreshAheadSeconds": 300,
+        "enforceHttpsPublicBaseUrl": true,
+        "allowedRedirectDomains": [
+          "your-domain.example.com"
+        ],
+        "successHtmlTitle": "Feishu Authorization Completed",
+        "failureHtmlTitle": "Feishu Authorization Failed"
+      }
+    }
+  },
+  "tools": {
+    "feishuData": {
+      "featureFlags": {
+        "calendarEnabled": true,
+        "taskEnabled": true,
+        "bitableAdminEnabled": true,
+        "messageHistoryEnabled": true
+      }
+    }
+  }
+}

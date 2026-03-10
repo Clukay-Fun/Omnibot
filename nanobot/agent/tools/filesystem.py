@@ -1,4 +1,4 @@
-"""File system tools: read, write, edit."""
+"""文件系统工具：读取、写入、编辑。"""
 
 import difflib
 from pathlib import Path
@@ -6,27 +6,66 @@ from typing import Any
 
 from nanobot.agent.tools.base import Tool
 
+# region [路径限制与解析]
 
-def _resolve_path(
-    path: str, workspace: Path | None = None, allowed_dir: Path | None = None
-) -> Path:
-    """Resolve path against workspace (if relative) and enforce directory restriction."""
+
+def _resolve_candidate(path: str, workspace: Path | None = None) -> Path:
     p = Path(path).expanduser()
     if not p.is_absolute() and workspace:
         p = workspace / p
-    resolved = p.resolve()
-    if allowed_dir:
-        try:
-            resolved.relative_to(allowed_dir.resolve())
-        except ValueError:
-            raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
+    return p.resolve()
+
+
+def _ensure_in_allowed_dir(path: Path, *, raw_path: str, allowed_dir: Path | None = None) -> None:
+    if not allowed_dir:
+        return
+    try:
+        path.relative_to(allowed_dir.resolve())
+    except ValueError:
+        raise PermissionError(f"Path {raw_path} is outside allowed directory {allowed_dir}")
+
+def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
+    """根据工作区（如果是相对路径）解析路径，并实施目录限制检查。"""
+    resolved = _resolve_candidate(path, workspace)
+    _ensure_in_allowed_dir(resolved, raw_path=path, allowed_dir=allowed_dir)
     return resolved
 
 
-class ReadFileTool(Tool):
-    """Tool to read file contents."""
+def _is_skill_markdown(path: Path) -> bool:
+    return path.name.lower() == "skill.md"
 
-    _MAX_CHARS = 128_000  # ~128 KB — prevents OOM from reading huge files into LLM context
+
+def _resolve_skill_write_path(
+    path: str,
+    *,
+    workspace: Path | None,
+    allowed_dir: Path | None,
+) -> tuple[Path, Path]:
+    requested = _resolve_candidate(path, workspace)
+    if workspace is None or not _is_skill_markdown(requested):
+        _ensure_in_allowed_dir(requested, raw_path=path, allowed_dir=allowed_dir)
+        return requested, requested
+
+    workspace_skills = (workspace / "skills").resolve()
+    try:
+        requested.relative_to(workspace_skills)
+        _ensure_in_allowed_dir(requested, raw_path=path, allowed_dir=allowed_dir)
+        return requested, requested
+    except ValueError:
+        pass
+
+    skill_name = requested.parent.name.strip() or "skill"
+    redirected = (workspace_skills / skill_name / "SKILL.md").resolve()
+    _ensure_in_allowed_dir(redirected, raw_path=str(redirected), allowed_dir=allowed_dir)
+    return redirected, requested
+
+
+# endregion
+
+# region [文件读取工具]
+
+class ReadFileTool(Tool):
+    """读取文件内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -44,8 +83,13 @@ class ReadFileTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "The file path to read"}},
-            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The file path to read"
+                }
+            },
+            "required": ["path"]
         }
 
     async def execute(self, path: str, **kwargs: Any) -> str:
@@ -56,16 +100,7 @@ class ReadFileTool(Tool):
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
 
-            size = file_path.stat().st_size
-            if size > self._MAX_CHARS * 4:  # rough upper bound (UTF-8 chars ≤ 4 bytes)
-                return (
-                    f"Error: File too large ({size:,} bytes). "
-                    f"Use exec tool with head/tail/grep to read portions."
-                )
-
             content = file_path.read_text(encoding="utf-8")
-            if len(content) > self._MAX_CHARS:
-                return content[: self._MAX_CHARS] + f"\n\n... (truncated — file is {len(content):,} chars, limit {self._MAX_CHARS:,})"
             return content
         except PermissionError as e:
             return f"Error: {e}"
@@ -73,8 +108,12 @@ class ReadFileTool(Tool):
             return f"Error reading file: {str(e)}"
 
 
+# endregion
+
+# region [文件写入工具]
+
 class WriteFileTool(Tool):
-    """Tool to write content to a file."""
+    """向文件写入内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -93,15 +132,25 @@ class WriteFileTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "The file path to write to"},
-                "content": {"type": "string", "description": "The content to write"},
+                "path": {
+                    "type": "string",
+                    "description": "The file path to write to"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The content to write"
+                }
             },
-            "required": ["path", "content"],
+            "required": ["path", "content"]
         }
 
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path, _ = _resolve_skill_write_path(
+                path,
+                workspace=self._workspace,
+                allowed_dir=self._allowed_dir,
+            )
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {file_path}"
@@ -111,8 +160,12 @@ class WriteFileTool(Tool):
             return f"Error writing file: {str(e)}"
 
 
+# endregion
+
+# region [文件编辑工具]
+
 class EditFileTool(Tool):
-    """Tool to edit a file by replacing text."""
+    """通过替换文本来编辑文件的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -131,16 +184,32 @@ class EditFileTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "The file path to edit"},
-                "old_text": {"type": "string", "description": "The exact text to find and replace"},
-                "new_text": {"type": "string", "description": "The text to replace with"},
+                "path": {
+                    "type": "string",
+                    "description": "The file path to edit"
+                },
+                "old_text": {
+                    "type": "string",
+                    "description": "The exact text to find and replace"
+                },
+                "new_text": {
+                    "type": "string",
+                    "description": "The text to replace with"
+                }
             },
-            "required": ["path", "old_text", "new_text"],
+            "required": ["path", "old_text", "new_text"]
         }
 
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
-            file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            file_path, source_path = _resolve_skill_write_path(
+                path,
+                workspace=self._workspace,
+                allowed_dir=self._allowed_dir,
+            )
+            if file_path != source_path and source_path.exists() and source_path.is_file() and not file_path.exists():
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
             if not file_path.exists():
                 return f"Error: File not found: {path}"
 
@@ -149,7 +218,7 @@ class EditFileTool(Tool):
             if old_text not in content:
                 return self._not_found_message(old_text, content, path)
 
-            # Count occurrences
+            # 计算出现次数
             count = content.count(old_text)
             if count > 1:
                 return f"Warning: old_text appears {count} times. Please provide more context to make it unique."
@@ -165,7 +234,7 @@ class EditFileTool(Tool):
 
     @staticmethod
     def _not_found_message(old_text: str, content: str, path: str) -> str:
-        """Build a helpful error when old_text is not found."""
+        """当未找到 old_text 时构建有用的错误提示。"""
         lines = content.splitlines(keepends=True)
         old_lines = old_text.splitlines(keepends=True)
         window = len(old_lines)
@@ -177,23 +246,21 @@ class EditFileTool(Tool):
                 best_ratio, best_start = ratio, i
 
         if best_ratio > 0.5:
-            diff = "\n".join(
-                difflib.unified_diff(
-                    old_lines,
-                    lines[best_start : best_start + window],
-                    fromfile="old_text (provided)",
-                    tofile=f"{path} (actual, line {best_start + 1})",
-                    lineterm="",
-                )
-            )
+            diff = "\n".join(difflib.unified_diff(
+                old_lines, lines[best_start : best_start + window],
+                fromfile="old_text (provided)", tofile=f"{path} (actual, line {best_start + 1})",
+                lineterm="",
+            ))
             return f"Error: old_text not found in {path}.\nBest match ({best_ratio:.0%} similar) at line {best_start + 1}:\n{diff}"
-        return (
-            f"Error: old_text not found in {path}. No similar text found. Verify the file content."
-        )
+        return f"Error: old_text not found in {path}. No similar text found. Verify the file content."
 
+
+# endregion
+
+# region [目录列出工具]
 
 class ListDirTool(Tool):
-    """Tool to list directory contents."""
+    """列出目录内容的工具。"""
 
     def __init__(self, workspace: Path | None = None, allowed_dir: Path | None = None):
         self._workspace = workspace
@@ -211,8 +278,13 @@ class ListDirTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "The directory path to list"}},
-            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The directory path to list"
+                }
+            },
+            "required": ["path"]
         }
 
     async def execute(self, path: str, **kwargs: Any) -> str:
@@ -236,3 +308,5 @@ class ListDirTool(Tool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error listing directory: {str(e)}"
+
+# endregion

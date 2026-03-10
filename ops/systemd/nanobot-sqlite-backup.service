@@ -1,0 +1,9 @@
+[Unit]
+Description=Nanobot Feishu SQLite backup
+After=network.target
+
+[Service]
+Type=oneshot
+# Update paths for your deployment
+WorkingDirectory=/opt/omnibot
+ExecStart=/usr/bin/python3.11 /opt/omnibot/ops/maintenance/sqlite_backup_rotate.py

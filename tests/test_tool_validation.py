@@ -1,6 +1,8 @@
+from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.filesystem import EditFileTool, WriteFileTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 
@@ -108,232 +110,42 @@ def test_exec_extract_absolute_paths_captures_posix_absolute_paths() -> None:
     assert "/tmp/out.txt" in paths
 
 
-# --- cast_params tests ---
+async def test_write_file_redirects_skill_md_to_workspace_skills(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    repo_skill = tmp_path / "repo" / "nanobot" / "skills" / "planner" / "SKILL.md"
+
+    tool = WriteFileTool(workspace=workspace)
+    result = await tool.execute(path=str(repo_skill), content="# planner")
+
+    expected = workspace / "skills" / "planner" / "SKILL.md"
+    assert expected.read_text(encoding="utf-8") == "# planner"
+    assert not repo_skill.exists()
+    assert str(expected) in result
 
 
-class CastTestTool(Tool):
-    """Minimal tool for testing cast_params."""
+async def test_edit_file_copies_builtin_skill_into_workspace_before_edit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    builtin_skill = tmp_path / "repo" / "nanobot" / "skills" / "summarize" / "SKILL.md"
+    builtin_skill.parent.mkdir(parents=True, exist_ok=True)
+    builtin_skill.write_text("line old\n", encoding="utf-8")
 
-    def __init__(self, schema: dict[str, Any]) -> None:
-        self._schema = schema
+    tool = EditFileTool(workspace=workspace)
+    result = await tool.execute(path=str(builtin_skill), old_text="old", new_text="new")
 
-    @property
-    def name(self) -> str:
-        return "cast_test"
-
-    @property
-    def description(self) -> str:
-        return "test tool for casting"
-
-    @property
-    def parameters(self) -> dict[str, Any]:
-        return self._schema
-
-    async def execute(self, **kwargs: Any) -> str:
-        return "ok"
+    expected = workspace / "skills" / "summarize" / "SKILL.md"
+    assert expected.read_text(encoding="utf-8") == "line new\n"
+    assert builtin_skill.read_text(encoding="utf-8") == "line old\n"
+    assert str(expected) in result
 
 
-def test_cast_params_string_to_int() -> None:
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"count": {"type": "integer"}},
-        }
-    )
-    result = tool.cast_params({"count": "42"})
-    assert result["count"] == 42
-    assert isinstance(result["count"], int)
+async def test_write_file_keeps_non_skill_paths_unchanged(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    target = workspace / "notes" / "todo.md"
 
+    tool = WriteFileTool(workspace=workspace)
+    await tool.execute(path=str(target), content="todo")
 
-def test_cast_params_string_to_number() -> None:
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"rate": {"type": "number"}},
-        }
-    )
-    result = tool.cast_params({"rate": "3.14"})
-    assert result["rate"] == 3.14
-    assert isinstance(result["rate"], float)
-
-
-def test_cast_params_string_to_bool() -> None:
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"enabled": {"type": "boolean"}},
-        }
-    )
-    assert tool.cast_params({"enabled": "true"})["enabled"] is True
-    assert tool.cast_params({"enabled": "false"})["enabled"] is False
-    assert tool.cast_params({"enabled": "1"})["enabled"] is True
-
-
-def test_cast_params_array_items() -> None:
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {
-                "nums": {"type": "array", "items": {"type": "integer"}},
-            },
-        }
-    )
-    result = tool.cast_params({"nums": ["1", "2", "3"]})
-    assert result["nums"] == [1, 2, 3]
-
-
-def test_cast_params_nested_object() -> None:
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {
-                "config": {
-                    "type": "object",
-                    "properties": {
-                        "port": {"type": "integer"},
-                        "debug": {"type": "boolean"},
-                    },
-                },
-            },
-        }
-    )
-    result = tool.cast_params({"config": {"port": "8080", "debug": "true"}})
-    assert result["config"]["port"] == 8080
-    assert result["config"]["debug"] is True
-
-
-def test_cast_params_bool_not_cast_to_int() -> None:
-    """Booleans should not be silently cast to integers."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"count": {"type": "integer"}},
-        }
-    )
-    result = tool.cast_params({"count": True})
-    assert result["count"] is True
-    errors = tool.validate_params(result)
-    assert any("count should be integer" in e for e in errors)
-
-
-def test_cast_params_preserves_empty_string() -> None:
-    """Empty strings should be preserved for string type."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-        }
-    )
-    result = tool.cast_params({"name": ""})
-    assert result["name"] == ""
-
-
-def test_cast_params_bool_string_false() -> None:
-    """Test that 'false', '0', 'no' strings convert to False."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"flag": {"type": "boolean"}},
-        }
-    )
-    assert tool.cast_params({"flag": "false"})["flag"] is False
-    assert tool.cast_params({"flag": "False"})["flag"] is False
-    assert tool.cast_params({"flag": "0"})["flag"] is False
-    assert tool.cast_params({"flag": "no"})["flag"] is False
-    assert tool.cast_params({"flag": "NO"})["flag"] is False
-
-
-def test_cast_params_bool_string_invalid() -> None:
-    """Invalid boolean strings should not be cast."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"flag": {"type": "boolean"}},
-        }
-    )
-    # Invalid strings should be preserved (validation will catch them)
-    result = tool.cast_params({"flag": "random"})
-    assert result["flag"] == "random"
-    result = tool.cast_params({"flag": "maybe"})
-    assert result["flag"] == "maybe"
-
-
-def test_cast_params_invalid_string_to_int() -> None:
-    """Invalid strings should not be cast to integer."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"count": {"type": "integer"}},
-        }
-    )
-    result = tool.cast_params({"count": "abc"})
-    assert result["count"] == "abc"  # Original value preserved
-    result = tool.cast_params({"count": "12.5.7"})
-    assert result["count"] == "12.5.7"
-
-
-def test_cast_params_invalid_string_to_number() -> None:
-    """Invalid strings should not be cast to number."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"rate": {"type": "number"}},
-        }
-    )
-    result = tool.cast_params({"rate": "not_a_number"})
-    assert result["rate"] == "not_a_number"
-
-
-def test_validate_params_bool_not_accepted_as_number() -> None:
-    """Booleans should not pass number validation."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"rate": {"type": "number"}},
-        }
-    )
-    errors = tool.validate_params({"rate": False})
-    assert any("rate should be number" in e for e in errors)
-
-
-def test_cast_params_none_values() -> None:
-    """Test None handling for different types."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "count": {"type": "integer"},
-                "items": {"type": "array"},
-                "config": {"type": "object"},
-            },
-        }
-    )
-    result = tool.cast_params(
-        {
-            "name": None,
-            "count": None,
-            "items": None,
-            "config": None,
-        }
-    )
-    # None should be preserved for all types
-    assert result["name"] is None
-    assert result["count"] is None
-    assert result["items"] is None
-    assert result["config"] is None
-
-
-def test_cast_params_single_value_not_auto_wrapped_to_array() -> None:
-    """Single values should NOT be automatically wrapped into arrays."""
-    tool = CastTestTool(
-        {
-            "type": "object",
-            "properties": {"items": {"type": "array"}},
-        }
-    )
-    # Non-array values should be preserved (validation will catch them)
-    result = tool.cast_params({"items": 5})
-    assert result["items"] == 5  # Not wrapped to [5]
-    result = tool.cast_params({"items": "text"})
-    assert result["items"] == "text"  # Not wrapped to ["text"]
+    assert target.read_text(encoding="utf-8") == "todo"

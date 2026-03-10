@@ -1,4 +1,4 @@
-"""LLM provider abstraction module."""
+"""模型提供方模块。"""
 
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.providers.litellm_provider import LiteLLMProvider

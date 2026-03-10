@@ -1,0 +1,87 @@
+"""Prompt context helpers for runtime-aware workspace loading."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+PromptPurpose = Literal["chat", "heartbeat", "bootstrap"]
+
+
+@dataclass(slots=True)
+class PromptContext:
+    """Runtime metadata that influences workspace file selection."""
+
+    purpose: PromptPurpose = "chat"
+    channel: str | None = None
+    chat_id: str | None = None
+    sender_id: str | None = None
+    session_key: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def chat_type(self) -> str:
+        return str(self.metadata.get("chat_type") or "")
+
+    @property
+    def is_feishu(self) -> bool:
+        return self.channel == "feishu"
+
+    @property
+    def is_topic(self) -> bool:
+        return bool(self.metadata.get("thread_id") or self.metadata.get("root_id") and self.metadata.get("parent_id"))
+
+    @property
+    def is_group(self) -> bool:
+        return self.chat_type == "group"
+
+    @property
+    def is_private(self) -> bool:
+        return not self.is_group
+
+    @property
+    def quoted_bot_summary(self) -> str:
+        value = self.metadata.get("quoted_bot_summary")
+        return str(value).strip() if value else ""
+
+    @property
+    def recent_selected_table(self) -> dict[str, Any]:
+        value = self.metadata.get("recent_selected_table")
+        return dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def recent_directory_hits(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_directory_hits")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def referenced_message(self) -> dict[str, Any]:
+        value = self.metadata.get("referenced_message")
+        if isinstance(value, dict):
+            return dict(value)
+        if self.quoted_bot_summary:
+            return {"summary": self.quoted_bot_summary}
+        return {}
+
+    @property
+    def recent_case_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_case_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def recent_contract_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_contract_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def recent_weekly_plan_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_weekly_plan_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]

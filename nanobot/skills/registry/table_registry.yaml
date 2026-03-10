@@ -1,0 +1,57 @@
+version: 1
+tables:
+  case_registry:
+    app_token: app_case_mgmt_001
+    table_id: tbl_case_registry_001
+    display_name: 案件项目总库
+    aliases: [案件项目总库, 案件库, 项目总库, 案件]
+    field_aliases:
+      case_id: 项目ID
+      case_no: 案号
+      title: 案号
+      status: 案件状态
+      owner: 主办律师
+      client_name: 委托人
+      created_at: 创建时间
+      updated_at: 更新时间
+      next_deadline: 下一节点时间
+
+  case_tasks:
+    app_token: app_case_ops_001
+    table_id: tbl_case_tasks_001
+    field_aliases:
+      task_id: 任务ID
+      case_id: 项目ID
+      task_title: 任务名称
+      assignee: 主办律师
+      owner: 主办律师
+      due_date: 截止时间
+      status: 任务状态
+
+  contract_registry:
+    app_token: app_contract_ops_001
+    table_id: tbl_contract_registry_001
+    display_name: 合同管理
+    aliases: [合同管理, 合同台账, 合同库, 合同]
+    field_aliases:
+      contract_id: 合同ID
+      case_id: 项目ID
+      contract_no: 合同编号
+      title: 合同名称
+      vendor: 乙方
+      amount: 合同金额
+      status: 合同状态
+      expiry_date: 到期时间
+      renewal_deadline: 续签截止时间
+
+  weekly_plan:
+    app_token: app_weekly_plan_001
+    table_id: tbl_weekly_plan_001
+    display_name: 团队周工作计划表
+    aliases: [团队周工作计划表, 周工作计划, 周计划, 周报表]
+    field_aliases:
+      owner: 姓名
+      week: 周次
+      content: 工作内容
+      status: 完成状态
+      completed_at: 完成时间

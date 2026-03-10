@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,8 +18,7 @@ def _make_loop():
     bus = MessageBus()
     provider = MagicMock()
     provider.get_default_model.return_value = "test-model"
-    workspace = MagicMock()
-    workspace.__truediv__ = MagicMock(return_value=MagicMock())
+    workspace = Path(tempfile.mkdtemp())
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
          patch("nanobot.agent.loop.SessionManager"), \
@@ -124,6 +125,34 @@ class TestDispatch:
         t2 = asyncio.create_task(loop._dispatch(msg2))
         await asyncio.gather(t1, t2)
         assert order == ["start-a", "end-a", "start-b", "end-b"]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_allows_parallel_processing_across_sessions(self):
+        from nanobot.bus.events import InboundMessage, OutboundMessage
+
+        loop, _ = _make_loop()
+        both_started = asyncio.Event()
+        started: list[str] = []
+
+        async def mock_process(m, **kwargs):
+            started.append(m.chat_id)
+            if len(started) == 2:
+                both_started.set()
+            await both_started.wait()
+            return OutboundMessage(channel="test", chat_id=m.chat_id, content=m.content)
+
+        loop._process_message = mock_process
+        msg1 = InboundMessage(channel="test", sender_id="u1", chat_id="c1", content="a")
+        msg2 = InboundMessage(channel="test", sender_id="u2", chat_id="c2", content="b")
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                asyncio.create_task(loop._dispatch(msg1)),
+                asyncio.create_task(loop._dispatch(msg2)),
+            ),
+            timeout=1.0,
+        )
+        assert sorted(started) == ["c1", "c2"]
 
 
 class TestSubagentCancellation:

@@ -1,11 +1,12 @@
-"""Telegram channel implementation using python-telegram-bot."""
+"""描述:
+主要功能:
+    - 提供基于 python-telegram-bot 的 Telegram 频道实现。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import re
-import time
-import unicodedata
 
 from loguru import logger
 from telegram import BotCommand, ReplyParameters, Update
@@ -15,57 +16,15 @@ from telegram.request import HTTPXRequest
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
-from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import TelegramConfig
-from nanobot.utils.helpers import split_message
 
-TELEGRAM_MAX_MESSAGE_LEN = 4000  # Telegram message character limit
-
-
-def _strip_md(s: str) -> str:
-    """Strip markdown inline formatting from text."""
-    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s)
-    s = re.sub(r'__(.+?)__', r'\1', s)
-    s = re.sub(r'~~(.+?)~~', r'\1', s)
-    s = re.sub(r'`([^`]+)`', r'\1', s)
-    return s.strip()
-
-
-def _render_table_box(table_lines: list[str]) -> str:
-    """Convert markdown pipe-table to compact aligned text for <pre> display."""
-
-    def dw(s: str) -> int:
-        return sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1 for c in s)
-
-    rows: list[list[str]] = []
-    has_sep = False
-    for line in table_lines:
-        cells = [_strip_md(c) for c in line.strip().strip('|').split('|')]
-        if all(re.match(r'^:?-+:?$', c) for c in cells if c):
-            has_sep = True
-            continue
-        rows.append(cells)
-    if not rows or not has_sep:
-        return '\n'.join(table_lines)
-
-    ncols = max(len(r) for r in rows)
-    for r in rows:
-        r.extend([''] * (ncols - len(r)))
-    widths = [max(dw(r[c]) for r in rows) for c in range(ncols)]
-
-    def dr(cells: list[str]) -> str:
-        return '  '.join(f'{c}{" " * (w - dw(c))}' for c, w in zip(cells, widths))
-
-    out = [dr(rows[0])]
-    out.append('  '.join('─' * w for w in widths))
-    for row in rows[1:]:
-        out.append(dr(row))
-    return '\n'.join(out)
-
+#region Telegram辅助方法
 
 def _markdown_to_telegram_html(text: str) -> str:
-    """
-    Convert markdown to Telegram-safe HTML.
+    """用处，参数
+
+    功能:
+        - 将 Markdown 转换为 Telegram 可接受的 HTML。
     """
     if not text:
         return ""
@@ -77,27 +36,6 @@ def _markdown_to_telegram_html(text: str) -> str:
         return f"\x00CB{len(code_blocks) - 1}\x00"
 
     text = re.sub(r'```[\w]*\n?([\s\S]*?)```', save_code_block, text)
-
-    # 1.5. Convert markdown tables to box-drawing (reuse code_block placeholders)
-    lines = text.split('\n')
-    rebuilt: list[str] = []
-    li = 0
-    while li < len(lines):
-        if re.match(r'^\s*\|.+\|', lines[li]):
-            tbl: list[str] = []
-            while li < len(lines) and re.match(r'^\s*\|.+\|', lines[li]):
-                tbl.append(lines[li])
-                li += 1
-            box = _render_table_box(tbl)
-            if box != '\n'.join(tbl):
-                code_blocks.append(box)
-                rebuilt.append(f"\x00CB{len(code_blocks) - 1}\x00")
-            else:
-                rebuilt.extend(tbl)
-        else:
-            rebuilt.append(lines[li])
-            li += 1
-    text = '\n'.join(rebuilt)
 
     # 2. Extract and protect inline code
     inline_codes: list[str] = []
@@ -147,11 +85,39 @@ def _markdown_to_telegram_html(text: str) -> str:
     return text
 
 
-class TelegramChannel(BaseChannel):
-    """
-    Telegram channel using long polling.
+def _split_message(content: str, max_len: int = 4000) -> list[str]:
+    """用处，参数
 
-    Simple and reliable - no webhook/public IP needed.
+    功能:
+        - 按长度限制拆分消息并优先在换行处分段。
+    """
+    if len(content) <= max_len:
+        return [content]
+    chunks: list[str] = []
+    while content:
+        if len(content) <= max_len:
+            chunks.append(content)
+            break
+        cut = content[:max_len]
+        pos = cut.rfind('\n')
+        if pos == -1:
+            pos = cut.rfind(' ')
+        if pos == -1:
+            pos = max_len
+        chunks.append(content[:pos])
+        content = content[pos:].lstrip()
+    return chunks
+
+
+#endregion
+
+#region Telegram频道核心类
+
+class TelegramChannel(BaseChannel):
+    """用处，参数
+
+    功能:
+        - 使用长轮询模式处理 Telegram 消息收发。
     """
 
     name = "telegram"
@@ -178,29 +144,13 @@ class TelegramChannel(BaseChannel):
         self._typing_tasks: dict[str, asyncio.Task] = {}  # chat_id -> typing loop task
         self._media_group_buffers: dict[str, dict] = {}
         self._media_group_tasks: dict[str, asyncio.Task] = {}
-        self._message_threads: dict[tuple[str, int], int] = {}
-
-    def is_allowed(self, sender_id: str) -> bool:
-        """Preserve Telegram's legacy id|username allowlist matching."""
-        if super().is_allowed(sender_id):
-            return True
-
-        allow_list = getattr(self.config, "allow_from", [])
-        if not allow_list or "*" in allow_list:
-            return False
-
-        sender_str = str(sender_id)
-        if sender_str.count("|") != 1:
-            return False
-
-        sid, username = sender_str.split("|", 1)
-        if not sid.isdigit() or not username:
-            return False
-
-        return sid in allow_list or username in allow_list
 
     async def start(self) -> None:
-        """Start the Telegram bot with long polling."""
+        """用处，参数
+
+        功能:
+            - 以长轮询模式启动 Telegram 机器人。
+        """
         if not self.config.token:
             logger.error("Telegram bot token not configured")
             return
@@ -208,21 +158,16 @@ class TelegramChannel(BaseChannel):
         self._running = True
 
         # Build the application with larger connection pool to avoid pool-timeout on long runs
-        req = HTTPXRequest(
-            connection_pool_size=16,
-            pool_timeout=5.0,
-            connect_timeout=30.0,
-            read_timeout=30.0,
-            proxy=self.config.proxy if self.config.proxy else None,
-        )
+        req = HTTPXRequest(connection_pool_size=16, pool_timeout=5.0, connect_timeout=30.0, read_timeout=30.0)
         builder = Application.builder().token(self.config.token).request(req).get_updates_request(req)
+        if self.config.proxy:
+            builder = builder.proxy(self.config.proxy).get_updates_proxy(self.config.proxy)
         self._app = builder.build()
         self._app.add_error_handler(self._on_error)
 
         # Add command handlers
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
-        self._app.add_handler(CommandHandler("stop", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
 
         # Add message handler for text, photos, voice, documents
@@ -261,7 +206,11 @@ class TelegramChannel(BaseChannel):
             await asyncio.sleep(1)
 
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
+        """用处，参数
+
+        功能:
+            - 停止机器人并清理任务状态。
+        """
         self._running = False
 
         # Cancel all typing indicators
@@ -282,7 +231,11 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     def _get_media_type(path: str) -> str:
-        """Guess media type from file extension."""
+        """用处，参数
+
+        功能:
+            - 根据文件扩展名判断媒体类型。
+        """
         ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
         if ext in ("jpg", "jpeg", "png", "gif", "webp"):
             return "photo"
@@ -293,30 +246,26 @@ class TelegramChannel(BaseChannel):
         return "document"
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Telegram."""
+        """用处，参数
+
+        功能:
+            - 发送文本与媒体消息到 Telegram 聊天。
+        """
         if not self._app:
             logger.warning("Telegram bot not running")
             return
 
-        # Only stop typing indicator for final responses
-        if not msg.metadata.get("_progress", False):
-            self._stop_typing(msg.chat_id)
+        self._stop_typing(msg.chat_id)
 
         try:
             chat_id = int(msg.chat_id)
         except ValueError:
             logger.error("Invalid chat_id: {}", msg.chat_id)
             return
-        reply_to_message_id = msg.metadata.get("message_id")
-        message_thread_id = msg.metadata.get("message_thread_id")
-        if message_thread_id is None and reply_to_message_id is not None:
-            message_thread_id = self._message_threads.get((msg.chat_id, reply_to_message_id))
-        thread_kwargs = {}
-        if message_thread_id is not None:
-            thread_kwargs["message_thread_id"] = message_thread_id
 
         reply_params = None
         if self.config.reply_to_message:
+            reply_to_message_id = msg.metadata.get("message_id")
             if reply_to_message_id:
                 reply_params = ReplyParameters(
                     message_id=reply_to_message_id,
@@ -337,8 +286,7 @@ class TelegramChannel(BaseChannel):
                     await sender(
                         chat_id=chat_id,
                         **{param: f},
-                        reply_parameters=reply_params,
-                        **thread_kwargs,
+                        reply_parameters=reply_params
                     )
             except Exception as e:
                 filename = media_path.rsplit("/", 1)[-1]
@@ -346,74 +294,37 @@ class TelegramChannel(BaseChannel):
                 await self._app.bot.send_message(
                     chat_id=chat_id,
                     text=f"[Failed to send: {filename}]",
-                    reply_parameters=reply_params,
-                    **thread_kwargs,
+                    reply_parameters=reply_params
                 )
 
         # Send text content
         if msg.content and msg.content != "[empty message]":
-            is_progress = msg.metadata.get("_progress", False)
-
-            for chunk in split_message(msg.content, TELEGRAM_MAX_MESSAGE_LEN):
-                # Final response: simulate streaming via draft, then persist
-                if not is_progress:
-                    await self._send_with_streaming(chat_id, chunk, reply_params, thread_kwargs)
-                else:
-                    await self._send_text(chat_id, chunk, reply_params, thread_kwargs)
-
-    async def _send_text(
-        self,
-        chat_id: int,
-        text: str,
-        reply_params=None,
-        thread_kwargs: dict | None = None,
-    ) -> None:
-        """Send a plain text message with HTML fallback."""
-        try:
-            html = _markdown_to_telegram_html(text)
-            await self._app.bot.send_message(
-                chat_id=chat_id, text=html, parse_mode="HTML",
-                reply_parameters=reply_params,
-                **(thread_kwargs or {}),
-            )
-        except Exception as e:
-            logger.warning("HTML parse failed, falling back to plain text: {}", e)
-            try:
-                await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_parameters=reply_params,
-                    **(thread_kwargs or {}),
-                )
-            except Exception as e2:
-                logger.error("Error sending Telegram message: {}", e2)
-
-    async def _send_with_streaming(
-        self,
-        chat_id: int,
-        text: str,
-        reply_params=None,
-        thread_kwargs: dict | None = None,
-    ) -> None:
-        """Simulate streaming via send_message_draft, then persist with send_message."""
-        draft_id = int(time.time() * 1000) % (2**31)
-        try:
-            step = max(len(text) // 8, 40)
-            for i in range(step, len(text), step):
-                await self._app.bot.send_message_draft(
-                    chat_id=chat_id, draft_id=draft_id, text=text[:i],
-                )
-                await asyncio.sleep(0.04)
-            await self._app.bot.send_message_draft(
-                chat_id=chat_id, draft_id=draft_id, text=text,
-            )
-            await asyncio.sleep(0.15)
-        except Exception:
-            pass
-        await self._send_text(chat_id, text, reply_params, thread_kwargs)
+            for chunk in _split_message(msg.content):
+                try:
+                    html = _markdown_to_telegram_html(chunk)
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=html,
+                        parse_mode="HTML",
+                        reply_parameters=reply_params
+                    )
+                except Exception as e:
+                    logger.warning("HTML parse failed, falling back to plain text: {}", e)
+                    try:
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            reply_parameters=reply_params
+                        )
+                    except Exception as e2:
+                        logger.error("Error sending Telegram message: {}", e2)
 
     async def _on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /start command."""
+        """用处，参数
+
+        功能:
+            - 处理 `/start` 命令并返回欢迎信息。
+        """
         if not update.message or not update.effective_user:
             return
 
@@ -425,7 +336,11 @@ class TelegramChannel(BaseChannel):
         )
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle /help command, bypassing ACL so all users can access it."""
+        """用处，参数
+
+        功能:
+            - 处理 `/help` 命令并输出可用指令列表。
+        """
         if not update.message:
             return
         await update.message.reply_text(
@@ -437,58 +352,34 @@ class TelegramChannel(BaseChannel):
 
     @staticmethod
     def _sender_id(user) -> str:
-        """Build sender_id with username for allowlist matching."""
+        """用处，参数
+
+        功能:
+            - 构建可用于白名单匹配的发送者标识。
+        """
         sid = str(user.id)
         return f"{sid}|{user.username}" if user.username else sid
 
-    @staticmethod
-    def _derive_topic_session_key(message) -> str | None:
-        """Derive topic-scoped session key for non-private Telegram chats."""
-        message_thread_id = getattr(message, "message_thread_id", None)
-        if message.chat.type == "private" or message_thread_id is None:
-            return None
-        return f"telegram:{message.chat_id}:topic:{message_thread_id}"
-
-    @staticmethod
-    def _build_message_metadata(message, user) -> dict:
-        """Build common Telegram inbound metadata payload."""
-        return {
-            "message_id": message.message_id,
-            "user_id": user.id,
-            "username": user.username,
-            "first_name": user.first_name,
-            "is_group": message.chat.type != "private",
-            "message_thread_id": getattr(message, "message_thread_id", None),
-            "is_forum": bool(getattr(message.chat, "is_forum", False)),
-        }
-
-    def _remember_thread_context(self, message) -> None:
-        """Cache topic thread id by chat/message id for follow-up replies."""
-        message_thread_id = getattr(message, "message_thread_id", None)
-        if message_thread_id is None:
-            return
-        key = (str(message.chat_id), message.message_id)
-        self._message_threads[key] = message_thread_id
-        if len(self._message_threads) > 1000:
-            self._message_threads.pop(next(iter(self._message_threads)))
-
     async def _forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forward slash commands to the bus for unified handling in AgentLoop."""
+        """用处，参数
+
+        功能:
+            - 将斜杠命令转发到总线统一处理。
+        """
         if not update.message or not update.effective_user:
             return
-        message = update.message
-        user = update.effective_user
-        self._remember_thread_context(message)
         await self._handle_message(
-            sender_id=self._sender_id(user),
-            chat_id=str(message.chat_id),
-            content=message.text,
-            metadata=self._build_message_metadata(message, user),
-            session_key=self._derive_topic_session_key(message),
+            sender_id=self._sender_id(update.effective_user),
+            chat_id=str(update.message.chat_id),
+            content=update.message.text,
         )
 
     async def _on_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming messages (text, photos, voice, documents)."""
+        """用处，参数
+
+        功能:
+            - 处理文本与多媒体入站消息并转发总线。
+        """
         if not update.message or not update.effective_user:
             return
 
@@ -496,7 +387,6 @@ class TelegramChannel(BaseChannel):
         user = update.effective_user
         chat_id = message.chat_id
         sender_id = self._sender_id(user)
-        self._remember_thread_context(message)
 
         # Store chat_id for replies
         self._chat_ids[sender_id] = chat_id
@@ -532,12 +422,12 @@ class TelegramChannel(BaseChannel):
         if media_file and self._app:
             try:
                 file = await self._app.bot.get_file(media_file.file_id)
-                ext = self._get_extension(
-                    media_type,
-                    getattr(media_file, 'mime_type', None),
-                    getattr(media_file, 'file_name', None),
-                )
-                media_dir = get_media_dir("telegram")
+                ext = self._get_extension(media_type, getattr(media_file, 'mime_type', None))
+
+                # Save to workspace/media/
+                from pathlib import Path
+                media_dir = Path.home() / ".nanobot" / "media"
+                media_dir.mkdir(parents=True, exist_ok=True)
 
                 file_path = media_dir / f"{media_file.file_id[:16]}{ext}"
                 await file.download_to_drive(str(file_path))
@@ -567,8 +457,6 @@ class TelegramChannel(BaseChannel):
         logger.debug("Telegram message from {}: {}...", sender_id, content[:50])
 
         str_chat_id = str(chat_id)
-        metadata = self._build_message_metadata(message, user)
-        session_key = self._derive_topic_session_key(message)
 
         # Telegram media groups: buffer briefly, forward as one aggregated turn.
         if media_group_id := getattr(message, "media_group_id", None):
@@ -577,8 +465,11 @@ class TelegramChannel(BaseChannel):
                 self._media_group_buffers[key] = {
                     "sender_id": sender_id, "chat_id": str_chat_id,
                     "contents": [], "media": [],
-                    "metadata": metadata,
-                    "session_key": session_key,
+                    "metadata": {
+                        "message_id": message.message_id, "user_id": user.id,
+                        "username": user.username, "first_name": user.first_name,
+                        "is_group": message.chat.type != "private",
+                    },
                 }
                 self._start_typing(str_chat_id)
             buf = self._media_group_buffers[key]
@@ -598,12 +489,21 @@ class TelegramChannel(BaseChannel):
             chat_id=str_chat_id,
             content=content,
             media=media_paths,
-            metadata=metadata,
-            session_key=session_key,
+            metadata={
+                "message_id": message.message_id,
+                "user_id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "is_group": message.chat.type != "private"
+            }
         )
 
     async def _flush_media_group(self, key: str) -> None:
-        """Wait briefly, then forward buffered media-group as one turn."""
+        """用处，参数
+
+        功能:
+            - 短暂缓冲后合并转发同一媒体组消息。
+        """
         try:
             await asyncio.sleep(0.6)
             if not (buf := self._media_group_buffers.pop(key, None)):
@@ -613,25 +513,36 @@ class TelegramChannel(BaseChannel):
                 sender_id=buf["sender_id"], chat_id=buf["chat_id"],
                 content=content, media=list(dict.fromkeys(buf["media"])),
                 metadata=buf["metadata"],
-                session_key=buf.get("session_key"),
             )
         finally:
             self._media_group_tasks.pop(key, None)
 
     def _start_typing(self, chat_id: str) -> None:
-        """Start sending 'typing...' indicator for a chat."""
+        """用处，参数
+
+        功能:
+            - 启动指定聊天的输入中提示任务。
+        """
         # Cancel any existing typing task for this chat
         self._stop_typing(chat_id)
         self._typing_tasks[chat_id] = asyncio.create_task(self._typing_loop(chat_id))
 
     def _stop_typing(self, chat_id: str) -> None:
-        """Stop the typing indicator for a chat."""
+        """用处，参数
+
+        功能:
+            - 停止指定聊天的输入中提示任务。
+        """
         task = self._typing_tasks.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
 
     async def _typing_loop(self, chat_id: str) -> None:
-        """Repeatedly send 'typing' action until cancelled."""
+        """用处，参数
+
+        功能:
+            - 循环发送 typing 状态直到任务取消。
+        """
         try:
             while self._app:
                 await self._app.bot.send_chat_action(chat_id=int(chat_id), action="typing")
@@ -642,16 +553,19 @@ class TelegramChannel(BaseChannel):
             logger.debug("Typing indicator stopped for {}: {}", chat_id, e)
 
     async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Log polling / handler errors instead of silently swallowing them."""
+        """用处，参数
+
+        功能:
+            - 记录轮询与处理回调中的异常信息。
+        """
         logger.error("Telegram error: {}", context.error)
 
-    def _get_extension(
-        self,
-        media_type: str,
-        mime_type: str | None,
-        filename: str | None = None,
-    ) -> str:
-        """Get file extension based on media type or original filename."""
+    def _get_extension(self, media_type: str, mime_type: str | None) -> str:
+        """用处，参数
+
+        功能:
+            - 根据媒体类型与 MIME 获取文件扩展名。
+        """
         if mime_type:
             ext_map = {
                 "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
@@ -661,12 +575,7 @@ class TelegramChannel(BaseChannel):
                 return ext_map[mime_type]
 
         type_map = {"image": ".jpg", "voice": ".ogg", "audio": ".mp3", "file": ""}
-        if ext := type_map.get(media_type, ""):
-            return ext
+        return type_map.get(media_type, "")
 
-        if filename:
-            from pathlib import Path
 
-            return "".join(Path(filename).suffixes)
-
-        return ""
+#endregion

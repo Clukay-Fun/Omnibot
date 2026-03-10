@@ -1,0 +1,82 @@
+meta:
+  id: deadline_overview
+  version: "0.1"
+  description: Aggregate upcoming deadlines from case and contract data.
+  owner: built_in
+  domain: legal_ops
+params:
+  type: object
+  required: []
+  properties:
+    within_days:
+      type: integer
+      description: Deadline horizon in days.
+      default: 30
+      minimum: 1
+      maximum: 180
+    owner:
+      type: string
+      description: Optional owner filter across deadline sources.
+action:
+  kind: query
+  pagination_mode: data
+  cross_query:
+    mode: merge
+    merge_on: case_id
+    steps:
+      - id: case_deadlines
+        data_source: bitable
+        table:
+          alias: case_registry
+        select_fields:
+          - case_id
+          - case_no
+          - title
+          - owner
+          - next_deadline
+          - deadline_type
+        filter_template:
+          op: and
+          conditions:
+            - field: next_deadline
+              op: lte_relative_days
+              value: "{{ params.within_days }}"
+            - field: owner
+              op: eq
+              value: "{{ params.owner }}"
+              when: params.owner
+      - id: contract_deadlines
+        data_source: bitable
+        table:
+          alias: contract_registry
+        select_fields:
+          - contract_id
+          - case_id
+          - contract_no
+          - owner
+          - renewal_deadline
+          - amount
+        filter_template:
+          op: and
+          conditions:
+            - field: renewal_deadline
+              op: lte_relative_days
+              value: "{{ params.within_days }}"
+            - field: owner
+              op: eq
+              value: "{{ params.owner }}"
+              when: params.owner
+response:
+  output_policy:
+    max_items: 20
+    include_total: true
+    include_source: true
+  view:
+    type: timeline
+    sort_by:
+      field: due_at
+      direction: asc
+error:
+  not_found_message: No upcoming deadlines were found in the selected range.
+  upstream_error_message: Deadline overview is temporarily unavailable.
+  retryable: true

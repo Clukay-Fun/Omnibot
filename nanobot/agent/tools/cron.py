@@ -1,34 +1,31 @@
-"""Cron tool for scheduling reminders and tasks."""
+"""用于调度提醒和定时任务的 cron 工具。"""
 
-from contextvars import ContextVar
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nanobot.agent.tools.base import Tool
 from nanobot.cron.service import CronService
 from nanobot.cron.types import CronSchedule
 
+if TYPE_CHECKING:
+    from nanobot.agent.turn_runtime import TurnRuntime
+
+# region [定时任务工具实现]
 
 class CronTool(Tool):
-    """Tool to schedule reminders and recurring tasks."""
+    """用于调度提醒和重复性任务的工具。"""
 
     def __init__(self, cron_service: CronService):
         self._cron = cron_service
         self._channel = ""
         self._chat_id = ""
-        self._in_cron_context: ContextVar[bool] = ContextVar("cron_in_context", default=False)
 
     def set_context(self, channel: str, chat_id: str) -> None:
-        """Set the current session context for delivery."""
+        """设置当前会话上下文用于消息投递。"""
         self._channel = channel
         self._chat_id = chat_id
 
-    def set_cron_context(self, active: bool):
-        """Mark whether the tool is executing inside a cron job callback."""
-        return self._in_cron_context.set(active)
-
-    def reset_cron_context(self, token) -> None:
-        """Restore previous cron context."""
-        self._in_cron_context.reset(token)
+    def set_turn_runtime(self, runtime: "TurnRuntime") -> None:
+        self.set_context(runtime.channel, runtime.chat_id)
 
     @property
     def name(self) -> str:
@@ -46,28 +43,34 @@ class CronTool(Tool):
                 "action": {
                     "type": "string",
                     "enum": ["add", "list", "remove"],
-                    "description": "Action to perform",
+                    "description": "Action to perform"
                 },
-                "message": {"type": "string", "description": "Reminder message (for add)"},
+                "message": {
+                    "type": "string",
+                    "description": "Reminder message (for add)"
+                },
                 "every_seconds": {
                     "type": "integer",
-                    "description": "Interval in seconds (for recurring tasks)",
+                    "description": "Interval in seconds (for recurring tasks)"
                 },
                 "cron_expr": {
                     "type": "string",
-                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)",
+                    "description": "Cron expression like '0 9 * * *' (for scheduled tasks)"
                 },
                 "tz": {
                     "type": "string",
-                    "description": "IANA timezone for cron expressions (e.g. 'America/Vancouver')",
+                    "description": "IANA timezone for cron expressions (e.g. 'America/Vancouver')"
                 },
                 "at": {
                     "type": "string",
-                    "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')",
+                    "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00')"
                 },
-                "job_id": {"type": "string", "description": "Job ID (for remove)"},
+                "job_id": {
+                    "type": "string",
+                    "description": "Job ID (for remove)"
+                }
             },
-            "required": ["action"],
+            "required": ["action"]
         }
 
     async def execute(
@@ -79,17 +82,19 @@ class CronTool(Tool):
         tz: str | None = None,
         at: str | None = None,
         job_id: str | None = None,
-        **kwargs: Any,
+        **kwargs: Any
     ) -> str:
         if action == "add":
-            if self._in_cron_context.get():
-                return "Error: cannot schedule new jobs from within a cron job execution"
             return self._add_job(message, every_seconds, cron_expr, tz, at)
         elif action == "list":
             return self._list_jobs()
         elif action == "remove":
             return self._remove_job(job_id)
         return f"Unknown action: {action}"
+
+    # endregion
+
+    # region [核心执行逻辑]
 
     def _add_job(
         self,
@@ -107,13 +112,12 @@ class CronTool(Tool):
             return "Error: tz can only be used with cron_expr"
         if tz:
             from zoneinfo import ZoneInfo
-
             try:
                 ZoneInfo(tz)
             except (KeyError, Exception):
                 return f"Error: unknown timezone '{tz}'"
 
-        # Build schedule
+        # 构建调度计划
         delete_after = False
         if every_seconds:
             schedule = CronSchedule(kind="every", every_ms=every_seconds * 1000)
@@ -121,11 +125,7 @@ class CronTool(Tool):
             schedule = CronSchedule(kind="cron", expr=cron_expr, tz=tz)
         elif at:
             from datetime import datetime
-
-            try:
-                dt = datetime.fromisoformat(at)
-            except ValueError:
-                return f"Error: invalid ISO datetime format '{at}'. Expected format: YYYY-MM-DDTHH:MM:SS"
+            dt = datetime.fromisoformat(at)
             at_ms = int(dt.timestamp() * 1000)
             schedule = CronSchedule(kind="at", at_ms=at_ms)
             delete_after = True
@@ -156,3 +156,5 @@ class CronTool(Tool):
         if self._cron.remove_job(job_id):
             return f"Removed job {job_id}"
         return f"Job {job_id} not found"
+
+    # endregion

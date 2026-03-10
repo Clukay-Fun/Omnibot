@@ -1,0 +1,78 @@
+meta:
+  id: reminder_set
+  version: "0.1"
+  title: Set reminder
+  description: Create a personal reminder and best-effort bridge sync.
+  owner: built_in
+  domain: productivity
+  match:
+    regex: "(提醒|提醒我|到期提醒|设置提醒)"
+    keywords:
+      - 提醒
+      - 提醒我
+      - 设置提醒
+      - 到期提醒
+params:
+  type: object
+  required:
+    - text
+    - due_at
+  properties:
+    query:
+      type: string
+      description: Natural-language reminder command, e.g. 提醒我明天9点开会.
+    text:
+      type: string
+      description: Reminder text.
+    due_at:
+      type: string
+      description: Due time in ISO-like text, for example 2026-03-06 10:00.
+    calendar_sync:
+      type: boolean
+      default: false
+    summary_cron_sync:
+      type: boolean
+      default: true
+action:
+  kind: reminder_set
+  record_bridge:
+    enabled: true
+    tool: bitable_create
+    args:
+      fields:
+        reminder_id: "{{ runtime.reminder.id }}"
+        user_id: "{{ runtime.reminder.user_id }}"
+        chat_id: "{{ runtime.reminder.chat_id }}"
+        text: "{{ runtime.reminder.text }}"
+        due_at: "{{ runtime.reminder.due_at }}"
+        status: "{{ runtime.reminder.status }}"
+        created_at: "{{ runtime.reminder.created_at }}"
+  calendar_bridge:
+    enabled: false
+    tool: calendar_create
+    args:
+      title: "{{ runtime.reminder.text }}"
+      start_at: "{{ runtime.reminder.due_at }}"
+      description: "Reminder {{ runtime.reminder.id }}"
+  summary_cron_bridge:
+    enabled: true
+    tool: cron
+    dedupe_key_template: "daily_summary:{{ runtime.user_context.sender_id }}"
+    args:
+      action: add
+      cron_expr: "0 9 * * *"
+      message: "daily_summary:{{ runtime.user_context.sender_id }}"
+response:
+  type: structured
+  template: |
+    已创建提醒：{{ reminder.text }}
+    - ID: {{ reminder.id }}
+    - 时间: {{ reminder.due_at }}
+    - 日历同步: {{ calendar.status }}
+    - 记录表桥接: {{ bridges.record_bridge.status }}
+    - 日历桥接: {{ bridges.calendar_bridge.status }}
+    - 日汇总 cron 桥接: {{ bridges.summary_cron_bridge.status }}
+error:
+  code: REMINDER_SET_ERROR
+  message: 无法创建提醒，请检查输入后重试。
+  retryable: true

@@ -29,9 +29,7 @@ class TelegramConfig(Base):
     enabled: bool = False
     token: str = ""  # Bot token from @BotFather
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs or usernames
-    proxy: str | None = (
-        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
-    )
+    proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     reply_to_message: bool = False  # If true, bot replies quote the original message
 
 
@@ -44,9 +42,111 @@ class FeishuConfig(Base):
     encrypt_key: str = ""  # Encrypt Key for event subscription (optional)
     verification_token: str = ""  # Verification Token for event subscription (optional)
     allow_from: list[str] = Field(default_factory=list)  # Allowed user open_ids
-    react_emoji: str = (
-        "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
+    react_enabled: bool = False  # Enable reaction emoji on inbound messages
+    react_emoji: str = "THUMBSUP"  # Emoji type for message reactions (e.g. THUMBSUP, OK, DONE, SMILE)
+    reply_to_message: bool = True  # Reply to source message when possible
+    reply_in_thread: bool = False  # Default thread reply mode for message.reply
+    stream_card_enabled: bool = True  # Reuse single card for progress streaming
+    stream_card_min_update_ms: int = 120  # Min interval between progress updates
+    stream_card_ttl_seconds: int = 600  # Stale stream state cleanup TTL
+    stream_card_print_frequency_ms: int = 50  # 2.0 streaming print frequency
+    stream_card_print_step: int = 2  # 2.0 streaming print step (chars)
+    stream_card_print_strategy: Literal["fast", "delay"] = "fast"  # 2.0 print strategy
+    stream_card_summary: str = ""  # 2.0 card summary in chat preview
+    stream_card_header_title: str = ""  # 2.0 card header title (empty to hide)
+    stream_card_show_thinking: bool = True  # Show thinking section in streaming card
+    stream_answer_warmup_chars: int = 24  # Min streamed chars before answer starts rendering
+    stream_answer_warmup_ms: int = 300  # Min wait before first streamed answer render
+    activation_private_policy: Literal["always", "mention", "off"] = "always"
+    activation_group_policy: Literal["always", "mention", "off"] = "mention"
+    activation_topic_policy: Literal["always", "mention", "off"] = "always"
+    activation_admin_open_ids: list[str] = Field(default_factory=list)
+    activation_admin_prefix_bypass: str = ""
+    onboarding_enabled: bool = True
+    onboarding_blocking: bool = False
+    onboarding_guide_once: bool = True
+    onboarding_reentry_commands: list[str] = Field(default_factory=lambda: ["/setup", "重新设置"])
+    onboarding_role_options: list[str] = Field(default_factory=lambda: ["律师", "助理", "实习生"])
+    onboarding_team_options: list[str] = Field(default_factory=lambda: ["诉讼组", "合同组", "招投标组", "综合组"])
+    audit_cleanup_interval_seconds: float = 6 * 60 * 60
+    audit_event_retention_days: int = 365
+    audit_message_index_retention_days: int = 365
+    memory_flush_threshold_private: int = 3
+    memory_flush_threshold_group: int = 5
+    memory_force_flush_on_topic_end: bool = True
+    memory_topic_end_keywords: list[str] = Field(
+        default_factory=lambda: ["先这样", "结束", "结论", "收尾", "done"]
     )
+
+
+class FeishuSharedAuthConfig(Base):
+    """Shared Feishu auth settings used across channels and tools."""
+
+    app_id: str = ""
+    app_secret: str = ""
+    encrypt_key: str = ""
+    verification_token: str = ""
+
+
+class FeishuSharedAPIConfig(Base):
+    """Shared Feishu API base settings."""
+
+    api_base: str = "https://open.feishu.cn/open-apis"
+
+
+class FeishuSharedBitableConfig(Base):
+    """Shared default bitable settings."""
+
+    domain: str = ""
+    default_app_token: str = ""
+    default_table_id: str = ""
+    default_view_id: str | None = None
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+
+
+class FeishuSharedStorageConfig(Base):
+    """Shared Feishu SQLite storage settings."""
+
+    state_db_path: str = ""
+    sqlite_journal_mode: Literal["WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"] = "WAL"
+    sqlite_synchronous: Literal["OFF", "NORMAL", "FULL", "EXTRA"] = "NORMAL"
+    sqlite_busy_timeout_ms: int = 5000
+    sqlite_backup_dir: str = ""
+    sqlite_backup_interval_hours: int = 24
+    sqlite_backup_retention_days: int = 7
+
+
+class FeishuOAuthConfig(Base):
+    """Server-side Feishu OAuth callback and token lifecycle configuration."""
+
+    enabled: bool = False
+    public_base_url: str = ""
+    callback_path: str = "/oauth/feishu/callback"
+    bind_host: str = ""
+    bind_port: int = 0
+    scopes: list[str] = Field(default_factory=list)
+    state_ttl_seconds: int = 600
+    refresh_ahead_seconds: int = 300
+    enforce_https_public_base_url: bool = True
+    allowed_redirect_domains: list[str] = Field(default_factory=list)
+    success_html_title: str = "Feishu Authorization Completed"
+    failure_html_title: str = "Feishu Authorization Failed"
+
+
+class FeishuIntegrationConfig(Base):
+    """Shared Feishu integration settings."""
+
+    auth: FeishuSharedAuthConfig = Field(default_factory=FeishuSharedAuthConfig)
+    api: FeishuSharedAPIConfig = Field(default_factory=FeishuSharedAPIConfig)
+    bitable: FeishuSharedBitableConfig = Field(default_factory=FeishuSharedBitableConfig)
+    storage: FeishuSharedStorageConfig = Field(default_factory=FeishuSharedStorageConfig)
+    oauth: FeishuOAuthConfig = Field(default_factory=FeishuOAuthConfig)
+
+
+class IntegrationsConfig(Base):
+    """Shared third-party integration settings."""
+
+    feishu: FeishuIntegrationConfig = Field(default_factory=FeishuIntegrationConfig)
 
 
 class DingTalkConfig(Base):
@@ -66,7 +166,6 @@ class DiscordConfig(Base):
     allow_from: list[str] = Field(default_factory=list)  # Allowed user IDs
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
     intents: int = 37377  # GUILDS + GUILD_MESSAGES + DIRECT_MESSAGES + MESSAGE_CONTENT
-    group_policy: Literal["mention", "open"] = "mention"
 
 
 class MatrixConfig(Base):
@@ -77,13 +176,9 @@ class MatrixConfig(Base):
     access_token: str = ""
     user_id: str = ""  # @bot:matrix.org
     device_id: str = ""
-    e2ee_enabled: bool = True  # Enable Matrix E2EE support (encryption + encrypted room handling).
-    sync_stop_grace_seconds: int = (
-        2  # Max seconds to wait for sync_forever to stop gracefully before cancellation fallback.
-    )
-    max_media_bytes: int = (
-        20 * 1024 * 1024
-    )  # Max attachment size accepted for Matrix media handling (inbound + outbound).
+    e2ee_enabled: bool = True # Enable Matrix E2EE support (encryption + encrypted room handling).
+    sync_stop_grace_seconds: int = 2 # Max seconds to wait for sync_forever to stop gracefully before cancellation fallback.
+    max_media_bytes: int = 20 * 1024 * 1024 # Max attachment size accepted for Matrix media handling (inbound + outbound).
     allow_from: list[str] = Field(default_factory=list)
     group_policy: Literal["open", "mention", "allowlist"] = "open"
     group_allow_from: list[str] = Field(default_factory=list)
@@ -114,9 +209,7 @@ class EmailConfig(Base):
     from_address: str = ""
 
     # Behavior
-    auto_reply_enabled: bool = (
-        True  # If false, inbound email is read but no automatic reply is sent
-    )
+    auto_reply_enabled: bool = True  # If false, inbound email is read but no automatic reply is sent
     poll_interval_seconds: int = 30
     mark_seen: bool = True
     max_body_chars: int = 12000
@@ -182,7 +275,6 @@ class SlackConfig(Base):
     user_token_read_only: bool = True
     reply_in_thread: bool = True
     react_emoji: str = "eyes"
-    allow_from: list[str] = Field(default_factory=list)  # Allowed Slack user IDs (sender-level)
     group_policy: str = "mention"  # "mention", "open", "allowlist"
     group_allow_from: list[str] = Field(default_factory=list)  # Allowed channel IDs if allowlist
     dm: SlackDMConfig = Field(default_factory=SlackDMConfig)
@@ -194,17 +286,14 @@ class QQConfig(Base):
     enabled: bool = False
     app_id: str = ""  # 机器人 ID (AppID) from q.qq.com
     secret: str = ""  # 机器人密钥 (AppSecret) from q.qq.com
-    allow_from: list[str] = Field(
-        default_factory=list
-    )  # Allowed user openids (empty = public access)
-
+    allow_from: list[str] = Field(default_factory=list)  # Allowed user openids (empty = public access)
 
 
 
 class ChannelsConfig(Base):
     """Configuration for chat channels."""
 
-    send_progress: bool = True  # stream agent's text progress to the channel
+    send_progress: bool = True    # stream agent's text progress to the channel
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
@@ -223,20 +312,52 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
-    provider: str = (
-        "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
-    )
-    max_tokens: int = 8192
+    provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
+    max_tokens: int = 4096
     temperature: float = 0.1
     max_tool_iterations: int = 40
     memory_window: int = 100
     reasoning_effort: str | None = None  # low / medium / high — enables LLM thinking mode
+    llm_timeout_seconds: float = 90.0
+    stage_heartbeat_seconds: float = 15.0
+    skillspec_render_primary_timeout_seconds: float = 12.0
+    skillspec_render_retry_timeout_seconds: float = 6.0
+
+
+class ResponseTemplateConfig(Base):
+    """Deterministic response template rendering configuration."""
+
+    enabled: bool = True
+    strict_mode: bool = True
+    show_audit_summary: bool = False
+    log_audit_summary: bool = True
+    max_list_items: int = 5
+
+
+class SkillSpecConfig(Base):
+    """SkillSpec runtime configuration."""
+
+    enabled: bool = True
+    workspace_override_enabled: bool = True
+    startup_report_enabled: bool = True
+    startup_report_include_invalid: bool = True
+    embedding_enabled: bool = False
+    embedding_top_k: int = 3
+    embedding_model: str = ""
+    embedding_timeout_seconds: int = 10
+    embedding_cache_ttl_seconds: int = 600
+    embedding_min_score: float = 0.15
+    route_log_enabled: bool = False
+    route_log_top_k: int = 3
+    query_rewrite_enabled: bool = False
 
 
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    response_templates: ResponseTemplateConfig = Field(default_factory=ResponseTemplateConfig)
+    skillspec: SkillSpecConfig = Field(default_factory=SkillSpecConfig)
 
 
 class ProviderConfig(Base):
@@ -251,7 +372,6 @@ class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
     custom: ProviderConfig = Field(default_factory=ProviderConfig)  # Any OpenAI-compatible endpoint
-    azure_openai: ProviderConfig = Field(default_factory=ProviderConfig)  # Azure OpenAI (model = deployment name)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -264,8 +384,8 @@ class ProvidersConfig(Base):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     minimax: ProviderConfig = Field(default_factory=ProviderConfig)
     aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)  # AiHubMix API gateway
-    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动)
-    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎)
+    siliconflow: ProviderConfig = Field(default_factory=ProviderConfig)  # SiliconFlow (硅基流动) API gateway
+    volcengine: ProviderConfig = Field(default_factory=ProviderConfig)  # VolcEngine (火山引擎) API gateway
     openai_codex: ProviderConfig = Field(default_factory=ProviderConfig)  # OpenAI Codex (OAuth)
     github_copilot: ProviderConfig = Field(default_factory=ProviderConfig)  # Github Copilot (OAuth)
 
@@ -295,9 +415,6 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
-    proxy: str | None = (
-        None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
-    )
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
 
 
@@ -311,13 +428,102 @@ class ExecToolConfig(Base):
 class MCPServerConfig(Base):
     """MCP server connection configuration (stdio or HTTP)."""
 
-    type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
     command: str = ""  # Stdio: command to run (e.g. "npx")
     args: list[str] = Field(default_factory=list)  # Stdio: command arguments
     env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP/SSE: endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
-    tool_timeout: int = 30  # seconds before a tool call is cancelled
+    url: str = ""  # HTTP: streamable HTTP endpoint URL
+    headers: dict[str, str] = Field(default_factory=dict)  # HTTP: Custom HTTP Headers
+    tool_timeout: int = 30  # Seconds before a tool call is cancelled
+
+
+class FeishuDataTokenConfig(Base):
+    refresh_ahead_seconds: int = 300
+
+
+class FeishuDataRequestConfig(Base):
+    timeout: int = 10
+    max_retries: int = 1
+    retry_delay: float = 1.0
+
+
+class FeishuDataCacheConfig(Base):
+    enabled: bool = True
+    max_entries: int = 512
+    field_mapping_ttl_seconds: int = 1800
+    person_mapping_ttl_seconds: int = 600
+    table_schema_ttl_seconds: int = 1800
+
+
+class FeishuDataBitableSearchConfig(Base):
+    searchable_fields: list[str] = Field(default_factory=list)
+    date_field: str = ""  # 用于日期区间过滤的字段名（如 "创建日期"）
+    max_records: int = 100
+    default_limit: int = 10
+
+
+class FeishuDataBitableConfig(Base):
+    domain: str = ""
+    default_app_token: str = ""
+    default_table_id: str = ""
+    default_view_id: str | None = None
+    field_mapping: dict[str, str] = Field(default_factory=dict)
+    search: FeishuDataBitableSearchConfig = Field(default_factory=FeishuDataBitableSearchConfig)
+
+
+class FeishuDataDocSearchConfig(Base):
+    default_folder_token: str | None = None
+    preview_length: int = 200
+    default_limit: int = 10
+
+
+class FeishuDataDocConfig(Base):
+    search: FeishuDataDocSearchConfig = Field(default_factory=FeishuDataDocSearchConfig)
+
+
+class FeishuDataFeatureFlagsConfig(Base):
+    """Feature flags for optional Feishu data tools."""
+
+    calendar_enabled: bool = True
+    task_enabled: bool = True
+    bitable_admin_enabled: bool = True
+    message_history_enabled: bool = True
+
+
+class FeishuDataConfig(Base):
+    """Feishu data tools configuration."""
+
+    enabled: bool = False
+    app_id: str = ""
+    app_secret: str = ""
+    api_base: str = "https://open.feishu.cn/open-apis"
+    token: FeishuDataTokenConfig = Field(default_factory=FeishuDataTokenConfig)
+    request: FeishuDataRequestConfig = Field(default_factory=FeishuDataRequestConfig)
+    cache: FeishuDataCacheConfig = Field(default_factory=FeishuDataCacheConfig)
+    bitable: FeishuDataBitableConfig = Field(default_factory=FeishuDataBitableConfig)
+    doc: FeishuDataDocConfig = Field(default_factory=FeishuDataDocConfig)
+    feature_flags: FeishuDataFeatureFlagsConfig = Field(default_factory=FeishuDataFeatureFlagsConfig)
+    confirm_token_ttl_seconds: int = 300
+
+
+class MinerURequestConfig(Base):
+    timeout_seconds: float = 30.0
+    max_retries: int = 2
+    retry_delay_seconds: float = 1.0
+
+
+class MinerUPollingConfig(Base):
+    interval_seconds: float = 1.5
+    timeout_seconds: float = 120.0
+
+
+class MinerUConfig(Base):
+    """MinerU document parsing configuration."""
+
+    enabled: bool = False
+    api_base: str = "https://api.mineru.net"
+    api_key: str = ""
+    request: MinerURequestConfig = Field(default_factory=MinerURequestConfig)
+    polling: MinerUPollingConfig = Field(default_factory=MinerUPollingConfig)
 
 
 class ToolsConfig(Base):
@@ -327,6 +533,8 @@ class ToolsConfig(Base):
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     restrict_to_workspace: bool = False  # If true, restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    feishu_data: FeishuDataConfig = Field(default_factory=FeishuDataConfig)
+    mineru: MinerUConfig = Field(default_factory=MinerUConfig)
 
 
 class Config(BaseSettings):
@@ -334,18 +542,121 @@ class Config(BaseSettings):
 
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
+    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+
+    def resolve_feishu_auth(self) -> FeishuSharedAuthConfig:
+        """Resolve Feishu auth from shared config first, then legacy locations."""
+        shared = self.integrations.feishu.auth
+        channel = self.channels.feishu
+        tool = self.tools.feishu_data
+        return FeishuSharedAuthConfig(
+            app_id=shared.app_id or channel.app_id or tool.app_id,
+            app_secret=shared.app_secret or channel.app_secret or tool.app_secret,
+            encrypt_key=shared.encrypt_key or channel.encrypt_key,
+            verification_token=shared.verification_token or channel.verification_token,
+        )
+
+    def resolve_feishu_api_base(self) -> str:
+        """Resolve Feishu API base from shared config first, then legacy tools config."""
+        shared = self.integrations.feishu.api.api_base
+        return shared or self.tools.feishu_data.api_base
+
+    def resolve_feishu_bitable(self) -> FeishuSharedBitableConfig:
+        """Resolve Feishu bitable defaults from shared config first, then legacy tools config."""
+        shared = self.integrations.feishu.bitable
+        legacy = self.tools.feishu_data.bitable
+        return FeishuSharedBitableConfig(
+            domain=shared.domain or legacy.domain,
+            default_app_token=shared.default_app_token or legacy.default_app_token,
+            default_table_id=shared.default_table_id or legacy.default_table_id,
+            default_view_id=shared.default_view_id if shared.default_view_id is not None else legacy.default_view_id,
+            field_mapping=shared.field_mapping or legacy.field_mapping,
+        )
+
+    def resolve_feishu_state_db_path(self) -> Path:
+        """Resolve Feishu state sqlite path using shared storage config."""
+        raw_path = str(self.integrations.feishu.storage.state_db_path or "").strip()
+        if not raw_path:
+            from nanobot.utils.helpers import get_state_path
+
+            return get_state_path() / "feishu" / "state.sqlite3"
+        path = Path(raw_path).expanduser()
+        if path.is_absolute():
+            return path
+        return (self.workspace_path / path).resolve()
+
+    def resolve_feishu_sqlite_options(self):
+        """Build SQLite connection options for Feishu runtime stores."""
+        from nanobot.storage.sqlite_store import SQLiteConnectionOptions
+
+        storage = self.integrations.feishu.storage
+        return SQLiteConnectionOptions(
+            journal_mode=storage.sqlite_journal_mode,
+            synchronous=storage.sqlite_synchronous,
+            busy_timeout_ms=storage.sqlite_busy_timeout_ms,
+        )
+
+    def apply_shared_integration_defaults(self) -> "Config":
+        """Materialize shared Feishu settings onto legacy access points for runtime compatibility."""
+        auth = self.resolve_feishu_auth()
+        api_base = self.resolve_feishu_api_base()
+        bitable = self.resolve_feishu_bitable()
+
+        self.channels.feishu.app_id = auth.app_id
+        self.channels.feishu.app_secret = auth.app_secret
+        self.channels.feishu.encrypt_key = auth.encrypt_key
+        self.channels.feishu.verification_token = auth.verification_token
+
+        self.tools.feishu_data.app_id = auth.app_id
+        self.tools.feishu_data.app_secret = auth.app_secret
+        self.tools.feishu_data.api_base = api_base
+        self.tools.feishu_data.bitable.domain = bitable.domain
+        self.tools.feishu_data.bitable.default_app_token = bitable.default_app_token
+        self.tools.feishu_data.bitable.default_table_id = bitable.default_table_id
+        self.tools.feishu_data.bitable.default_view_id = bitable.default_view_id
+        self.tools.feishu_data.bitable.field_mapping = dict(bitable.field_mapping)
+        return self
+
+    def to_persisted_dict(self) -> dict:
+        """Dump a minimal config while avoiding duplicated shared Feishu credentials."""
+        clone = self.model_copy(deep=True)
+        shared_auth = clone.integrations.feishu.auth
+        shared_api = clone.integrations.feishu.api
+        shared_bitable = clone.integrations.feishu.bitable
+
+        if shared_auth.app_id:
+            clone.channels.feishu.app_id = ""
+            clone.channels.feishu.app_secret = ""
+            clone.tools.feishu_data.app_id = ""
+            clone.tools.feishu_data.app_secret = ""
+        if shared_auth.encrypt_key:
+            clone.channels.feishu.encrypt_key = ""
+        if shared_auth.verification_token:
+            clone.channels.feishu.verification_token = ""
+        if shared_api.api_base and shared_api.api_base != FeishuSharedAPIConfig().api_base:
+            clone.tools.feishu_data.api_base = FeishuDataConfig().api_base
+        if shared_bitable.domain:
+            clone.tools.feishu_data.bitable.domain = ""
+        if shared_bitable.default_app_token:
+            clone.tools.feishu_data.bitable.default_app_token = ""
+        if shared_bitable.default_table_id:
+            clone.tools.feishu_data.bitable.default_table_id = ""
+        if shared_bitable.default_view_id is not None:
+            clone.tools.feishu_data.bitable.default_view_id = None
+        if shared_bitable.field_mapping:
+            clone.tools.feishu_data.bitable.field_mapping = {}
+
+        return clone.model_dump(by_alias=True, exclude_defaults=True, exclude_none=True)
 
     @property
     def workspace_path(self) -> Path:
         """Get expanded workspace path."""
         return Path(self.agents.defaults.workspace).expanduser()
 
-    def _match_provider(
-        self, model: str | None = None
-    ) -> tuple["ProviderConfig | None", str | None]:
+    def _match_provider(self, model: str | None = None) -> tuple["ProviderConfig | None", str | None]:
         """Match provider config and its registry name. Returns (config, spec_name)."""
         from nanobot.providers.registry import PROVIDERS
 
