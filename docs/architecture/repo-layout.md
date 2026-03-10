@@ -51,3 +51,9 @@ When adding new assets or moving existing ones:
 2. Preserve the external workspace contract unless a deliberate migration is added.
 3. Update docs and smoke-test paths when operational scripts move.
 4. Cover new layout assumptions with tests that exercise both packaged resources and workspace overrides.
+
+## Branch baseline
+
+- Repository/package layout changes are now developed on top of fork branch `mine/main`.
+- Legacy remote branches such as `mine/ominibot`, `mine/feishu`, and `mine/feishu-runtime-hardening` are retained only as historical references.
+- Branch workflow details live in `docs/guides/DEVELOPMENT_BASELINE.md`.

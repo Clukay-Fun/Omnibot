@@ -167,3 +167,9 @@ Omnibot 提供了强大且安全的声明式数据集成系统，支持快速将
 - 生产配置、联调脚本、灰度/回滚、监控告警详见 `docs/guides/OPERATIONS_FEISHU.md`。
 - 生产环境变量模板详见 `ops/env/feishu-production.env.example`。
 - 本地联调环境变量模板详见 `ops/env/feishu-local.env.example`。
+
+## 🌿 开发基线
+
+- 当前后续开发基线为 fork 上的 `mine/main`。
+- 新功能分支请从本地 `main` 切出，并将结果推到 fork，而不是旧的 `mine/ominibot` / `mine/feishu` 分支线。
+- 分支迁移与旧分支废弃策略详见 `docs/guides/DEVELOPMENT_BASELINE.md`。
