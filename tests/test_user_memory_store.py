@@ -3,7 +3,9 @@
     - 验证用户记忆存储路径和更新逻辑。
 """
 
-from nanobot.agent.skill_runtime.user_memory import UserMemoryStore as LegacyUserMemoryStore
+import importlib
+import importlib.util
+
 from nanobot.agent.user_state.user_memory import UserMemoryStore
 
 
@@ -41,13 +43,19 @@ def test_user_memory_update_merges_payload(tmp_path) -> None:
     assert updated == {"city": "Shenzhen", "lang": "zh", "team": "ops"}
 
 
-def test_legacy_user_memory_import_reexports_canonical_store() -> None:
-    """用处，参数
-
-    功能:
-        - 校验旧路径仍兼容并指向新的规范导出。
-    """
-    assert LegacyUserMemoryStore is UserMemoryStore
+def test_legacy_skill_runtime_package_is_removed() -> None:
+    assert importlib.util.find_spec("nanobot.agent.skill_runtime") is None
 
 
+def test_rehomed_runtime_namespaces_are_available() -> None:
+    assert importlib.import_module("nanobot.agent.reminders.reminder_runtime")
+    assert importlib.import_module("nanobot.agent.reminders.bitable_reminder_engine")
+    assert importlib.import_module("nanobot.agent.documents.document_extractor")
+    assert importlib.import_module("nanobot.agent.documents.document_classifier")
+    assert importlib.import_module("nanobot.agent.documents.document_pipeline")
+    assert importlib.import_module("nanobot.agent.documents.mineru_client")
+    assert importlib.import_module("nanobot.agent.table_runtime.table_registry")
+    assert importlib.import_module("nanobot.agent.table_runtime.table_profile_cache")
+    assert importlib.import_module("nanobot.agent.table_runtime.table_profile_synthesizer")
+    assert importlib.import_module("nanobot.agent.user_state.user_memory")
 #endregion

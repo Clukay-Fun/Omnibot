@@ -20,6 +20,33 @@ Assets that must survive packaging stay under the `nanobot` package so Hatch inc
 - `nanobot/skills/builtin/`: built-in agent skills shipped with the package.
 - `nanobot/skills/extract/`: built-in document extraction templates.
 - `nanobot/skills/registry/table_registry.yaml`: built-in table alias registry defaults.
+- Runtime helper namespaces are now explicit and no longer live under a generic `skill_runtime/` bucket:
+  - `nanobot/agent/reminders/`
+  - `nanobot/agent/documents/`
+  - `nanobot/agent/table_runtime/`
+  - `nanobot/agent/user_state/`
+
+### Breaking import change
+
+The legacy package `nanobot.agent.skill_runtime` has been removed.
+
+Callers must migrate old imports to the new canonical namespaces:
+
+- `from nanobot.agent.skill_runtime import ReminderRuntime` -> `from nanobot.agent.reminders import ReminderRuntime`
+- `from nanobot.agent.skill_runtime import BitableReminderRuleEngine` -> `from nanobot.agent.reminders import BitableReminderRuleEngine`
+- `from nanobot.agent.skill_runtime import process_document` -> `from nanobot.agent.documents.document_pipeline import process_document`
+- `from nanobot.agent.skill_runtime import UserMemoryStore` -> `from nanobot.agent.user_state import UserMemoryStore`
+
+- `nanobot.agent.skill_runtime.reminder_runtime` -> `nanobot.agent.reminders.reminder_runtime`
+- `nanobot.agent.skill_runtime.bitable_reminder_engine` -> `nanobot.agent.reminders.bitable_reminder_engine`
+- `nanobot.agent.skill_runtime.document_extractor` -> `nanobot.agent.documents.document_extractor`
+- `nanobot.agent.skill_runtime.document_classifier` -> `nanobot.agent.documents.document_classifier`
+- `nanobot.agent.skill_runtime.document_pipeline` -> `nanobot.agent.documents.document_pipeline`
+- `nanobot.agent.skill_runtime.mineru_client` -> `nanobot.agent.documents.mineru_client`
+- `nanobot.agent.skill_runtime.table_registry` -> `nanobot.agent.table_runtime.table_registry`
+- `nanobot.agent.skill_runtime.table_profile_cache` -> `nanobot.agent.table_runtime.table_profile_cache`
+- `nanobot.agent.skill_runtime.table_profile_synthesizer` -> `nanobot.agent.table_runtime.table_profile_synthesizer`
+- `nanobot.agent.skill_runtime.user_memory` -> `nanobot.agent.user_state.user_memory`
 
 Rule of thumb: if runtime code loads it with `importlib.resources`, it belongs under `nanobot/` rather than the repository root.
 
