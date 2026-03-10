@@ -14,14 +14,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from loguru import logger
 
-from nanobot.agent.coordinators import (
-    AgentCoordinator,
-    ContactQueryCoordinator,
-    ContinuationCoordinator,
-    PendingWriteCoordinator,
-    ReferenceResolutionCoordinator,
-    ResultSelectionCoordinator,
-)
+from nanobot.agent.coordinators import ContinuationCoordinator, PendingWriteCoordinator
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.memory_worker import MemoryScope, MemoryTurnTask, MemoryWriteWorker
@@ -85,6 +78,7 @@ class AgentLoop:
     _BOOTSTRAP_INTERNAL_TRIGGER_PREFIX = "[Bootstrap Internal Trigger]"
     _SKILLSPEC_RENDER_MAX_TOKENS = 800
     _SKILLSPEC_RENDER_MAX_INPUT_CHARS = 2400
+    _WORKFLOW_MODE_METADATA_KEY = "workflow_mode"
     _MEMORY_WRITE_TURN_THRESHOLD = 3
     _MEMORY_TOPIC_END_KEYWORDS = (
         "先这样",
@@ -297,19 +291,11 @@ class AgentLoop:
         self._plain_stream_warmup_chars = max(1, min(self._stream_warmup_chars, 8))
         self._plain_stream_warmup_ms = max(0, min(self._stream_warmup_ms, 120))
         self._register_default_tools()
-        self._coordinators: list[AgentCoordinator] = self._build_coordinators()
+        self._pending_write_coordinator = PendingWriteCoordinator(self)
+        self._continuation_coordinator = ContinuationCoordinator(self)
         self._skillspec_registry: SkillSpecRegistry | None = None
         self._skillspec_runtime: SkillSpecExecutor | None = None
         self._init_skillspec_runtime()
-
-    def _build_coordinators(self) -> list[AgentCoordinator]:
-        return [
-            PendingWriteCoordinator(self),
-            ContactQueryCoordinator(self),
-            ContinuationCoordinator(self),
-            ResultSelectionCoordinator(self),
-            ReferenceResolutionCoordinator(self),
-        ]
 
     def _init_skillspec_runtime(self) -> None:
         if not self.skillspec_config.enabled:
@@ -366,15 +352,20 @@ class AgentLoop:
     def _now_iso() -> str:
         return datetime.now().isoformat()
 
-    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+    @staticmethod
+    def _prompt_purpose_for_message(msg: InboundMessage) -> str:
         purpose = "chat"
         source_event_type = str((msg.metadata or {}).get("source_event_type") or "")
         if (msg.metadata or {}).get("_bootstrap") or source_event_type in {"p2p_chat_create", "im.chat.create"}:
             purpose = "bootstrap"
+        return purpose
+
+    def _prompt_context_for_message(self, msg: InboundMessage, *, session_key: str | None = None) -> PromptContext:
+        purpose = self._prompt_purpose_for_message(msg)
         runtime = TurnRuntime.from_message(
             msg,
             session=None,
-            purpose=purpose,
+            purpose=cast(Any, purpose),
             mode="",
         )
         if session_key:
@@ -1494,6 +1485,8 @@ class AgentLoop:
                 workspace=self.workspace,
                 state_db_path=self._state_db_path,
                 sqlite_options=self._sqlite_options,
+                provider=self.provider,
+                model=self.model,
             ):
                 self.tools.register(tool)
 
@@ -1640,14 +1633,6 @@ class AgentLoop:
     ) -> str | None:
         return fallback_text
 
-    async def _run_coordinators(self, msg: InboundMessage, *, session: Session) -> OutboundMessage | None:
-        for coordinator in self._coordinators:
-            outbound = await coordinator.handle(msg=msg, session=session)
-            if outbound is not None:
-                self._log_coordinator_hit(coordinator.name, session.key, "message")
-                return outbound
-        return None
-
     def _capture_coordinator_tool_result(
         self,
         *,
@@ -1658,17 +1643,39 @@ class AgentLoop:
     ) -> str | None:
         if session is None:
             return None
-        for coordinator in self._coordinators:
-            captured = coordinator.on_tool_result(
-                session=session,
-                tool_name=tool_name,
-                raw_args=raw_args,
-                result=result,
-            )
-            if captured is not None:
-                self._log_coordinator_hit(coordinator.name, session.key, "tool_result")
-                return captured.final_content
+        captured = self._pending_write_coordinator.on_tool_result(
+            session=session,
+            tool_name=tool_name,
+            raw_args=raw_args,
+            result=result,
+        )
+        if captured is not None:
+            self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "tool_result")
+            return captured.final_content
         return None
+
+    @staticmethod
+    def _prepared_write_followup(tool_name: str, result: str) -> dict[str, Any] | None:
+        if tool_name != "bitable_prepare_create":
+            return None
+        try:
+            payload = json.loads(result)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("needs_table_confirmation") or payload.get("needs_record_confirmation"):
+            return None
+        next_step = payload.get("next_step")
+        if not isinstance(next_step, dict):
+            return None
+        followup_tool = str(next_step.get("tool") or "").strip()
+        arguments = next_step.get("arguments")
+        if followup_tool not in {"bitable_create", "bitable_update", "bitable_delete"}:
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        return {"tool": followup_tool, "arguments": dict(arguments)}
 
     @staticmethod
     def _log_coordinator_hit(name: str, session_key: str, source: str) -> None:
@@ -1679,10 +1686,13 @@ class AgentLoop:
         metadata = dict(msg.metadata or {})
         text = msg.content.strip().lower()
         pending_write = False
+        workflow_mode = AgentLoop._workflow_mode(session)
         if session is not None:
             pending_write = isinstance(session.metadata.get("pending_write"), dict)
         mode = ""
-        if msg.channel == "feishu":
+        if workflow_mode == "plan":
+            mode = "workflow_plan"
+        elif msg.channel == "feishu":
             if pending_write:
                 mode = "main_write_commit"
             elif any(token in text for token in ("新增", "创建", "写入", "添加", "记到", "记录到", "更新", "修改", "删除", "移除")):
@@ -1730,10 +1740,11 @@ class AgentLoop:
         msg: InboundMessage,
         *,
         session: Session | None = None,
-        purpose: str = "chat",
+        purpose: str | None = None,
         mode: str = "",
     ) -> TurnRuntime:
-        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, purpose), mode=mode)
+        resolved_purpose = purpose or AgentLoop._prompt_purpose_for_message(msg)
+        return TurnRuntime.from_message(msg, session=session, purpose=cast(Any, resolved_purpose), mode=mode)
 
     async def _render_skillspec_with_llm(self, *, msg: InboundMessage, raw_content: str) -> str:
         content = raw_content.strip()
@@ -2076,6 +2087,45 @@ class AgentLoop:
                         if pending_preview is not None
                         else self._short_text(result, limit=200)
                     )
+                    prepared_followup = self._prepared_write_followup(tool_call.name, result)
+                    if prepared_followup is not None:
+                        messages = self.context.add_tool_result(
+                            messages, tool_call.id, tool_call.name, result
+                        )
+                        followup_tool = str(prepared_followup.get("tool") or "").strip()
+                        followup_args = dict(prepared_followup.get("arguments") or {})
+                        if followup_tool and followup_args:
+                            template = self._runtime_text.prompt_text(
+                                "progress", "tool_done", "{tool} 完成，继续思考中..."
+                            )
+                            await _emit_progress(template.format(tool=tool_call.name), phase="thinking")
+                            followup_started = time.perf_counter()
+                            followup_heartbeat_task = _start_stage_heartbeat(f"tool:{followup_tool}", followup_started)
+                            try:
+                                followup_result = await self.tools.execute(
+                                    followup_tool,
+                                    followup_args,
+                                    exposure=tool_exposure,
+                                )
+                            finally:
+                                await _stop_stage_heartbeat(followup_heartbeat_task)
+                            timings.append(
+                                {
+                                    "stage": f"tool:{followup_tool}",
+                                    "duration_ms": int((time.perf_counter() - followup_started) * 1000),
+                                }
+                            )
+                            pending_preview = self._capture_coordinator_tool_result(
+                                session=session,
+                                tool_name=followup_tool,
+                                raw_args=followup_args,
+                                result=followup_result,
+                            )
+                            result_preview = (
+                                "已生成写入预览，等待用户确认。"
+                                if pending_preview is not None
+                                else self._short_text(followup_result, limit=200)
+                            )
                     if result_preview:
                         template = self._runtime_text.prompt_text(
                             "progress", "tool_result", "{tool} 结果：{result}"
@@ -2094,9 +2144,20 @@ class AgentLoop:
                         messages, tool_call.id, tool_call.name, result
                     )
                     if pending_preview is not None:
+                        if prepared_followup is None:
+                            messages = self.context.add_tool_result(
+                                messages, tool_call.id, tool_call.name, result
+                            )
                         final_content = pending_preview
                         messages = self.context.add_assistant_message(messages, final_content)
                         break
+                    if prepared_followup is not None:
+                        final_content = result_preview or "已完成写入预处理。"
+                        messages = self.context.add_assistant_message(messages, final_content)
+                        break
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
 
                 if final_content is not None:
                     break
@@ -2283,17 +2344,46 @@ class AgentLoop:
     @staticmethod
     def _default_commands_help_text() -> str:
         return (
-            "可用命令\n"
+            "全局命令\n"
             "- /help 或 /commands：查看命令总览\n"
             "- /status：查看当前偏好与授权状态\n"
+            "- /plan：切换到计划模式（只分析/规划，不执行 skill 或工具）\n"
+            "- /build：切换到构建模式（允许执行 skill 和工具）\n"
             "- /setup：查看初始化引导\n"
             "- /connect 或 /oauth：连接飞书 OAuth\n"
             "- /session：查看会话子命令帮助\n"
             "- /new：开启新会话\n"
             "- /stop：停止当前任务\n"
-            "- 继续 / 展开：查看分页剩余内容\n"
-            "- 确认 <token> / 取消 <token>：确认或取消写入"
+            "\n上下文命令\n"
+            "- 继续 / 展开：仅当当前有分页结果时，查看剩余内容\n"
+            "- 确认 <token> / 取消 <token>：仅当当前有写入预览时，确认或取消写入"
         )
+
+    @classmethod
+    def _workflow_mode(cls, session: Session | None) -> str:
+        if session is None:
+            return "build"
+        value = str((session.metadata or {}).get(cls._WORKFLOW_MODE_METADATA_KEY) or "build").strip().lower()
+        return value if value in {"plan", "build"} else "build"
+
+    @classmethod
+    def _set_workflow_mode(cls, session: Session, mode: str) -> None:
+        metadata = dict(session.metadata or {})
+        metadata[cls._WORKFLOW_MODE_METADATA_KEY] = "plan" if mode == "plan" else "build"
+        session.metadata = metadata
+
+    @classmethod
+    def _workflow_mode_label(cls, mode: str) -> str:
+        return "计划（只读）" if mode == "plan" else "构建（可执行）"
+
+    def _handle_workflow_mode_command(self, *, msg: InboundMessage, session: Session, mode: str) -> OutboundMessage:
+        self._set_workflow_mode(session, mode)
+        self.sessions.save(session)
+        if mode == "plan":
+            content = "已切换到 plan 模式。接下来我只做分析、规划和方案讨论，不执行 skill、工具或写入。需要实际操作时发 /build。"
+        else:
+            content = "已切换到 build 模式。接下来我可以执行 skill、工具调用和写入流程。"
+        return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id, content=content)
 
     @staticmethod
     def _default_session_help_text() -> str:
@@ -2306,6 +2396,8 @@ class AgentLoop:
         )
 
     def _build_status_text(self, msg: InboundMessage) -> str:
+        session = self.sessions.get_or_create(msg.session_key)
+        workflow_mode = self._workflow_mode(session)
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         preferences = cast(dict[str, Any], profile["preferences"])
         skillspec = cast(dict[str, Any], profile["skillspec"])
@@ -2351,6 +2443,7 @@ class AgentLoop:
 
         return (
             "📌 当前设置\n\n"
+            f"工作模式：{self._workflow_mode_label(workflow_mode)}\n"
             f"怎么称呼您：{display_name}\n"
             f"回复风格：{style_label}\n"
             f"录入数据时：{confirm_label}\n"
@@ -2637,6 +2730,10 @@ class AgentLoop:
                 chat_id=msg.chat_id,
                 content=self._build_status_text(msg),
             )
+        if cmd == "/plan":
+            return self._handle_workflow_mode_command(msg=msg, session=session, mode="plan")
+        if cmd == "/build":
+            return self._handle_workflow_mode_command(msg=msg, session=session, mode="build")
         if cmd == "/step":
             return OutboundMessage(
                 channel=msg.channel,
@@ -2677,11 +2774,45 @@ class AgentLoop:
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
 
-        pending_outbound = await self._run_coordinators(msg, session=session)
-        if pending_outbound is not None:
-            return pending_outbound
+        workflow_mode = self._workflow_mode(session)
+        if raw_cmd.startswith("/skill"):
+            if workflow_mode == "plan":
+                return OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="当前是 plan 模式：我只做分析和规划，不执行 skill 或工具。需要实际操作请先发 /build。",
+                )
+            if self._skillspec_runtime:
+                skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
+                if skillspec_result.handled:
+                    rendered = skillspec_result.content
+                    if self._should_rewrite_skillspec_result(skillspec_result.metadata):
+                        rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
+                    self.sessions.save(session)
+                    outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
+                    outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
+                    if skillspec_result.reply_chat_id:
+                        for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
+                            outbound_metadata.pop(key, None)
+                        outbound_metadata["_reply_in_thread"] = False
+                    outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
+                    return OutboundMessage(
+                        channel=msg.channel,
+                        chat_id=outbound_chat_id,
+                        content=rendered,
+                        metadata=outbound_metadata,
+                    )
+        if workflow_mode != "plan":
+            pending_outbound = await self._pending_write_coordinator.handle(msg=msg, session=session)
+            if pending_outbound is not None:
+                self._log_coordinator_hit(self._pending_write_coordinator.name, session.key, "message")
+                return pending_outbound
+            continuation_outbound = await self._continuation_coordinator.handle(msg=msg, session=session)
+            if continuation_outbound is not None:
+                self._log_coordinator_hit(self._continuation_coordinator.name, session.key, "message")
+                return continuation_outbound
 
-        if self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
+        if workflow_mode != "plan" and self._skillspec_runtime and self._skillspec_runtime.can_handle_continuation(msg.content):
             continuation = self._skillspec_runtime.continue_from_session(session)
             if continuation is not None and continuation.handled:
                 rendered = continuation.content
@@ -2700,27 +2831,6 @@ class AgentLoop:
                 content=self._runtime_text.prompt_text("pagination", "no_more_content", "没有可继续的内容了。"),
                 metadata={**(msg.metadata or {}), "_tool_turn": True},
             )
-
-        if self._skillspec_runtime:
-            skillspec_result = await self._skillspec_runtime.execute_if_matched(msg, session)
-            if skillspec_result.handled:
-                rendered = skillspec_result.content
-                if self._should_rewrite_skillspec_result(skillspec_result.metadata):
-                    rendered = await self._render_skillspec_with_llm(msg=msg, raw_content=skillspec_result.content)
-                self.sessions.save(session)
-                outbound_chat_id = skillspec_result.reply_chat_id or msg.chat_id
-                outbound_metadata = {**(msg.metadata or {}), **(skillspec_result.metadata or {})}
-                if skillspec_result.reply_chat_id:
-                    for key in ("message_id", "thread_id", "root_id", "parent_id", "upper_message_id"):
-                        outbound_metadata.pop(key, None)
-                    outbound_metadata["_reply_in_thread"] = False
-                outbound_metadata["_tool_turn"] = skillspec_result.tool_turn
-                return OutboundMessage(
-                    channel=msg.channel,
-                    chat_id=outbound_chat_id,
-                    content=rendered,
-                    metadata=outbound_metadata,
-                )
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
@@ -2814,6 +2924,16 @@ class AgentLoop:
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
         """将会话的新一轮消息保存起来，截断过长的工具结果。"""
         from datetime import datetime
+
+        def _restore_bootstrap_user_message(content: str) -> str | None:
+            prefix = "Actual user message:\n"
+            if not content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
+                return None
+            if prefix not in content:
+                return None
+            restored = content.split(prefix, 1)[1].strip()
+            return restored or None
+
         for m in messages[skip:]:
             entry = dict(m)
             role, content = entry.get("role"), entry.get("content")
@@ -2825,7 +2945,10 @@ class AgentLoop:
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     continue
                 if isinstance(content, str) and content.startswith(self._BOOTSTRAP_INTERNAL_TRIGGER_PREFIX):
-                    continue
+                    restored = _restore_bootstrap_user_message(content)
+                    if restored is None:
+                        continue
+                    entry["content"] = restored
                 if isinstance(content, list):
                     entry["content"] = [
                         {"type": "text", "text": "[image]"} if (

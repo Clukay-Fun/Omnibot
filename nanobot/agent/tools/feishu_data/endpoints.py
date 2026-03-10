@@ -36,6 +36,16 @@ class FeishuEndpoints:
         return "/drive/v1/files"
 
     @staticmethod
+    def contact_users_batch_get_id() -> str:
+        """通过邮箱或手机号换取飞书用户 ID 的端点。"""
+        return "/contact/v3/users/batch_get_id"
+
+    @staticmethod
+    def contact_users_find_by_department() -> str:
+        """按部门列出通讯录用户的端点。"""
+        return "/contact/v3/users/find_by_department"
+
+    @staticmethod
     def bitable_records(app_token: str, table_id: str) -> str:
         """创建记录或批量列出记录的端点。"""
         return f"/bitable/v1/apps/{app_token}/tables/{table_id}/records"

@@ -12,12 +12,23 @@ from typing import Any, cast
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.object_memory import (
+    is_generic_recent_object_reference,
+    is_recent_object_reference,
+    object_kind_for_payload,
+    recent_object_focus,
+    resolve_recent_object_reference,
+)
+from nanobot.agent.skill_runtime.table_registry import TableRegistry
+from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
+from nanobot.agent.skill_runtime.table_profile_cache import schema_hash_for_fields
 from nanobot.agent.tools.feishu_data.cache import TTLCache
 from nanobot.agent.tools.feishu_data.client import FeishuDataClient
 from nanobot.agent.tools.feishu_data.date_utils import build_date_filter
 from nanobot.agent.tools.feishu_data.endpoints import FeishuEndpoints
 from nanobot.agent.tools.feishu_data.errors import FeishuDataAPIError
 from nanobot.agent.tools.feishu_data.field_utils import apply_field_mapping
+from nanobot.agent.tools.feishu_data.value_normalization import normalize_amount_value, normalize_date_string, normalize_option_value
 from nanobot.config.schema import FeishuDataConfig
 
 # region [工具定义]
@@ -539,9 +550,9 @@ def _char_ngrams(text: str, size: int = 2) -> set[str]:
     return {text[index:index + size] for index in range(len(text) - size + 1)}
 
 
-def _score_table_candidate(query: str, table_name: str) -> tuple[float, list[str]]:
+def _score_candidate_text(query: str, target: str, *, label: str) -> tuple[float, list[str]]:
     normalized_query = _normalize_match_text(query)
-    normalized_name = _normalize_match_text(table_name)
+    normalized_name = _normalize_match_text(target)
     if not normalized_query or not normalized_name:
         return 0.0, []
 
@@ -549,17 +560,17 @@ def _score_table_candidate(query: str, table_name: str) -> tuple[float, list[str
     score = difflib.SequenceMatcher(None, normalized_query, normalized_name).ratio() * 2.0
     if normalized_name in normalized_query:
         score += 1.5
-        reasons.append("normalized_substring")
+        reasons.append(f"{label}_substring")
     elif normalized_query in normalized_name:
         score += 1.0
-        reasons.append("query_substring")
+        reasons.append(f"{label}_query_substring")
 
     query_tokens = set(_tokenize_match_text(query))
-    table_tokens = set(_tokenize_match_text(table_name))
+    table_tokens = set(_tokenize_match_text(target))
     overlap = query_tokens & table_tokens
     if overlap:
         score += len(overlap) * 0.6
-        reasons.append(f"token_overlap={len(overlap)}")
+        reasons.append(f"{label}_token_overlap={len(overlap)}")
 
     ngram_query = _char_ngrams(normalized_query)
     ngram_name = _char_ngrams(normalized_name)
@@ -567,9 +578,40 @@ def _score_table_candidate(query: str, table_name: str) -> tuple[float, list[str
         ngram_overlap = len(ngram_query & ngram_name) / max(1, len(ngram_query | ngram_name))
         if ngram_overlap > 0:
             score += ngram_overlap * 1.2
-            reasons.append(f"ngram_overlap={ngram_overlap:.2f}")
+            reasons.append(f"{label}_ngram_overlap={ngram_overlap:.2f}")
 
     return round(score, 4), reasons
+
+
+def _score_table_candidate(
+    query: str,
+    table_name: str,
+    *,
+    aliases: list[str] | None = None,
+    purpose: str = "",
+) -> tuple[float, list[str], float]:
+    score, reasons = _score_candidate_text(query, table_name, label="normalized")
+    base_score = score
+
+    alias_candidates = [str(item).strip() for item in aliases or [] if str(item).strip()]
+    best_alias_score = 0.0
+    best_alias_reasons: list[str] = []
+    for alias in alias_candidates:
+        alias_score, alias_reasons = _score_candidate_text(query, alias, label="profile_alias")
+        alias_score = round(alias_score + 0.4, 4) if alias_score > 0 else 0.0
+        if alias_score > best_alias_score:
+            best_alias_score = alias_score
+            best_alias_reasons = alias_reasons
+    score += best_alias_score
+    reasons.extend(best_alias_reasons)
+
+    if purpose:
+        purpose_score, purpose_reasons = _score_candidate_text(query, purpose, label="profile_purpose")
+        if purpose_score > 0:
+            score += round(purpose_score * 0.35, 4)
+            reasons.extend(purpose_reasons)
+
+    return round(score, 4), reasons, round(base_score, 4)
 
 
 def _rank_table_candidates(query: str, tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -579,7 +621,12 @@ def _rank_table_candidates(query: str, tables: list[dict[str, Any]]) -> list[dic
         table_id = str(table.get("table_id") or "").strip()
         if not table_name or not table_id:
             continue
-        score, reasons = _score_table_candidate(query, table_name)
+        profile_raw = table.get("profile")
+        profile: dict[str, Any] = dict(profile_raw) if isinstance(profile_raw, dict) else {}
+        aliases_raw = profile.get("aliases")
+        aliases = list(aliases_raw) if isinstance(aliases_raw, list) else []
+        purpose = str(profile.get("purpose_guess") or "")
+        score, reasons, base_score = _score_table_candidate(query, table_name, aliases=aliases, purpose=purpose)
         if score <= 0:
             continue
         ranked.append(
@@ -587,7 +634,9 @@ def _rank_table_candidates(query: str, tables: list[dict[str, Any]]) -> list[dic
                 "table_id": table_id,
                 "name": table_name,
                 "score": score,
+                "base_score": base_score,
                 "reasons": reasons,
+                **({"profile": profile} if profile else {}),
             }
         )
     ranked.sort(key=lambda item: (-float(item.get("score") or 0.0), len(str(item.get("name") or "")), str(item.get("name") or "")))
@@ -827,9 +876,57 @@ class BitableListFieldsTool(Tool):
 class BitableMatchTableTool(Tool):
     """根据自然语言请求召回最可能的多维表格候选。"""
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        workspace: Path | None = None,
+        profile_synthesizer: TableProfileSynthesizer | None = None,
+    ):
         self.config = config
         self._list_tables_tool = BitableListTablesTool(config, client)
+        self._table_registry = TableRegistry(workspace=workspace, profile_synthesizer=profile_synthesizer)
+
+    def _attach_profile_metadata(self, *, app_token: str, tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        enriched: list[dict[str, Any]] = []
+        for item in tables:
+            if not isinstance(item, dict):
+                continue
+            table_id = str(item.get("table_id") or "").strip()
+            table_name = str(item.get("name") or "").strip()
+            payload = dict(item)
+            alias = self._table_registry.find_alias(app_token=app_token, table_id=table_id, table_name=table_name)
+            if alias:
+                profile = self._table_registry.get_latest_profile(app_token=app_token, table_id=table_id)
+                if isinstance(profile, dict):
+                    payload["profile"] = {
+                        "alias": alias,
+                        "display_name": str(profile.get("display_name") or table_name or alias).strip() or alias,
+                        "aliases": [
+                            str(value).strip()
+                            for value in profile.get("aliases", [])
+                            if isinstance(value, str) and str(value).strip()
+                        ],
+                        "purpose_guess": str(profile.get("purpose_guess") or "").strip(),
+                        "confidence": str(profile.get("confidence") or "medium").strip() or "medium",
+                        "source": str(profile.get("source") or "heuristic"),
+                    }
+                else:
+                    metadata = self._table_registry.get_table_metadata(alias)
+                    if isinstance(metadata, dict):
+                        payload["profile"] = {
+                            "alias": alias,
+                            "display_name": str(metadata.get("display_name") or table_name or alias).strip() or alias,
+                            "aliases": [
+                                str(value).strip()
+                                for value in metadata.get("aliases", [])
+                                if isinstance(value, str) and str(value).strip()
+                            ],
+                            "purpose_guess": self._table_registry._purpose_guess(str(metadata.get("display_name") or table_name or alias)),
+                            "source": "heuristic",
+                        }
+            enriched.append(payload)
+        return enriched
 
     @property
     def name(self) -> str:
@@ -882,6 +979,7 @@ class BitableMatchTableTool(Tool):
                 ensure_ascii=False,
             )
         tables = [item for item in tables_payload.get("tables", []) if isinstance(item, dict)]
+        tables = self._attach_profile_metadata(app_token=str(app_token), tables=tables)
         ranked = _rank_table_candidates(query, tables)
         top_candidates = ranked[:limit]
         payload: dict[str, Any] = {
@@ -898,10 +996,319 @@ class BitableMatchTableTool(Tool):
 class BitablePrepareCreateTool(Tool):
     """为 bitable_create 构建非硬编码的候选表 + 紧凑字段摘要。"""
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient):
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        workspace: Path | None = None,
+        profile_synthesizer: TableProfileSynthesizer | None = None,
+    ):
         self.config = config
-        self._match_tool = BitableMatchTableTool(config, client)
+        self._match_tool = BitableMatchTableTool(config, client, workspace=workspace, profile_synthesizer=profile_synthesizer)
         self._field_tool = BitableListFieldsTool(config, client)
+        self._search_tool = BitableSearchTool(config, client)
+        self._table_registry = TableRegistry(workspace=workspace, profile_synthesizer=profile_synthesizer)
+        self._runtime_metadata: dict[str, Any] = {}
+
+    def set_runtime_context(
+        self,
+        channel: str,
+        chat_id: str,
+        sender_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        _ = (channel, chat_id, sender_id)
+        self._runtime_metadata = dict(metadata or {})
+
+    def set_turn_runtime(self, runtime: Any) -> None:
+        self.set_runtime_context(runtime.channel, runtime.chat_id, runtime.sender_id, runtime.metadata)
+
+    def _reference_query_hint(self, request_text: str, table_hint: str) -> str:
+        if table_hint:
+            return table_hint
+        if not is_generic_recent_object_reference(request_text):
+            return request_text
+        selected_table = self._runtime_metadata.get("recent_selected_table") if isinstance(self._runtime_metadata.get("recent_selected_table"), dict) else {}
+        table_name = str(selected_table.get("name") or selected_table.get("table_name") or "").strip()
+        if table_name:
+            return table_name
+        focus = recent_object_focus(self._runtime_metadata)
+        if focus == "case":
+            return "案件项目总库"
+        if focus == "contract":
+            return "合同管理"
+        if focus == "weekly_plan":
+            return "团队周工作计划表"
+        return request_text
+
+    @staticmethod
+    def _field_name_for_role(profile: dict[str, Any], *roles: str) -> str | None:
+        field_roles = profile.get("field_roles") if isinstance(profile.get("field_roles"), dict) else {}
+        for role in roles:
+            for field_name, current_role in field_roles.items():
+                if str(current_role) == role:
+                    return str(field_name)
+        return None
+
+    @staticmethod
+    def _extract_labeled_value(text: str, labels: tuple[str, ...]) -> str | None:
+        if not labels:
+            return None
+        pattern = "|".join(re.escape(label) for label in labels if label)
+        if not pattern:
+            return None
+        match = re.search(rf"(?:{pattern})\s*[:：]?\s*([^，。；;\n]+)", text)
+        if not match:
+            return None
+        value = str(match.group(1) or "").strip()
+        return value or None
+
+    @staticmethod
+    def _extract_weekly_owner(text: str) -> str | None:
+        for pattern in (
+            r"给([^，。,:：\s]{2,20})(?:补一下|补|写|记录|新增|添加)",
+            r"([^，。,:：\s]{2,20})的?(?:本周|这周|下周)(?:工作计划|周计划|周报)",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                value = str(match.group(1) or "").strip()
+                if value:
+                    return value
+        return None
+
+    @staticmethod
+    def _extract_week_token(text: str) -> str | None:
+        for token in ("本周", "这周", "下周"):
+            if token in text:
+                return token
+        match = re.search(r"第?\d+周", text)
+        if match:
+            return str(match.group(0)).strip()
+        return None
+
+    @staticmethod
+    def _extract_content_tail(text: str) -> str | None:
+        for sep in ("：", ":"):
+            if sep in text:
+                tail = text.split(sep, 1)[1].strip()
+                if tail:
+                    return tail
+        return None
+
+    @classmethod
+    def _infer_draft_fields(cls, *, request_text: str, profile: dict[str, Any]) -> dict[str, Any]:
+        draft_fields: dict[str, Any] = {}
+        display_name = str(profile.get("display_name") or "")
+        lower_name = display_name.lower()
+
+        if any(token in lower_name for token in ("周", "weekly", "计划", "周报")):
+            owner_field = cls._field_name_for_role(profile, "owner")
+            week_field = cls._field_name_for_role(profile, "week")
+            content_field = cls._field_name_for_role(profile, "content")
+            owner = cls._extract_weekly_owner(request_text)
+            week = cls._extract_week_token(request_text)
+            content = cls._extract_content_tail(request_text)
+            if owner_field and owner:
+                draft_fields[owner_field] = owner
+            if week_field and week:
+                draft_fields[week_field] = week
+            if content_field and content:
+                draft_fields[content_field] = content
+            return draft_fields
+
+        if any(token in lower_name for token in ("合同", "contract", "agreement")):
+            labeled_mapping = [
+                (cls._field_name_for_role(profile, "contract_no"), ("合同编号",)),
+                (cls._field_name_for_role(profile, "vendor"), ("乙方",)),
+                (cls._field_name_for_role(profile, "amount"), ("合同金额", "金额")),
+                (cls._field_name_for_role(profile, "expiry_date", "deadline", "time"), ("到期时间", "到期日", "到期")),
+                (cls._field_name_for_role(profile, "status"), ("合同状态", "状态")),
+            ]
+        elif any(token in lower_name for token in ("案件", "case", "project")):
+            labeled_mapping = [
+                (cls._field_name_for_role(profile, "case_no"), ("案号",)),
+                (cls._field_name_for_role(profile, "case_id"), ("项目ID", "项目编号")),
+                (cls._field_name_for_role(profile, "client"), ("委托人", "客户")),
+                (cls._field_name_for_role(profile, "owner"), ("主办律师", "负责人")),
+                (cls._field_name_for_role(profile, "status"), ("案件状态", "状态")),
+            ]
+        else:
+            labeled_mapping = []
+
+        for field_name, labels in labeled_mapping:
+            if not field_name:
+                continue
+            value = cls._extract_labeled_value(request_text, labels)
+            if value:
+                draft_fields[field_name] = value
+        return draft_fields
+
+    @staticmethod
+    def _field_schema_map(fields: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        mapping: dict[str, dict[str, Any]] = {}
+        for item in fields:
+            if not isinstance(item, dict):
+                continue
+            field_name = str(item.get("field_name") or item.get("name") or "").strip()
+            if field_name:
+                mapping[field_name] = dict(item)
+        return mapping
+
+    @classmethod
+    def _normalize_draft_fields(
+        cls,
+        *,
+        draft_fields: dict[str, Any],
+        profile: dict[str, Any],
+        fields: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        field_roles = profile.get("field_roles") if isinstance(profile.get("field_roles"), dict) else {}
+        schema_map = cls._field_schema_map(fields)
+        normalized: dict[str, Any] = {}
+        for field_name, value in draft_fields.items():
+            role = str(field_roles.get(field_name) or "")
+            field_schema_raw = schema_map.get(field_name)
+            field_schema = dict(field_schema_raw) if isinstance(field_schema_raw, dict) else {}
+            field_type = field_schema.get("type")
+            property_payload = field_schema.get("property") if isinstance(field_schema.get("property"), dict) else {}
+            options_preview_raw = property_payload.get("options_preview")
+            options_preview = [
+                str(item).strip()
+                for item in options_preview_raw
+                if str(item).strip()
+            ] if isinstance(options_preview_raw, list) else []
+            if role in {"time", "date", "deadline", "expiry_date", "created_at", "updated_at", "completed_at"} or field_type == 5:
+                normalized[field_name] = normalize_date_string(value)
+                continue
+            if role == "amount" or field_type in {2}:
+                amount = normalize_amount_value(value)
+                normalized[field_name] = str(amount) if isinstance(amount, (int, float)) else amount
+                continue
+            if role == "status" or options_preview:
+                normalized[field_name] = normalize_option_value(value, options_preview)
+                continue
+            normalized[field_name] = value
+        return normalized
+
+    def _merge_recent_object_identity(
+        self,
+        *,
+        request_text: str,
+        profile: dict[str, Any],
+        draft_fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        kind = object_kind_for_payload(profile=profile, table=None)
+        if not kind:
+            return draft_fields
+        focus = recent_object_focus(self._runtime_metadata)
+        explicit_ref = is_recent_object_reference(request_text, kind=kind)
+        generic_ref = is_generic_recent_object_reference(request_text) and focus == kind
+        if not explicit_ref and not generic_ref:
+            return draft_fields
+        resolved = resolve_recent_object_reference(self._runtime_metadata, kind=kind, text=request_text)
+        if not isinstance(resolved, dict):
+            return draft_fields
+        identity_values = resolved.get("identity_values") if isinstance(resolved.get("identity_values"), dict) else {}
+        merged = dict(draft_fields)
+        for field_name, value in identity_values.items():
+            if field_name not in merged and value not in (None, "", [], {}):
+                merged[str(field_name)] = value
+        return merged
+
+    @staticmethod
+    def _operation_from_lookup(
+        *,
+        draft_fields: dict[str, Any],
+        identity_fields: list[str],
+        profile: dict[str, Any],
+        lookup_records: list[dict[str, Any]],
+    ) -> tuple[str, bool, dict[str, Any]]:
+        if not identity_fields:
+            return "create_new", False, dict(draft_fields)
+        if any(field_name not in draft_fields for field_name in identity_fields):
+            return "create_new", False, dict(draft_fields)
+        if not lookup_records:
+            return "create_new", False, dict(draft_fields)
+        if len(lookup_records) == 1:
+            all_identity_fields = {
+                str(item).strip()
+                for strategy in (profile.get("identity_strategies") if isinstance(profile.get("identity_strategies"), list) else [])
+                if isinstance(strategy, list)
+                for item in strategy
+                if str(item).strip()
+            } or set(identity_fields)
+            update_fields = {key: value for key, value in draft_fields.items() if key not in all_identity_fields}
+            return "update_existing", False, update_fields
+        return "ambiguous_existing", True, dict(draft_fields)
+
+    @staticmethod
+    def _select_identity_strategy(profile: dict[str, Any], draft_fields: dict[str, Any]) -> list[str]:
+        strategies_raw = profile.get("identity_strategies") if isinstance(profile.get("identity_strategies"), list) else []
+        strategies: list[list[str]] = []
+        for strategy in strategies_raw:
+            if not isinstance(strategy, list):
+                continue
+            cleaned = [str(item).strip() for item in strategy if str(item).strip()]
+            if cleaned:
+                strategies.append(cleaned)
+        if not strategies:
+            fallback = [
+                str(item).strip()
+                for item in (profile.get("identity_fields_guess") if isinstance(profile.get("identity_fields_guess"), list) else [])
+                if str(item).strip()
+            ]
+            return fallback
+        scored = sorted(
+            strategies,
+            key=lambda current: (
+                -sum(1 for field_name in current if field_name in draft_fields),
+                len(current),
+            ),
+        )
+        return scored[0]
+
+    async def _lookup_existing_records(
+        self,
+        *,
+        app_token: str,
+        table_id: str,
+        identity_fields: list[str],
+        draft_fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not identity_fields or any(field_name not in draft_fields for field_name in identity_fields):
+            return {
+                "attempted": False,
+                "matched": 0,
+                "records": [],
+                "filters": {field_name: draft_fields.get(field_name) for field_name in identity_fields if field_name in draft_fields},
+            }
+        filters = {
+            "conjunction": "and",
+            "conditions": [
+                {"field_name": field_name, "operator": "is", "value": draft_fields[field_name]}
+                for field_name in identity_fields
+            ],
+        }
+        payload = json.loads(
+            await self._search_tool.execute(app_token=app_token, table_id=table_id, filters=filters, limit=3)
+        )
+        records = [item for item in payload.get("records", []) if isinstance(item, dict)]
+        minimal_records = [
+            {
+                "record_id": str(item.get("record_id") or "").strip(),
+                "fields": {
+                    field_name: ((item.get("fields") or {}).get(field_name) if isinstance(item.get("fields"), dict) else None)
+                    for field_name in identity_fields
+                },
+            }
+            for item in records
+        ]
+        return {
+            "attempted": True,
+            "matched": len(records),
+            "records": minimal_records,
+            "filters": {field_name: draft_fields.get(field_name) for field_name in identity_fields},
+        }
 
     @property
     def name(self) -> str:
@@ -947,7 +1354,7 @@ class BitablePrepareCreateTool(Tool):
         if not request_text:
             return json.dumps({"error": "Missing request_text."}, ensure_ascii=False)
 
-        query = table_hint or request_text
+        query = self._reference_query_hint(request_text, table_hint)
         matched_payload = json.loads(
             await self._match_tool.execute(query=query, app_token=app_token, limit=candidate_limit)
         )
@@ -1006,6 +1413,62 @@ class BitablePrepareCreateTool(Tool):
             )
         fields = [item for item in fields_payload.get("fields", []) if isinstance(item, dict)]
         field_preview = fields[:12]
+        alias = self._table_registry.find_alias(
+            app_token=str(app_token),
+            table_id=str(selected.get("table_id") or ""),
+            table_name=str(selected.get("name") or ""),
+        )
+        profile = (
+            await self._table_registry.get_or_synthesize_table_profile(alias, table_name=str(selected.get("name") or ""), fields=fields)
+            if alias
+            else None
+        )
+        draft_fields = (
+            self._infer_draft_fields(request_text=request_text, profile=profile)
+            if isinstance(profile, dict)
+            else {}
+        )
+        if isinstance(profile, dict) and draft_fields:
+            draft_fields = self._normalize_draft_fields(draft_fields=draft_fields, profile=profile, fields=fields)
+            draft_fields = self._merge_recent_object_identity(request_text=request_text, profile=profile, draft_fields=draft_fields)
+        elif isinstance(profile, dict):
+            draft_fields = self._merge_recent_object_identity(request_text=request_text, profile=profile, draft_fields=draft_fields)
+        identity_fields = self._select_identity_strategy(profile, draft_fields) if isinstance(profile, dict) else []
+        missing_identity_fields = [field_name for field_name in identity_fields if field_name not in draft_fields]
+        record_lookup = await self._lookup_existing_records(
+            app_token=str(app_token),
+            table_id=str(selected["table_id"]),
+            identity_fields=identity_fields,
+            draft_fields=draft_fields,
+        )
+        operation_guess, needs_record_confirmation, next_fields = self._operation_from_lookup(
+            draft_fields=draft_fields,
+            identity_fields=identity_fields,
+            profile=profile if isinstance(profile, dict) else {},
+            lookup_records=[item for item in record_lookup.get("records", []) if isinstance(item, dict)],
+        )
+        next_step = {
+            "tool": "bitable_create",
+            "mode": "dry_run",
+            "arguments": {
+                "app_token": app_token,
+                "table_id": selected["table_id"],
+                "fields": draft_fields,
+            },
+        }
+        if operation_guess == "update_existing" and record_lookup.get("records"):
+            next_step = {
+                "tool": "bitable_update",
+                "mode": "dry_run",
+                "arguments": {
+                    "app_token": app_token,
+                    "table_id": selected["table_id"],
+                    "record_id": record_lookup["records"][0]["record_id"],
+                    "fields": next_fields,
+                },
+            }
+        elif operation_guess == "ambiguous_existing":
+            next_step = None
         payload = {
             "request_text": request_text,
             "table_hint": table_hint,
@@ -1016,16 +1479,19 @@ class BitablePrepareCreateTool(Tool):
             "fields": field_preview,
             "fields_truncated": len(fields) > len(field_preview),
             "suggested_field_names": [str(item.get("field_name") or "") for item in field_preview if str(item.get("field_name") or "").strip()],
-            "next_step": {
-                "tool": "bitable_create",
-                "mode": "dry_run",
-                "arguments": {
-                    "app_token": app_token,
-                    "table_id": selected["table_id"],
-                    "fields": {},
-                },
-            },
-            "message": "Use the selected table and fill the fields object, then call bitable_create in dry_run mode.",
+            **({"profile": profile} if isinstance(profile, dict) else {}),
+            "identity_strategy": identity_fields,
+            "draft_fields": draft_fields,
+            "missing_identity_fields": missing_identity_fields,
+            "record_lookup": record_lookup,
+            "operation_guess": operation_guess,
+            "needs_record_confirmation": needs_record_confirmation,
+            "next_step": next_step,
+            "message": (
+                "Multiple existing records matched; confirm the target record before writing."
+                if operation_guess == "ambiguous_existing"
+                else "Use the selected table and fill the fields object, then call the suggested write tool in dry_run mode."
+            ),
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -1036,11 +1502,25 @@ class BitablePrepareCreateTool(Tool):
         top = candidates[0]
         top_score = float(top.get("score") or 0.0)
         second_score = float(candidates[1].get("score") or 0.0) if len(candidates) > 1 else 0.0
+        top_base_score = float(top.get("base_score") or 0.0)
+        second_base_score = float(candidates[1].get("base_score") or 0.0) if len(candidates) > 1 else 0.0
+        reasons_raw = top.get("reasons") if isinstance(top.get("reasons"), list) else []
+        reasons = {str(item).strip() for item in reasons_raw if str(item).strip()}
+        has_strong_name_signal = any(
+            reason in {
+                "normalized_substring",
+                "normalized_query_substring",
+                "profile_alias_substring",
+                "profile_alias_query_substring",
+            }
+            for reason in reasons
+        )
+        base_gap = top_base_score - second_base_score
         if len(candidates) == 1:
-            return top if top_score >= 1.2 else None
-        if top_score >= 2.4 and (top_score - second_score) >= 0.2:
+            return top if top_score >= 0.8 else None
+        if has_strong_name_signal and top_score >= 2.4 and (top_score - second_score) >= 0.2 and base_gap >= 0.2:
             return top
-        if top_score >= 1.8 and (top_score - second_score) >= 0.45:
+        if has_strong_name_signal and top_score >= 1.8 and (top_score - second_score) >= 0.45 and base_gap >= 0.45:
             return top
         return None
 
@@ -1048,11 +1528,18 @@ class BitablePrepareCreateTool(Tool):
 class BitableSyncSchemaTool(Tool):
     """拉取多维表格 schema 快照并可落盘到 workspace。"""
 
-    def __init__(self, config: FeishuDataConfig, client: FeishuDataClient, workspace: Path | None = None):
+    def __init__(
+        self,
+        config: FeishuDataConfig,
+        client: FeishuDataClient,
+        workspace: Path | None = None,
+        profile_synthesizer: TableProfileSynthesizer | None = None,
+    ):
         self.config = config
         self.client = client
         self._workspace = workspace
         self._snapshot_path = (workspace / "skills" / "table_schema_snapshot.json") if workspace else None
+        self._table_registry = TableRegistry(workspace=workspace, profile_synthesizer=profile_synthesizer) if workspace else None
 
     @property
     def name(self) -> str:
@@ -1119,12 +1606,21 @@ class BitableSyncSchemaTool(Tool):
                     for item in raw_fields
                     if isinstance(item, dict)
                 ]
+                table_name = table_name_map.get(table_id, "")
+                schema_hash = schema_hash_for_fields(fields)
+                profile = None
+                if self._table_registry is not None:
+                    alias = self._table_registry.find_alias(app_token=str(app_token), table_id=table_id, table_name=table_name)
+                    if alias:
+                        profile = await self._table_registry.get_or_synthesize_table_profile(alias, table_name=table_name, fields=fields)
                 tables_payload.append(
                     {
                         "table_id": table_id,
-                        "name": table_name_map.get(table_id, ""),
+                        "name": table_name,
                         "fields": fields,
                         "field_count": len(fields),
+                        "schema_hash": schema_hash,
+                        **({"profile": profile} if isinstance(profile, dict) else {}),
                     }
                 )
             except Exception as e:

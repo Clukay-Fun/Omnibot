@@ -529,7 +529,7 @@ class FeishuChannel(BaseChannel):
         self._recent_message_fingerprints: OrderedDict[str, float] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stream_states: dict[str, _FeishuStreamState] = {}
-        default_state_db_path = get_state_path() / "feishu" / "state.sqlite3"
+        default_state_db_path = self.workspace / "memory" / "feishu" / "state.sqlite3"
         resolved_state_db_path = state_db_path or default_state_db_path
         migrate_legacy_path(
             self.workspace / "memory" / "feishu" / "state.sqlite3",
@@ -556,7 +556,7 @@ class FeishuChannel(BaseChannel):
         self._sqlite.migrate_legacy_feishu_json(self.workspace)
         self._message_index: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._event_registration_report: list[dict[str, Any]] = []
-        runtime_state_root = get_state_path()
+        runtime_state_root = get_state_path() / "feishu"
         self._cron_service = CronService(
             runtime_state_root / "feishu" / "cron" / "jobs.json",
             legacy_store_paths=[self.workspace / "cron_jobs.json"],

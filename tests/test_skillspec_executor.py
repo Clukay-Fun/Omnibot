@@ -85,6 +85,18 @@ class _CronFakeTool(Tool):
         return "Error: unsupported action"
 
 
+class _SearchSequenceTool(_FakeTool):
+    def __init__(self, results: list[dict[str, Any]]):
+        super().__init__("bitable_search", {})
+        self._results = list(results)
+
+    async def execute(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        if self._results:
+            return json.dumps(self._results.pop(0), ensure_ascii=False)
+        return json.dumps({"records": []}, ensure_ascii=False)
+
+
 def _write_yaml(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content.strip() + "\n", encoding="utf-8")
@@ -750,6 +762,221 @@ error: {}
     assert confirmed.handled is True
     assert "success" in confirmed.content
     assert update_tool.calls[-1]["confirm_token"] == "tok123"
+
+
+@pytest.mark.asyncio
+async def test_executor_upsert_uses_latest_profile_to_switch_to_update(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "weekly_upsert",
+        """
+meta: {id: weekly_upsert, version: "0.1", description: 周计划 upsert}
+params:
+  type: object
+  properties:
+    owner: {type: string}
+    week: {type: string}
+    content: {type: string}
+action:
+  kind: upsert
+  table: {alias: weekly_plan}
+  args:
+    fields:
+      owner: "{{ params.owner }}"
+      week: "{{ params.week }}"
+      content: "{{ params.content }}"
+response: {}
+error: {}
+""",
+    )
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  weekly_plan:
+    app_token: app_week
+    table_id: tbl_week
+    field_aliases:
+      owner: 姓名
+      week: 周次
+      content: 工作内容
+""",
+    )
+    table_registry.get_table_profile(
+        "weekly_plan",
+        table_name="团队周工作计划表",
+        fields=[
+            {"field_name": "姓名", "type": 11, "property": {}},
+            {"field_name": "周次", "type": 1, "property": {}},
+            {"field_name": "工作内容", "type": 1, "property": {}},
+        ],
+    )
+    tools = ToolRegistry()
+    search_tool = _SearchSequenceTool([
+        {"records": [{"record_id": "rec_week_1", "fields": {"姓名": "房怡康", "周次": "本周"}}]}
+    ])
+    create_tool = _FakeTool("bitable_create", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tok-create"})
+    update_tool = _FakeTool("bitable_update", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tok-update"})
+    tools.register(search_tool)
+    tools.register(create_tool)
+    tools.register(update_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+    session = Session("feishu:chat")
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill weekly_upsert owner=房怡康 week=本周 content=整理合同台账"),
+        session,
+    )
+
+    assert result.handled is True
+    assert "确认 tok-update" in result.content
+    assert search_tool.calls[0]["filters"]["conditions"][0]["field_name"] == "姓名"
+    assert update_tool.calls[0]["record_id"] == "rec_week_1"
+    assert update_tool.calls[0]["fields"] == {"工作内容": "整理合同台账"}
+    assert create_tool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_executor_upsert_creates_when_no_existing_record(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "contract_upsert",
+        """
+meta: {id: contract_upsert, version: "0.1", description: 合同 upsert}
+params:
+  type: object
+  properties:
+    contract_no: {type: string}
+    vendor: {type: string}
+action:
+  kind: upsert
+  table: {alias: contract_registry}
+  args:
+    fields:
+      contract_no: "{{ params.contract_no }}"
+      vendor: "{{ params.vendor }}"
+response: {}
+error: {}
+""",
+    )
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  contract_registry:
+    app_token: app_contract
+    table_id: tbl_contract
+    field_aliases:
+      contract_no: 合同编号
+      vendor: 乙方
+""",
+    )
+    table_registry.get_table_profile(
+        "contract_registry",
+        table_name="合同管理",
+        fields=[
+            {"field_name": "合同编号", "type": 1, "property": {}},
+            {"field_name": "乙方", "type": 1, "property": {}},
+        ],
+    )
+    tools = ToolRegistry()
+    search_tool = _SearchSequenceTool([{"records": []}])
+    create_tool = _FakeTool("bitable_create", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tok-create"})
+    tools.register(search_tool)
+    tools.register(create_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill contract_upsert contract_no=HT-001 vendor=星火科技"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert "确认 tok-create" in result.content
+    assert create_tool.calls[0]["fields"] == {"合同编号": "HT-001", "乙方": "星火科技"}
+
+
+@pytest.mark.asyncio
+async def test_executor_upsert_stops_on_ambiguous_matches(tmp_path: Path) -> None:
+    registry = _build_registry(
+        tmp_path,
+        "contract_upsert",
+        """
+meta: {id: contract_upsert, version: "0.1", description: 合同 upsert}
+params:
+  type: object
+  properties:
+    contract_no: {type: string}
+    status: {type: string}
+action:
+  kind: upsert
+  table: {alias: contract_registry}
+  args:
+    fields:
+      contract_no: "{{ params.contract_no }}"
+      status: "{{ params.status }}"
+response: {}
+error: {}
+""",
+    )
+    table_registry = _build_table_registry(
+        tmp_path,
+        """
+version: 1
+tables:
+  contract_registry:
+    app_token: app_contract
+    table_id: tbl_contract
+    field_aliases:
+      contract_no: 合同编号
+      status: 合同状态
+""",
+    )
+    table_registry.get_table_profile(
+        "contract_registry",
+        table_name="合同管理",
+        fields=[
+            {"field_name": "合同编号", "type": 1, "property": {}},
+            {"field_name": "合同状态", "type": 3, "property": {}},
+        ],
+    )
+    tools = ToolRegistry()
+    search_tool = _SearchSequenceTool([
+        {"records": [{"record_id": "rec1"}, {"record_id": "rec2"}]}
+    ])
+    update_tool = _FakeTool("bitable_update", {"dry_run": True, "preview": {"ok": 1}, "confirm_token": "tok-update"})
+    tools.register(search_tool)
+    tools.register(update_tool)
+    executor = SkillSpecExecutor(
+        registry=registry,
+        tools=tools,
+        output_guard=OutputGuard(),
+        user_memory=UserMemoryStore(tmp_path),
+        table_registry=table_registry,
+    )
+
+    result = await executor.execute_if_matched(
+        InboundMessage(channel="feishu", sender_id="u1", chat_id="chat", content="/skill contract_upsert contract_no=HT-001 status=已签署"),
+        Session("feishu:chat"),
+    )
+
+    assert result.handled is True
+    assert "找到多条匹配记录" in result.content
+    assert update_tool.calls == []
 
 
 @pytest.mark.asyncio

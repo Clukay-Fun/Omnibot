@@ -64,3 +64,24 @@ class PromptContext:
         if self.quoted_bot_summary:
             return {"summary": self.quoted_bot_summary}
         return {}
+
+    @property
+    def recent_case_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_case_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def recent_contract_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_contract_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]
+
+    @property
+    def recent_weekly_plan_objects(self) -> list[dict[str, Any]]:
+        value = self.metadata.get("recent_weekly_plan_objects")
+        if not isinstance(value, list):
+            return []
+        return [dict(item) for item in value if isinstance(item, dict)]

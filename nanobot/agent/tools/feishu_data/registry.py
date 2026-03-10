@@ -1,7 +1,7 @@
 """飞书工具注册工厂：组装配置和 Client 以初始化所有 Feishu 数据工具。"""
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 from loguru import logger
 
@@ -54,6 +54,9 @@ from nanobot.oauth import FeishuOAuthClient, FeishuUserTokenManager
 from nanobot.storage.sqlite_store import SQLiteConnectionOptions, SQLiteStore
 from nanobot.utils.helpers import get_state_path, migrate_legacy_path
 
+if TYPE_CHECKING:
+    from nanobot.providers.base import LLMProvider
+
 # region [注册工厂]
 
 
@@ -63,6 +66,8 @@ def build_feishu_data_tools(
     workspace: Path | None = None,
     state_db_path: Path | None = None,
     sqlite_options: SQLiteConnectionOptions | None = None,
+    provider: "LLMProvider | None" = None,
+    model: str | None = None,
 ) -> Iterable[Tool]:
     """
     组装并返回所有已启用的飞书数据操作工具。
@@ -106,24 +111,32 @@ def build_feishu_data_tools(
     token_manager = TenantAccessTokenManager(config=config, sqlite_store=sqlite_store)
     client = FeishuDataClient(config, token_manager=token_manager)
     confirm_store = ConfirmTokenStore(ttl_seconds=config.confirm_token_ttl_seconds)
+    profile_synthesizer = None
+    if provider is not None:
+        try:
+            from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
+
+            profile_synthesizer = TableProfileSynthesizer(provider=provider, model=model)
+        except Exception as exc:
+            logger.warning(f"Failed to initialize table profile synthesizer: {exc}")
 
     flags = config.feature_flags
     tools: list[Tool] = [
         # 只读工具
         BitableSearchTool(config, client),
-        BitableDirectorySearchTool(config, client, workspace=workspace),
+        BitableDirectorySearchTool(config, client, workspace=workspace, user_token_manager=user_token_manager),
         BitableListTablesTool(config, client),
-        BitableMatchTableTool(config, client),
+        BitableMatchTableTool(config, client, workspace=workspace, profile_synthesizer=profile_synthesizer),
         BitableListFieldsTool(config, client),
-        BitablePrepareCreateTool(config, client),
-        BitableSyncSchemaTool(config, client, workspace=workspace),
+        BitablePrepareCreateTool(config, client, workspace=workspace, profile_synthesizer=profile_synthesizer),
+        BitableSyncSchemaTool(config, client, workspace=workspace, profile_synthesizer=profile_synthesizer),
         BitableGetTool(config, client),
         BitableSearchPersonTool(config, client),
         DocSearchTool(config, client),
         # 写入工具（两阶段安全）
-        BitableCreateTool(config, client, confirm_store, workspace=workspace),
-        BitableUpdateTool(config, client, confirm_store, workspace=workspace),
-        BitableDeleteTool(config, client, confirm_store, workspace=workspace),
+        BitableCreateTool(config, client, confirm_store, workspace=workspace, user_token_manager=user_token_manager),
+        BitableUpdateTool(config, client, confirm_store, workspace=workspace, user_token_manager=user_token_manager),
+        BitableDeleteTool(config, client, confirm_store, workspace=workspace, user_token_manager=user_token_manager),
     ]
 
     if flags.bitable_admin_enabled:

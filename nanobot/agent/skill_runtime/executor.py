@@ -248,16 +248,26 @@ class SkillSpecExecutor:
                 metadata={**self._build_sensitive_metadata(spec=spec, msg=msg), **route_metadata},
             )
 
-        if kind in {"create", "update", "delete"}:
+        if kind in {"create", "update", "delete", "upsert"}:
             require_manual_confirm = self._should_require_manual_confirm(spec=spec, msg=msg)
-            content = await self._run_write_dry_run(
-                spec_id=selection.spec_id,
-                action=action,
-                params=params,
-                runtime=runtime,
-                session=session,
-                require_manual_confirm=require_manual_confirm,
-            )
+            if kind == "upsert":
+                content = await self._run_upsert_dry_run(
+                    spec_id=selection.spec_id,
+                    action=action,
+                    params=params,
+                    runtime=runtime,
+                    session=session,
+                    require_manual_confirm=require_manual_confirm,
+                )
+            else:
+                content = await self._run_write_dry_run(
+                    spec_id=selection.spec_id,
+                    action=action,
+                    params=params,
+                    runtime=runtime,
+                    session=session,
+                    require_manual_confirm=require_manual_confirm,
+                )
             return SkillExecutionResult(handled=True, content=content, tool_turn=True, metadata=route_metadata)
 
         if kind in {"document_pipeline", "document"}:
@@ -562,6 +572,123 @@ class SkillSpecExecutor:
             return self._format_write_confirmation(preview=preview, token=token)
 
         return self._stringify_payload(payload)
+
+    def _resolve_upsert_identity_strategy(self, *, action: dict[str, Any], table_alias: str | None, tool_args: dict[str, Any]) -> list[str]:
+        explicit = action.get("identity_fields")
+        if isinstance(explicit, list):
+            cleaned = [str(item).strip() for item in explicit if str(item).strip()]
+            if cleaned:
+                return cleaned
+
+        if table_alias and self._table_registry is not None:
+            profile = self._table_registry.get_latest_profile(
+                app_token=str(tool_args.get("app_token") or ""),
+                table_id=str(tool_args.get("table_id") or ""),
+            )
+            if isinstance(profile, dict):
+                strategies_raw = profile.get("identity_strategies") if isinstance(profile.get("identity_strategies"), list) else []
+                strategies: list[list[str]] = []
+                for strategy in strategies_raw:
+                    if not isinstance(strategy, list):
+                        continue
+                    cleaned = [str(item).strip() for item in strategy if str(item).strip()]
+                    if cleaned:
+                        strategies.append(cleaned)
+                if strategies:
+                    fields = tool_args.get("fields") if isinstance(tool_args.get("fields"), dict) else {}
+                    scored = sorted(
+                        strategies,
+                        key=lambda current: (
+                            -sum(1 for field_name in current if field_name in fields),
+                            len(current),
+                        ),
+                    )
+                    return scored[0]
+                guessed = profile.get("identity_fields_guess") if isinstance(profile.get("identity_fields_guess"), list) else []
+                return [str(item).strip() for item in guessed if str(item).strip()]
+        return []
+
+    @staticmethod
+    def _upsert_search_filters(identity_fields: list[str], fields: dict[str, Any]) -> dict[str, Any] | None:
+        conditions = [
+            {"field_name": field_name, "operator": "is", "value": fields[field_name]}
+            for field_name in identity_fields
+            if field_name in fields and fields[field_name] not in (None, "", [], {})
+        ]
+        if not conditions:
+            return None
+        return {"conjunction": "and", "conditions": conditions}
+
+    async def _run_upsert_dry_run(
+        self,
+        *,
+        spec_id: str,
+        action: dict[str, Any],
+        params: dict[str, Any],
+        runtime: dict[str, Any],
+        session: Any,
+        require_manual_confirm: bool,
+    ) -> str:
+        table_alias: str | None = None
+        table = action.get("table")
+        if isinstance(table, dict):
+            _, table_alias = self._resolve_table_args(table)
+
+        tool_args = self._build_write_args(action, params=params, runtime=runtime)
+        fields = tool_args.get("fields") if isinstance(tool_args.get("fields"), dict) else {}
+        identity_fields = self._resolve_upsert_identity_strategy(action=action, table_alias=table_alias, tool_args=tool_args)
+        missing_identity = [field_name for field_name in identity_fields if field_name not in fields or fields[field_name] in (None, "", [], {})]
+        if missing_identity:
+            return f"缺少定位字段：{', '.join(missing_identity)}"
+
+        filters = self._upsert_search_filters(identity_fields, fields)
+        search_args = {
+            "app_token": tool_args.get("app_token"),
+            "table_id": tool_args.get("table_id"),
+            "filters": filters,
+            "limit": 3,
+        }
+        payload = await self._execute_tool_json("bitable_search", search_args)
+        records = self._extract_records(payload) or []
+        if len(records) > 1:
+            return f"找到多条匹配记录，请补充更具体的定位字段：{', '.join(identity_fields)}"
+
+        if len(records) == 1:
+            record = records[0] if isinstance(records[0], dict) else {}
+            record_id = str(record.get("record_id") or "").strip()
+            update_fields = {key: value for key, value in fields.items() if key not in set(identity_fields)}
+            update_action = dict(action)
+            update_action["kind"] = "update"
+            update_runtime = dict(runtime)
+            update_params = dict(params)
+            update_params["record_id"] = record_id
+            if update_fields:
+                update_params["fields"] = update_fields
+            update_action_args = action.get("args") if isinstance(action.get("args"), dict) else {}
+            if isinstance(update_action_args, dict):
+                merged_args = dict(update_action_args)
+                merged_args["record_id"] = "{{ params.record_id }}"
+                merged_args["fields"] = update_fields
+                update_action["args"] = merged_args
+            return await self._run_write_dry_run(
+                spec_id=spec_id,
+                action=update_action,
+                params=update_params,
+                runtime=update_runtime,
+                session=session,
+                require_manual_confirm=require_manual_confirm,
+            )
+
+        create_action = dict(action)
+        create_action["kind"] = "create"
+        return await self._run_write_dry_run(
+            spec_id=spec_id,
+            action=create_action,
+            params=params,
+            runtime=runtime,
+            session=session,
+            require_manual_confirm=require_manual_confirm,
+        )
 
     async def _run_document_action(
         self,

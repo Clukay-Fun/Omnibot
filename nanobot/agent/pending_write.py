@@ -12,8 +12,6 @@ PENDING_WRITE_METADATA_KEY = "pending_write"
 
 _EXACT_CONFIRM_RE = re.compile(r"^\s*(?:确认|confirm)(?:\s+([a-zA-Z0-9]+))?\s*$", re.IGNORECASE)
 _EXACT_CANCEL_RE = re.compile(r"^\s*(?:取消|cancel)(?:\s+([a-zA-Z0-9]+))?\s*$", re.IGNORECASE)
-_PREFIX_CONFIRM_RE = re.compile(r"^\s*(?:确认|confirm)[\s,，:：]+(.+?)\s*$", re.IGNORECASE)
-_PREFIX_CANCEL_RE = re.compile(r"^\s*(?:取消|cancel)[\s,，:：]+(.+?)\s*$", re.IGNORECASE)
 
 
 def _safe_json(value: str) -> Any:
@@ -70,13 +68,6 @@ def extract_pending_write_command(msg: InboundMessage) -> tuple[str | None, str 
     if exact_cancel:
         return "cancel", exact_cancel.group(1), ""
 
-    prefix_confirm = _PREFIX_CONFIRM_RE.match(content)
-    if prefix_confirm:
-        return "confirm", None, prefix_confirm.group(1).strip()
-    prefix_cancel = _PREFIX_CANCEL_RE.match(content)
-    if prefix_cancel:
-        return "cancel", None, prefix_cancel.group(1).strip()
-
     metadata = msg.metadata or {}
     if metadata.get("msg_type") != "card_action":
         return None, None, content
@@ -114,7 +105,7 @@ def format_pending_write_preview(preview: dict[str, Any], *, refreshed: bool = F
             text = str(rendered).replace("\n", " / ")
             lines.append(f"  - {key}: {text}")
 
-    lines.extend(["", "直接回复“确认”执行，回复“取消”放弃；如需修改字段，直接补充即可。"])
+    lines.extend(["", "直接回复“确认”执行，回复“取消”放弃；如需修改，请直接说明新的写入要求。"])
     return "\n".join(lines)
 
 

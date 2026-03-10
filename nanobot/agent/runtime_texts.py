@@ -45,16 +45,19 @@ def _load_override_payload(path: Path) -> dict[str, Any]:
 _DEFAULT_PROMPTS: dict[str, dict[str, Any]] = {
     "help": {
         "commands_help_text": (
-            "可用命令\n"
+            "全局命令\n"
             "- /help 或 /commands：查看命令总览\n"
             "- /status：查看当前偏好与授权状态\n"
+            "- /plan：切换到计划模式（只分析/规划，不执行 skill 或工具）\n"
+            "- /build：切换到构建模式（允许执行 skill 和工具）\n"
             "- /setup：查看初始化引导\n"
             "- /connect 或 /oauth：连接飞书 OAuth\n"
             "- /session：查看会话子命令帮助\n"
             "- /new：开启新会话\n"
             "- /stop：停止当前任务\n"
-            "- 继续 / 展开：查看分页剩余内容\n"
-            "- 确认 <token> / 取消 <token>：确认或取消写入"
+            "\n上下文命令\n"
+            "- 继续 / 展开：仅当当前有分页结果时，查看剩余内容\n"
+            "- 确认 <token> / 取消 <token>：仅当当前有写入预览时，确认或取消写入"
         ),
         "session_help_text": (
             "会话命令\n"

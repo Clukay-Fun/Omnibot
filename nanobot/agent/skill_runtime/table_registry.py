@@ -12,6 +12,9 @@ from typing import Any
 
 import yaml
 
+from nanobot.agent.skill_runtime.table_profile_cache import TableProfileCache, schema_hash_for_fields
+from nanobot.agent.skill_runtime.table_profile_synthesizer import TableProfileSynthesizer
+
 #region 表注册表
 
 class TableRegistry:
@@ -26,6 +29,7 @@ class TableRegistry:
         *,
         workspace: Path | None = None,
         builtin_path: Path | None = None,
+        profile_synthesizer: TableProfileSynthesizer | None = None,
     ):
         """用处，参数
 
@@ -35,6 +39,8 @@ class TableRegistry:
         self._workspace = workspace
         self._builtin_path = builtin_path or Path(__file__).resolve().parents[2] / "skills" / "table_registry.yaml"
         self._workspace_path = (workspace / "skills" / "table_registry.yaml") if workspace else None
+        self._profile_cache = TableProfileCache(workspace=workspace)
+        self._profile_synthesizer = profile_synthesizer
         self._tables: dict[str, dict[str, Any]] = {}
         self._loaded = False
         self._last_mtimes: tuple[int | None, int | None] = (None, None)
@@ -138,6 +144,282 @@ class TableRegistry:
         self._ensure_loaded()
         return sorted(self._tables.keys())
 
+    def get_table_metadata(self, alias: str) -> dict[str, Any] | None:
+        self._ensure_loaded()
+        payload = self._tables.get(alias.strip())
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def find_alias(self, *, app_token: str, table_id: str, table_name: str = "") -> str | None:
+        self._ensure_loaded()
+        display_name = table_name.strip()
+        for alias, payload in self._tables.items():
+            if not isinstance(payload, dict):
+                continue
+            if app_token and table_id:
+                if str(payload.get("app_token") or "").strip() == app_token and str(payload.get("table_id") or "").strip() == table_id:
+                    return alias
+            if display_name:
+                if str(payload.get("display_name") or "").strip() == display_name:
+                    return alias
+                aliases_raw = payload.get("aliases")
+                aliases: list[str] = [
+                    str(item).strip()
+                    for item in aliases_raw
+                    if isinstance(item, str) and str(item).strip()
+                ] if isinstance(aliases_raw, list) else []
+                if display_name in set(aliases):
+                    return alias
+        return None
+
+    def get_table_profile(self, alias: str, *, table_name: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
+        self._ensure_loaded()
+        key = alias.strip()
+        table = self._tables.get(key) if key else None
+        table_payload = table if isinstance(table, dict) else {}
+        app_token = str(table_payload.get("app_token") or "").strip()
+        table_id = str(table_payload.get("table_id") or "").strip()
+        schema_hash = schema_hash_for_fields(fields)
+        if app_token and table_id:
+            cached = self._profile_cache.get(app_token=app_token, table_id=table_id, schema_hash=schema_hash)
+            if cached is not None:
+                return cached
+
+        profile = self._build_table_profile(alias=key or alias, table_name=table_name, fields=fields, metadata=table_payload)
+        if app_token and table_id:
+            return self._profile_cache.put(app_token=app_token, table_id=table_id, schema_hash=schema_hash, profile=profile)
+        return profile
+
+    async def get_or_synthesize_table_profile(self, alias: str, *, table_name: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
+        heuristic = self.get_table_profile(alias, table_name=table_name, fields=fields)
+        if heuristic.get("source") == "llm" or self._profile_synthesizer is None:
+            return heuristic
+
+        key = alias.strip()
+        table = self._tables.get(key) if key else None
+        table_payload = table if isinstance(table, dict) else {}
+        app_token = str(table_payload.get("app_token") or "").strip()
+        table_id = str(table_payload.get("table_id") or "").strip()
+        if not app_token or not table_id:
+            return heuristic
+
+        synthesized = await self._profile_synthesizer.synthesize(
+            alias=key or alias,
+            table_name=table_name,
+            fields=fields,
+            seed_profile=heuristic,
+        )
+        if not isinstance(synthesized, dict):
+            return heuristic
+
+        merged = dict(heuristic)
+        llm_aliases = [
+            str(item).strip()
+            for item in synthesized.get("aliases", [])
+            if isinstance(item, str) and str(item).strip()
+        ] if isinstance(synthesized.get("aliases"), list) else []
+        merged["aliases"] = list(dict.fromkeys([*heuristic.get("aliases", []), *llm_aliases]))
+        for key_name in ("purpose_guess", "common_query_patterns", "common_write_patterns", "confidence"):
+            value = synthesized.get(key_name)
+            if isinstance(value, list):
+                cleaned = [str(item).strip() for item in value if str(item).strip()]
+                if cleaned:
+                    merged[key_name] = cleaned
+            elif isinstance(value, str) and value.strip():
+                merged[key_name] = value.strip()
+        merged["source"] = "llm"
+        return self._profile_cache.put(
+            app_token=app_token,
+            table_id=table_id,
+            schema_hash=schema_hash_for_fields(fields),
+            profile=merged,
+        )
+
+    def get_latest_profile(self, *, app_token: str, table_id: str) -> dict[str, Any] | None:
+        return self._profile_cache.get_latest(app_token=app_token, table_id=table_id)
+
+    @staticmethod
+    def _match_any(text: str, tokens: tuple[str, ...]) -> bool:
+        lowered = text.lower()
+        return any(token in lowered for token in tokens)
+
+    def _build_table_profile(
+        self,
+        *,
+        alias: str,
+        table_name: str,
+        fields: list[dict[str, Any]],
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        display_name = str(metadata.get("display_name") or table_name or alias).strip() or alias
+        alias_items = metadata.get("aliases") if isinstance(metadata.get("aliases"), list) else []
+        configured_aliases = [
+            str(item).strip()
+            for item in alias_items
+            if isinstance(item, str) and str(item).strip()
+        ]
+        aliases: list[str] = []
+        for item in [display_name, alias, *configured_aliases, *self._default_aliases(display_name, alias)]:
+            candidate = str(item or "").strip()
+            if candidate and candidate not in aliases:
+                aliases.append(candidate)
+
+        field_roles: dict[str, str] = {}
+        person_fields: list[str] = []
+        time_fields: list[str] = []
+        status_fields: list[str] = []
+        for item in fields:
+            field_name = str(item.get("field_name") or item.get("name") or "").strip()
+            if not field_name:
+                continue
+            role = self._infer_field_role(display_name, field_name)
+            if role:
+                field_roles[field_name] = role
+            field_type = item.get("type")
+            if field_type == 11 or role in {"owner", "assignee", "lawyer", "person"}:
+                if field_name not in person_fields:
+                    person_fields.append(field_name)
+            if role in {"time", "date", "deadline", "week", "created_at", "updated_at", "completed_at", "expiry_date"}:
+                if field_name not in time_fields:
+                    time_fields.append(field_name)
+            if role == "status" and field_name not in status_fields:
+                status_fields.append(field_name)
+
+        identity_fields_guess = self._identity_fields(display_name, field_roles)
+        identity_strategies = self._identity_strategies(display_name, field_roles)
+        schema_hash = schema_hash_for_fields(fields)
+        return {
+            "alias": alias,
+            "display_name": display_name,
+            "aliases": aliases,
+            "purpose_guess": self._purpose_guess(display_name),
+            "field_roles": field_roles,
+            "identity_fields_guess": identity_fields_guess,
+            "identity_strategies": identity_strategies,
+            "person_fields": person_fields,
+            "time_fields": time_fields,
+            "status_fields": status_fields,
+            "common_query_patterns": self._common_query_patterns(display_name),
+            "common_write_patterns": self._common_write_patterns(display_name),
+            "confidence": "medium",
+            "schema_hash": schema_hash,
+            "source": "heuristic",
+        }
+
+    def _default_aliases(self, display_name: str, alias: str) -> list[str]:
+        text = f"{display_name} {alias}".lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            return ["案件项目总库", "案件库", "项目总库", "案件"]
+        if self._match_any(text, ("合同", "contract", "agreement")):
+            return ["合同管理", "合同台账", "合同库", "合同"]
+        if self._match_any(text, ("周", "weekly", "plan", "工作计划")):
+            return ["团队周工作计划表", "周工作计划", "周计划", "周报表"]
+        return []
+
+    def _purpose_guess(self, display_name: str) -> str:
+        text = display_name.lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            return "案件项目主档与阶段状态跟踪"
+        if self._match_any(text, ("合同", "contract", "agreement")):
+            return "合同登记、状态跟踪与到期管理"
+        if self._match_any(text, ("周", "weekly", "工作计划", "周报")):
+            return "团队每周工作计划与进展记录"
+        return "基于当前表结构自动推断的业务表"
+
+    def _common_query_patterns(self, display_name: str) -> list[str]:
+        text = display_name.lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            return ["查某个案件", "按案号查项目", "看案件状态"]
+        if self._match_any(text, ("合同", "contract", "agreement")):
+            return ["查合同状态", "按合同编号找合同", "看快到期合同"]
+        if self._match_any(text, ("周", "weekly", "工作计划", "周报")):
+            return ["查这周计划", "补本周工作", "看谁的周计划"]
+        return ["按关键词查询这张表"]
+
+    def _common_write_patterns(self, display_name: str) -> list[str]:
+        text = display_name.lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            return ["更新案件状态", "补充案件节点", "修改主办律师"]
+        if self._match_any(text, ("合同", "contract", "agreement")):
+            return ["登记新合同", "更新合同状态", "补充到期时间"]
+        if self._match_any(text, ("周", "weekly", "工作计划", "周报")):
+            return ["新增周计划", "更新本周进展", "按姓名和周次补写计划"]
+        return ["创建或更新表记录"]
+
+    def _identity_fields(self, display_name: str, field_roles: dict[str, str]) -> list[str]:
+        role_to_fields: dict[str, list[str]] = {}
+        for field_name, role in field_roles.items():
+            role_to_fields.setdefault(role, []).append(field_name)
+        text = display_name.lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            return [*role_to_fields.get("case_no", []), *role_to_fields.get("case_id", [])]
+        if self._match_any(text, ("合同", "contract", "agreement")):
+            return [*role_to_fields.get("contract_no", []), *role_to_fields.get("title", [])]
+        if self._match_any(text, ("周", "weekly", "工作计划", "周报")):
+            return [*role_to_fields.get("owner", []), *role_to_fields.get("week", [])]
+        return []
+
+    def _identity_strategies(self, display_name: str, field_roles: dict[str, str]) -> list[list[str]]:
+        role_to_fields: dict[str, list[str]] = {}
+        for field_name, role in field_roles.items():
+            role_to_fields.setdefault(role, []).append(field_name)
+        text = display_name.lower()
+        if self._match_any(text, ("案件", "case", "project")):
+            strategies = [role_to_fields.get("case_no", []), role_to_fields.get("case_id", [])]
+        elif self._match_any(text, ("合同", "contract", "agreement")):
+            strategies = [role_to_fields.get("contract_no", []), role_to_fields.get("title", [])]
+        elif self._match_any(text, ("周", "weekly", "工作计划", "周报")):
+            owner_fields = role_to_fields.get("owner", [])
+            week_fields = role_to_fields.get("week", [])
+            strategies = [[*owner_fields, *week_fields]] if owner_fields or week_fields else []
+        else:
+            strategies = []
+        normalized: list[list[str]] = []
+        for strategy in strategies:
+            cleaned = [str(item).strip() for item in strategy if str(item).strip()]
+            if cleaned and cleaned not in normalized:
+                normalized.append(cleaned)
+        return normalized
+
+    def _infer_field_role(self, display_name: str, field_name: str) -> str | None:
+        text = field_name.strip().lower()
+        if self._match_any(text, ("项目id", "项目编号", "case_id")):
+            return "case_id"
+        if self._match_any(text, ("案号", "case_no")):
+            return "case_no"
+        if self._match_any(text, ("合同编号", "contract_no")):
+            return "contract_no"
+        if self._match_any(text, ("合同名称", "协议名称", "标题", "名称", "title")):
+            return "title"
+        if self._match_any(text, ("主办律师", "负责人", "owner", "assignee", "经办")):
+            return "owner"
+        if self._match_any(text, ("委托人", "客户", "client")):
+            return "client"
+        if self._match_any(text, ("乙方", "vendor", "供应商")):
+            return "vendor"
+        if self._match_any(text, ("金额", "amount", "价税", "合同金额")):
+            return "amount"
+        if self._match_any(text, ("周次", "week", "本周")):
+            return "week"
+        if self._match_any(text, ("工作内容", "计划", "事项", "进展")):
+            return "content"
+        if self._match_any(text, ("完成时间", "completed_at")):
+            return "completed_at"
+        if self._match_any(text, ("到期", "截止", "时间", "日期", "deadline", "date", "renewal", "创建时间", "更新时间")):
+            if self._match_any(text, ("创建时间", "created_at")):
+                return "created_at"
+            if self._match_any(text, ("更新时间", "updated_at")):
+                return "updated_at"
+            if self._match_any(text, ("到期", "expiry")):
+                return "expiry_date"
+            if self._match_any(text, ("截止", "deadline", "节点")):
+                return "deadline"
+            return "time"
+        if self._match_any(text, ("状态", "status")):
+            return "status"
+        if self._match_any(display_name.lower(), ("周", "weekly", "工作计划", "周报")) and self._match_any(text, ("姓名", "成员", "人员")):
+            return "owner"
+        return None
+
     def _ensure_loaded(self) -> None:
         """用处，参数
 
@@ -234,6 +516,14 @@ class TableRegistry:
                     if strip_example_ids and TableRegistry._looks_like_example_id(token=token, value=cleaned):
                         continue
                     record[token] = cleaned
+            display_name = str(value.get("display_name") or "").strip()
+            if display_name:
+                record["display_name"] = display_name
+            aliases_raw = value.get("aliases")
+            if isinstance(aliases_raw, list):
+                aliases = [str(item).strip() for item in aliases_raw if str(item).strip()]
+                if aliases:
+                    record["aliases"] = aliases
             aliases_raw = value.get("field_aliases")
             if isinstance(aliases_raw, dict):
                 field_aliases: dict[str, str] = {}
