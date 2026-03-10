@@ -24,6 +24,11 @@ def get_config_path() -> Path:
     return Path.home() / ".nanobot" / "config.json"
 
 
+def get_data_dir() -> Path:
+    """Get the active instance data directory for backward compatibility."""
+    return get_config_path().parent
+
+
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.

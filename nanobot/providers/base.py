@@ -106,6 +106,20 @@ class LLMProvider(ABC):
             result.append(msg)
         return result
 
+    @staticmethod
+    def _sanitize_request_messages(
+        messages: list[dict[str, Any]],
+        allowed_keys: set[str] | frozenset[str],
+    ) -> list[dict[str, Any]]:
+        """Strip unsupported keys and ensure assistant messages keep a content field."""
+        sanitized: list[dict[str, Any]] = []
+        for msg in messages:
+            clean = {key: value for key, value in msg.items() if key in allowed_keys}
+            if clean.get("role") == "assistant" and "content" not in clean:
+                clean["content"] = None
+            sanitized.append(clean)
+        return sanitized
+
     @abstractmethod
     async def chat(
         self,

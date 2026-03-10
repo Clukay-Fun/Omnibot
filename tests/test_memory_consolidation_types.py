@@ -168,7 +168,7 @@ class TestMemoryConsolidationTypeHandling:
         result = await store.consolidate(session, provider, "test-model", memory_window=50)
 
         assert result is True
-        assert "User discussed testing." in store.history_file.read_text()
+        assert not store.history_file.exists()
         assert "User likes testing." in store.memory_file.read_text()
 
     @pytest.mark.asyncio

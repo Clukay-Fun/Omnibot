@@ -5,11 +5,42 @@ import re
 from typing import Any
 
 from loguru import logger
-from slack_sdk.socket_mode.request import SocketModeRequest
-from slack_sdk.socket_mode.response import SocketModeResponse
-from slack_sdk.socket_mode.websockets import SocketModeClient
-from slack_sdk.web.async_client import AsyncWebClient
-from slackify_markdown import slackify_markdown
+
+try:
+    from slackify_markdown import slackify_markdown
+except ModuleNotFoundError:  # pragma: no cover - exercised in environments without slackify-markdown
+    def slackify_markdown(text: str) -> str:
+        return text + ("\n" if text and not text.endswith("\n") else "")
+
+try:
+    from slack_sdk.socket_mode.request import SocketModeRequest
+    from slack_sdk.socket_mode.response import SocketModeResponse
+    from slack_sdk.socket_mode.websockets import SocketModeClient
+    from slack_sdk.web.async_client import AsyncWebClient
+except ModuleNotFoundError:  # pragma: no cover - exercised in environments without slack-sdk
+    SocketModeRequest = Any  # type: ignore[assignment]
+
+    class SocketModeResponse:  # type: ignore[override]
+        def __init__(self, envelope_id: str | None = None):
+            self.envelope_id = envelope_id
+
+    class SocketModeClient:  # type: ignore[override]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _ = args, kwargs
+            self.socket_mode_request_listeners: list[Any] = []
+
+        async def connect(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def send_socket_mode_response(self, _response: Any) -> None:
+            return None
+
+    class AsyncWebClient:  # type: ignore[override]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            _ = args, kwargs
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
