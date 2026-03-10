@@ -386,6 +386,8 @@ class BitableSearchTool(Tool):
     def description(self) -> str:
         return (
             "Search for records in Feishu Bitable. "
+            "For first-turn business lookups, pass a keyword whenever the user already gave a raw anchor such as a company name, case number, project ID, contract number, or lawyer name. "
+            "Do not call this tool with empty arguments when such an anchor is already present. "
             "IMPORTANT: If multiple records are found, ONLY provide a summary list with project IDs and titles, "
             "and include the 'record_url' for each. DO NOT expand full details for every record as it is slow to generate. "
             "Users can click the link or ask for a specific record ID for details."
@@ -398,7 +400,11 @@ class BitableSearchTool(Tool):
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "Keyword to search across searchable fields."
+                    "description": (
+                        "Keyword to search across searchable fields. "
+                        "Use the raw user anchor when available, such as a company name, case number, project ID, contract number, or lawyer name. "
+                        "Avoid leaving this empty for first-turn business lookups when the user already gave an anchor."
+                    ),
                 },
                 "date_from": {
                     "type": "string",
@@ -427,7 +433,7 @@ class BitableSearchTool(Tool):
                 "table_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional table ID list for cross-table parallel search."
+                    "description": "Optional table ID list for cross-table parallel search, including combined workload queries such as 案件 + 任务."
                 },
                 "view_id": {
                     "type": "string",
@@ -666,6 +672,8 @@ class BitableListTablesTool(Tool):
     def description(self) -> str:
         return (
             "List tables in a Feishu Bitable app. "
+            "Use this directly when the user asks to 列出所有表格, 查看当前有哪些表, or browse table names in the current default app. "
+            "Do not ask for app_token first when a default app is already configured. "
             "Supports keyword filtering and compact top-N matching results."
         )
 
@@ -936,7 +944,8 @@ class BitableMatchTableTool(Tool):
     def description(self) -> str:
         return (
             "Resolve the most likely Feishu Bitable table candidates from natural-language intent. "
-            "Use this before bitable_create when the user describes a target table semantically instead of giving an exact table_id."
+            "Use this for both read and write flows when the user gives a fuzzy table name instead of an exact table_id, such as 周工资表 or 团队周表. "
+            "Typical next step is bitable_search, bitable_get, or bitable_create with the resolved table."
         )
 
     @property

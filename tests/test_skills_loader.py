@@ -45,3 +45,18 @@ def test_skills_loader_default_builtin_tree_exposes_packaged_memory_skill(tmp_pa
     loaded = loader.load_skill("memory")
     assert loaded is not None
     assert "Memory" in loaded
+
+
+def test_workspace_always_skill_is_discovered_and_marked_active(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skill_file = workspace / "skills" / "tool_usage" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True, exist_ok=True)
+    skill_file.write_text(
+        "---\nname: tool_usage\ndescription: Use when testing active skills.\nalways: true\n---\n\n# Tool Usage\n\nAlways search first.\n",
+        encoding="utf-8",
+    )
+
+    loader = SkillsLoader(workspace=workspace, builtin_skills_dir=tmp_path / "builtin")
+
+    assert loader.get_always_skills() == ["tool_usage"]
+    assert "Always search first." in loader.load_skills_for_context(["tool_usage"])

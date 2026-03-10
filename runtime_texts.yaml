@@ -1,0 +1,15 @@
+# Optional runtime text overrides.
+#
+# Only set the keys you want to change. Missing keys continue to use
+# code defaults. Supported top-level sections:
+#   prompts:
+#   routing:
+#   templates:
+#
+# Example:
+# prompts:
+#   onboarding:
+#     intro_first: "我先发你一条自定义引导，不影响继续提问。"
+#     guide_lines:
+#       - "### 👋 自定义引导"
+#       - "这里写你的 onboarding 文案。"
