@@ -1,16 +1,16 @@
-# Heartbeat Tasks
+# HEARTBEAT.md - 周期任务
 
-This file is checked every 30 minutes by your nanobot agent.
-Add tasks below that you want the agent to work on periodically.
+你的 nanobot 守护进程会按照配置的时间间隔（如每 30 分钟）定期检查此文件并执行其中的巡查动作。
+你可以在下方添加你希望 agent 周期性处理的任务列表。
 
-If this file has no tasks (only headers and comments), the agent will skip the heartbeat.
+**注意：** 如果这个文件没有活动任务（即只有纯文本标题和注释），agent 将直接跳过心跳检查处理，避免浪费性能和 Token。
 
-## Active Tasks
+## 活动检查任务 / Active Tasks
 
-<!-- Add your periodic tasks below this line -->
+<!-- 使用 edit_file 向下追加你需要周期跟进检查的任务。请保持精简。 -->
 
 
-## Completed
 
-<!-- Move completed tasks here or delete them -->
+## 已完成 / Completed
 
+<!-- 任务不需要周期执行后，移动到这里，或者直接用写文件指令删除。 -->

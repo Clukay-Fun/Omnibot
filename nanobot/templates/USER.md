@@ -1,49 +1,53 @@
-# User Profile
+# USER.md - 用户档案
 
-Information about the user to help personalize interactions.
+关于用户的信息，帮助实现个性化互动。随时更新此文件以提升体验。
 
-## Basic Information
+## 基本信息
 
-- **Name**: (your name)
-- **Timezone**: (your timezone, e.g., UTC+8)
-- **Language**: (preferred language)
+- **昵称**：(你的名字)
+- **称呼方式**：(你希望我如何称呼你)
+- **时区**：(你的时区，例如：UTC+8)
+- **语言**：(偏好的语言)
 
-## Preferences
+## 偏好设置
 
-### Communication Style
+### 沟通风格
 
-- [ ] Casual
-- [ ] Professional
-- [ ] Technical
+- [ ] 随意的
+- [ ] 专业的
+- [ ] 技术的
 
-### Response Length
+### 回复长度
 
-- [ ] Brief and concise
-- [ ] Detailed explanations
-- [ ] Adaptive based on question
+- [ ] 简短且简洁
+- [ ] 详细的解释
+- [ ] 根据问题自适应
 
-### Technical Level
+### 技术水平
 
-- [ ] Beginner
-- [ ] Intermediate
-- [ ] Expert
+- [ ] 新手
+- [ ] 中级
+- [ ] 专家
 
-## Work Context
+## 工作背景
 
-- **Primary Role**: (your role, e.g., developer, researcher)
-- **Main Projects**: (what you're working on)
-- **Tools You Use**: (IDEs, languages, frameworks)
+- **主要角色**：(你的角色，例如：开发者、研究员)
+- **主要项目**：(你在活跃推进的工作)
+- **常用工具栈**：(IDE、编程语言、框架)
 
-## Topics of Interest
+## 个人关注点与兴趣
+
+_你关心什么？什么让你烦恼？随着时间推移，我会主动将捕捉到的有效信息更新在这里。_
 
 - 
 - 
 - 
 
-## Special Instructions
+## 特别指示
 
-(Any specific instructions for how the assistant should behave)
+_(如果有任何希望助手绝对遵守或严格回避的雷区行为，请记录于此)_
+- 
 
 ---
 
-*Edit this file to customize nanobot's behavior for your needs.*
+*随着我们相处时间的增加，我能提供的帮助就会越好。编辑此文件以根据您的需求定制 nanobot 的行为。*

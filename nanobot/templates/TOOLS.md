@@ -1,15 +1,36 @@
-# Tool Usage Notes
+# TOOLS.md - 工具与配置备注
 
-Tool signatures are provided automatically via function calling.
-This file documents non-obvious constraints and usage patterns.
+工具签名会自动通过函数调用提供给 Agent。
+此文件用于记录**非显而易见的约束条件、使用模式以及特定环境下的个性化资源配置**。
 
-## exec — Safety Limits
+## 核心限制须知
 
-- Commands have a configurable timeout (default 60s)
-- Dangerous commands are blocked (rm -rf, format, dd, shutdown, etc.)
-- Output is truncated at 10,000 characters
-- `restrictToWorkspace` config can limit file access to the workspace
+### exec (执行) — 安全与沙盒
 
-## cron — Scheduled Reminders
+- 命令有一个可配置的超时时间（默认 60 秒）
+- 危险命令会被系统拦截防御（如 `rm -rf`, `format`, `dd`, `shutdown` 等）
+- 终端输出会被截断为最多 10,000 个字符
+- `restrictToWorkspace` 配置可以限制你的文件访问权限是否仅锁定在工作区内
 
-- Please refer to cron skill for usage.
+### cron — 定时任务
+
+- 优先参考专门的 `cron` 工作流/技能文档。
+- 绝不要用直接写文件的方式代替系统调用来创建任务。
+
+## 个性化环境配置集
+
+*可以在这里记录任何你的基础设施详情，让你在使用相关功能时无需用户重复输入。*
+
+### 环境端点示例 (供参考)
+
+**SSH 与服务器别名：**
+- home-server → 192.168.1.100, user: admin
+- nas-box → 192.168.1.110, user: clukay
+
+**智能设备 / API配置提示：**
+- 工作区默认测试域名: `localhost:8080`
+- 偏好的 TTS 声音: `Nova`
+
+---
+
+*补充任何你觉得对理解操作环境有帮助的内容，将其当作你的快捷参考手册。*
