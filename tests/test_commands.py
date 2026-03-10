@@ -241,7 +241,7 @@ def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
 
 
-def test_config_no_longer_exposes_skillspec_render_timeout_fields() -> None:
+def test_config_no_longer_exposes_legacy_render_timeout_fields() -> None:
     config = Config()
     assert not hasattr(config.agents.defaults, "skillspec_render_primary_timeout_seconds")
     assert not hasattr(config.agents.defaults, "skillspec_render_retry_timeout_seconds")

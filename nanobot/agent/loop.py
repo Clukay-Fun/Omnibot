@@ -477,7 +477,7 @@ class AgentLoop:
         normalized_profile = self._normalize_profile(profile or {})
         identity = cast(dict[str, Any], normalized_profile["identity"])
         preferences = cast(dict[str, Any], normalized_profile["preferences"])
-        skillspec = cast(dict[str, Any], normalized_profile["skillspec"])
+        write_preferences = cast(dict[str, Any], normalized_profile["skillspec"])
         onboarding_tpl = self._runtime_text.template("onboarding_form")
 
         header_tpl = onboarding_tpl.get("header") if isinstance(onboarding_tpl.get("header"), dict) else {}
@@ -513,7 +513,7 @@ class AgentLoop:
         if query_scope_default not in {"self", "all"}:
             query_scope_default = ""
 
-        confirm_pref = self._normalize_form_value(skillspec.get("confirm_preference"))
+        confirm_pref = self._normalize_form_value(write_preferences.get("confirm_preference"))
         if confirm_pref == "auto":
             confirm_write_default = "no"
         elif confirm_pref == "manual":
@@ -1281,20 +1281,20 @@ class AgentLoop:
                 if query_scope:
                     preferences["query_scope"] = query_scope
 
-                skillspec_raw = profile.get("skillspec")
-                skillspec_pref: dict[str, Any]
-                if isinstance(skillspec_raw, dict):
-                    skillspec_pref = cast(dict[str, Any], skillspec_raw)
+                stored_write_preferences = profile.get("skillspec")
+                write_preferences: dict[str, Any]
+                if isinstance(stored_write_preferences, dict):
+                    write_preferences = cast(dict[str, Any], stored_write_preferences)
                 else:
-                    skillspec_pref = {}
+                    write_preferences = {}
 
                 if write_confirm in {"auto", "skip", "no", "false"}:
-                    skillspec_pref["confirm_preference"] = "auto"
+                    write_preferences["confirm_preference"] = "auto"
                 elif write_confirm in {"manual", "yes", "true", "confirm"}:
-                    skillspec_pref["confirm_preference"] = "manual"
+                    write_preferences["confirm_preference"] = "manual"
                 elif write_confirm:
-                    skillspec_pref["confirm_preference"] = "manual"
-                profile["skillspec"] = skillspec_pref
+                    write_preferences["confirm_preference"] = "manual"
+                profile["skillspec"] = write_preferences
 
                 onboarding.update(
                     {
@@ -2262,7 +2262,7 @@ class AgentLoop:
         session = self.sessions.get_or_create(msg.session_key)
         profile = self._normalize_profile(self._user_memory_store.read(msg.channel, msg.sender_id))
         preferences = cast(dict[str, Any], profile["preferences"])
-        skillspec = cast(dict[str, Any], profile["skillspec"])
+        write_preferences = cast(dict[str, Any], profile["skillspec"])
         onboarding = cast(dict[str, Any], profile["onboarding"])
 
         display_name = self._resolve_profile_display_name(profile)
@@ -2274,7 +2274,7 @@ class AgentLoop:
         }.get(style, "标准")
 
         confirm_pref = self._normalize_form_value(
-            skillspec.get("confirm_preference")
+            write_preferences.get("confirm_preference")
             or profile.get("confirm_preference")
             or profile.get("write_confirm")
         ).lower()

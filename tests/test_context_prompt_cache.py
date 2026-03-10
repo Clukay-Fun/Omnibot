@@ -236,7 +236,7 @@ def test_add_tool_result_compacts_bitable_field_metadata_for_llm(tmp_path) -> No
     assert payload["fields"][0]["property"]["option_count"] == 10
 
 
-def test_feishu_prompt_does_not_read_skillspec_blueprints(tmp_path) -> None:
+def test_feishu_prompt_does_not_read_legacy_skillspec_blueprints(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     (workspace / "MEMORY.md").write_text("global-memory", encoding="utf-8")
 
