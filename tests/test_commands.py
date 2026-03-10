@@ -52,6 +52,8 @@ except ModuleNotFoundError:
     sys.modules["prompt_toolkit.history"] = history_stub
     sys.modules["prompt_toolkit.patch_stdout"] = patch_stdout_stub
 
+import nanobot.cli.commands as commands_module
+
 from nanobot.agent.runtime_texts import RuntimeTextCatalog
 from nanobot.cli.commands import _build_feishu_oauth_stack, app
 from nanobot.config.schema import Config
@@ -284,6 +286,24 @@ def test_sync_workspace_templates_removes_legacy_runtime_dirs(tmp_path: Path) ->
 
     for legacy in ("prompts", "routing", "templates"):
         assert not (tmp_path / legacy).exists()
+
+
+def test_build_cron_service_migrates_legacy_data_dir_store(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    captured: dict[str, object] = {}
+
+    class _FakeCronService:
+        def __init__(self, store_path: Path, *, legacy_store_paths=None):
+            captured["store_path"] = store_path
+            captured["legacy_store_paths"] = list(legacy_store_paths or [])
+
+    monkeypatch.setattr(commands_module, "CronService", _FakeCronService, raising=False)
+
+    service = commands_module._build_cron_service()
+
+    assert isinstance(service, _FakeCronService)
+    assert captured["store_path"] == tmp_path / ".nanobot" / "state" / "cron" / "jobs.json"
+    assert captured["legacy_store_paths"] == [tmp_path / ".nanobot" / "cron" / "jobs.json"]
 
 
 def test_config_supports_feishu_oauth_server_settings() -> None:
