@@ -13,7 +13,7 @@ from nanobot.feishu.handler import FeishuEventHandler
 from nanobot.feishu.media import FeishuInboundMediaLoader
 from nanobot.feishu.memory import FeishuUserMemory, FeishuUserMemoryStore
 from nanobot.feishu.outbound import FeishuOutboundMessenger
-from nanobot.feishu.persona import FeishuPersonaOverlayManager
+from nanobot.feishu.persona import FeishuPersonaOverlayManager, FeishuUserWorkspaceManager
 from nanobot.feishu.renderer import FeishuRenderer
 from nanobot.feishu.runtime import FeishuRuntime, build_feishu_runtime
 from nanobot.feishu.router import FeishuEnvelope, FeishuRouter
@@ -32,6 +32,7 @@ __all__ = [
     "FeishuMemoryArchiver",
     "FeishuOutboundMessenger",
     "FeishuPersonaOverlayManager",
+    "FeishuUserWorkspaceManager",
     "FeishuRuntime",
     "FeishuTTLManager",
     "FeishuUserMemory",

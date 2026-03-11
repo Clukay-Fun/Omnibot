@@ -8,6 +8,7 @@ from typing import Any
 
 from loguru import logger
 
+from nanobot.agent.overlay import OverlayContext
 from nanobot.feishu.memory import FeishuUserMemoryStore
 from nanobot.feishu.types import TranslatedFeishuMessage
 
@@ -47,9 +48,11 @@ class FeishuEventHandler:
                     str(translated.metadata.get("user_open_id") or ""),
                 )
                 if overlay_root is not None:
-                    translated.metadata = dict(translated.metadata)
-                    translated.metadata["system_overlay_root"] = str(overlay_root)
-                    translated.metadata["system_overlay_bootstrap"] = self.persona_manager.should_include_bootstrap(overlay_root)
+                    overlay_context = OverlayContext(
+                        system_overlay_root=str(overlay_root),
+                        system_overlay_bootstrap=self.persona_manager.should_include_bootstrap(overlay_root),
+                    )
+                    translated.metadata = overlay_context.to_metadata(translated.metadata)
             if self.memory_store is not None:
                 extra_context = self.memory_store.safe_build_extra_context(translated.metadata)
                 if extra_context:

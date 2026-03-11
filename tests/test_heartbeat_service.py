@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from nanobot.heartbeat.service import HeartbeatService
+from nanobot.heartbeat.service import HeartbeatService, HeartbeatTarget
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
@@ -11,9 +11,11 @@ class DummyProvider(LLMProvider):
         super().__init__()
         self._responses = list(responses)
         self.calls = 0
+        self.last_messages = None
 
     async def chat(self, *args, **kwargs) -> LLMResponse:
         self.calls += 1
+        self.last_messages = kwargs.get("messages")
         if self._responses:
             return self._responses.pop(0)
         return LLMResponse(content="", tool_calls=[])
@@ -75,10 +77,10 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
         )
     ])
 
-    called_with: list[str] = []
+    called_with: list[tuple[str, str]] = []
 
-    async def _on_execute(tasks: str) -> str:
-        called_with.append(tasks)
+    async def _on_execute(target: HeartbeatTarget, tasks: str) -> str:
+        called_with.append((target.session_key, tasks))
         return "done"
 
     service = HeartbeatService(
@@ -90,7 +92,7 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
 
     result = await service.trigger_now()
     assert result == "done"
-    assert called_with == ["check open tasks"]
+    assert called_with == [("heartbeat", "check open tasks")]
 
 
 @pytest.mark.asyncio
@@ -110,7 +112,7 @@ async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
         )
     ])
 
-    async def _on_execute(tasks: str) -> str:
+    async def _on_execute(_target: HeartbeatTarget, tasks: str) -> str:
         return tasks
 
     service = HeartbeatService(
@@ -158,3 +160,69 @@ async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatc
     assert tasks == "check open tasks"
     assert provider.calls == 2
     assert delays == [1]
+
+
+@pytest.mark.asyncio
+async def test_decision_context_includes_user_memory_and_history(tmp_path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] review follow-up items", encoding="utf-8")
+    (tmp_path / "USER.md").write_text("- **昵称**：康哥\n", encoding="utf-8")
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "MEMORY.md").write_text("Known preference: concise", encoding="utf-8")
+    (tmp_path / "memory" / "HISTORY.md").write_text("[2026-03-11 10:00] promised a follow-up", encoding="utf-8")
+
+    provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(id="hb_1", name="heartbeat", arguments={"action": "skip"})],
+        )
+    ])
+    service = HeartbeatService(workspace=tmp_path, provider=provider, model="openai/gpt-4o-mini")
+
+    await service.trigger_now()
+
+    prompt = provider.last_messages[1]["content"]
+    assert "## HEARTBEAT.md" in prompt
+    assert "## USER.md" in prompt
+    assert "康哥" in prompt
+    assert "## memory/MEMORY.md" in prompt
+    assert "Known preference: concise" in prompt
+    assert "## memory/HISTORY.md (recent tail)" in prompt
+    assert "promised a follow-up" in prompt
+
+
+@pytest.mark.asyncio
+async def test_tick_continues_when_one_target_fails(tmp_path) -> None:
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    (workspace_a / "HEARTBEAT.md").write_text("- [ ] do a", encoding="utf-8")
+    (workspace_b / "HEARTBEAT.md").write_text("- [ ] do b", encoding="utf-8")
+
+    provider = DummyProvider([
+        LLMResponse(content="", tool_calls=[ToolCallRequest(id="hb_1", name="heartbeat", arguments={"action": "run", "tasks": "task-a"})]),
+        LLMResponse(content="", tool_calls=[ToolCallRequest(id="hb_2", name="heartbeat", arguments={"action": "run", "tasks": "task-b"})]),
+    ])
+
+    executed: list[str] = []
+
+    async def _on_execute(target: HeartbeatTarget, tasks: str) -> str:
+        executed.append(f"{target.chat_id}:{tasks}")
+        if target.chat_id == "chat-a":
+            raise RuntimeError("boom")
+        return "done-b"
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+        target_provider=lambda: [
+            HeartbeatTarget(workspace_root=workspace_a, channel="feishu", chat_id="chat-a", session_key="a"),
+            HeartbeatTarget(workspace_root=workspace_b, channel="feishu", chat_id="chat-b", session_key="b"),
+        ],
+    )
+
+    await service._tick()
+
+    assert executed == ["chat-a:task-a", "chat-b:task-b"]

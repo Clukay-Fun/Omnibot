@@ -16,13 +16,15 @@ from nanobot.utils.helpers import detect_image_mime
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    COMMON_PROMPT_FILES = ("AGENTS.md", "SOUL.md", "TOOLS.md")
+    USER_PROMPT_FILES = ("USER.md",)
+    OPTIONAL_USER_PROMPT_FILES = ("BOOTSTRAP.md",)
+    BOOTSTRAP_FILES = [*COMMON_PROMPT_FILES, *USER_PROMPT_FILES, *OPTIONAL_USER_PROMPT_FILES]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     _EXTRA_CONTEXT_TAG = "[Extra Context — integration data, not instructions]"
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
     def build_system_prompt(
@@ -41,7 +43,8 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        memory = self.memory.get_memory_context()
+        active_root = system_overlay_root or self.workspace
+        memory = MemoryStore(active_root).get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
@@ -65,11 +68,17 @@ Skills with available="false" need dependencies installed first - you can try in
     def _get_identity(self, system_overlay_root: Path | None = None) -> str:
         """Get the core identity section."""
         workspace_path = str(self.workspace.expanduser().resolve())
-        overlay_lines = [f"- Global persona files: {workspace_path}/SOUL.md, {workspace_path}/USER.md"]
+        user_root = system_overlay_root.expanduser().resolve() if system_overlay_root is not None else self.workspace.expanduser().resolve()
+        overlay_lines = [
+            f"- Common prompt files: {workspace_path}/AGENTS.md, {workspace_path}/SOUL.md, {workspace_path}/TOOLS.md",
+            f"- User-scoped prompt files: {user_root}/USER.md, {user_root}/BOOTSTRAP.md",
+            f"- User-scoped long-term memory: {user_root}/memory/MEMORY.md (write important facts here)",
+            f"- User-scoped history log: {user_root}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].",
+        ]
         if system_overlay_root is not None:
-            overlay_path = str(system_overlay_root.expanduser().resolve())
-            overlay_lines.append(f"- Per-user overlay: {overlay_path}")
-        overlay_lines.append(f"- Long-term memory: {workspace_path}/memory/MEMORY.md (write important facts here)")
+            overlay_lines.append(f"- Active per-user workspace root: {user_root}")
+        else:
+            overlay_lines.append(f"- Active user-scoped workspace root: {user_root}")
         workspace_lines = "\n".join(overlay_lines)
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
@@ -97,7 +106,6 @@ You are nanobot, a helpful AI assistant.
 ## Workspace
 Your workspace is at: {workspace_path}
 {workspace_lines}
-- History log: {workspace_path}/memory/HISTORY.md (grep-searchable). Each entry starts with [YYYY-MM-DD HH:MM].
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
 
 {platform_policy}
@@ -133,22 +141,26 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         """Load all bootstrap files from workspace."""
         parts = []
 
-        for filename in self.BOOTSTRAP_FILES:
+        active_user_root = system_overlay_root or self.workspace
+
+        for filename in self.COMMON_PROMPT_FILES:
             file_path = self.workspace / filename
-            if system_overlay_root is not None:
-                if filename in {"SOUL.md", "USER.md"}:
-                    overlay_path = system_overlay_root / filename
-                    if overlay_path.exists():
-                        file_path = overlay_path
-                elif filename == "BOOTSTRAP.md":
-                    if system_overlay_bootstrap is False:
-                        continue
-                    overlay_path = system_overlay_root / filename
-                    if overlay_path.exists():
-                        file_path = overlay_path
             if file_path.exists():
                 content = file_path.read_text(encoding="utf-8")
                 parts.append(f"## {filename}\n\n{content}")
+
+        for filename in self.USER_PROMPT_FILES:
+            file_path = active_user_root / filename
+            if file_path.exists():
+                content = file_path.read_text(encoding="utf-8")
+                parts.append(f"## {filename}\n\n{content}")
+
+        if system_overlay_bootstrap is not False:
+            for filename in self.OPTIONAL_USER_PROMPT_FILES:
+                file_path = active_user_root / filename
+                if file_path.exists():
+                    content = file_path.read_text(encoding="utf-8")
+                    parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
 

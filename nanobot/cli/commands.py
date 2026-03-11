@@ -302,8 +302,9 @@ def gateway(
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.heartbeat.service import HeartbeatService
+    from nanobot.heartbeat.service import HeartbeatService, HeartbeatTarget
     from nanobot.session.manager import SessionManager
+    from nanobot.feishu.persona import FeishuUserWorkspaceManager
 
     if verbose:
         import logging
@@ -317,6 +318,7 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+    feishu_workspace_manager = FeishuUserWorkspaceManager(config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -411,28 +413,36 @@ def gateway(
         return "cli", "direct"
 
     # Create heartbeat service
-    async def on_heartbeat_execute(tasks: str) -> str:
+    async def on_heartbeat_execute(target: HeartbeatTarget, tasks: str) -> str:
         """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
-
         async def _silent(*_args, **_kwargs):
             pass
 
         return await agent.process_direct(
             tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
+            session_key=target.session_key,
+            channel=target.channel,
+            chat_id=target.chat_id,
             on_progress=_silent,
+            overlay_context=target.overlay_context,
         )
 
-    async def on_heartbeat_notify(response: str) -> None:
+    async def on_heartbeat_notify(target: HeartbeatTarget, response: str) -> None:
         """Deliver a heartbeat response to the user's channel."""
         from nanobot.bus.events import OutboundMessage
-        channel, chat_id = _pick_heartbeat_target()
-        if channel == "cli":
+        if target.channel == "cli":
             return  # No external channel available to deliver to
-        await bus.publish_outbound(OutboundMessage(channel=channel, chat_id=chat_id, content=response))
+        await bus.publish_outbound(OutboundMessage(channel=target.channel, chat_id=target.chat_id, content=response))
+
+    def _fallback_heartbeat_target() -> HeartbeatTarget:
+        channel, chat_id = _pick_heartbeat_target()
+        return HeartbeatTarget(
+            workspace_root=config.workspace_path,
+            channel=channel,
+            chat_id=chat_id,
+            session_key="heartbeat",
+            overlay_context=None,
+        )
 
     hb_cfg = config.gateway.heartbeat
     heartbeat = HeartbeatService(
@@ -443,6 +453,8 @@ def gateway(
         on_notify=on_heartbeat_notify,
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
+        target_provider=feishu_workspace_manager.list_heartbeat_targets,
+        fallback_target_provider=_fallback_heartbeat_target,
     )
 
     if channels.enabled_channels:

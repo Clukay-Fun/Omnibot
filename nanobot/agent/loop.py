@@ -14,6 +14,7 @@ from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.memory import MemoryStore
+from nanobot.agent.overlay import OverlayContext
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -342,6 +343,10 @@ class AgentLoop:
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response."""
+        metadata = dict(msg.metadata or {})
+        overlay_context = OverlayContext.from_metadata(metadata)
+        metadata = overlay_context.to_metadata(metadata)
+
         # System messages: parse origin from chat_id ("channel:chat_id")
         if msg.channel == "system":
             channel, chat_id = (msg.chat_id.split(":", 1) if ":" in msg.chat_id
@@ -349,16 +354,17 @@ class AgentLoop:
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
             session = self.sessions.get_or_create(key)
-            self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
+            session.metadata = overlay_context.to_metadata(session.metadata)
+            self._set_tool_context(channel, chat_id, metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
                 history=history,
                 current_message=msg.content,
                 channel=channel,
                 chat_id=chat_id,
-                extra_context=(msg.metadata or {}).get("extra_context"),
-                system_overlay_root=(msg.metadata or {}).get("system_overlay_root"),
-                system_overlay_bootstrap=(msg.metadata or {}).get("system_overlay_bootstrap"),
+                extra_context=metadata.get("extra_context"),
+                system_overlay_root=str(overlay_context.root_path) if overlay_context.root_path else None,
+                system_overlay_bootstrap=overlay_context.system_overlay_bootstrap,
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -371,6 +377,7 @@ class AgentLoop:
 
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
+        session.metadata = overlay_context.to_metadata(session.metadata)
 
         # Slash commands
         cmd = msg.content.strip().lower()
@@ -383,6 +390,7 @@ class AgentLoop:
                     if snapshot:
                         temp = Session(key=session.key)
                         temp.messages = list(snapshot)
+                        temp.metadata = dict(session.metadata)
                         if not await self._consolidate_memory(temp, archive_all=True):
                             return OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
@@ -424,7 +432,7 @@ class AgentLoop:
             _task = asyncio.create_task(_consolidate_and_unlock())
             self._consolidation_tasks.add(_task)
 
-        self._set_tool_context(msg.channel, msg.chat_id, msg.metadata.get("message_id"))
+        self._set_tool_context(msg.channel, msg.chat_id, metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
@@ -436,13 +444,13 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=msg.chat_id,
-            extra_context=(msg.metadata or {}).get("extra_context"),
-            system_overlay_root=(msg.metadata or {}).get("system_overlay_root"),
-            system_overlay_bootstrap=(msg.metadata or {}).get("system_overlay_bootstrap"),
+            extra_context=metadata.get("extra_context"),
+            system_overlay_root=str(overlay_context.root_path) if overlay_context.root_path else None,
+            system_overlay_bootstrap=overlay_context.system_overlay_bootstrap,
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
-            meta = dict(msg.metadata or {})
+            meta = dict(metadata)
             meta["_progress"] = True
             meta["_tool_hint"] = tool_hint
             await self.bus.publish_outbound(OutboundMessage(
@@ -467,7 +475,7 @@ class AgentLoop:
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content,
-            metadata=msg.metadata or {},
+            metadata=metadata,
         )
 
     def _save_turn(self, session: Session, messages: list[dict], skip: int) -> None:
@@ -507,7 +515,9 @@ class AgentLoop:
 
     async def _consolidate_memory(self, session, archive_all: bool = False) -> bool:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
-        return await MemoryStore(self.workspace).consolidate(
+        overlay_context = OverlayContext.from_metadata(session.metadata)
+        memory_root = overlay_context.root_path or self.workspace
+        return await MemoryStore(memory_root).consolidate(
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
         )
@@ -519,10 +529,17 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         on_progress: Callable[[str], Awaitable[None]] | None = None,
+        overlay_context: OverlayContext | None = None,
     ) -> str:
         """Process a message directly (for CLI or cron usage)."""
         await self._connect_mcp()
-        msg = InboundMessage(channel=channel, sender_id="user", chat_id=chat_id, content=content)
+        msg = InboundMessage(
+            channel=channel,
+            sender_id="user",
+            chat_id=chat_id,
+            content=content,
+            metadata=(overlay_context or OverlayContext()).to_metadata(),
+        )
         async with self._get_session_lock(session_key):
             response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
         return response.content if response else ""

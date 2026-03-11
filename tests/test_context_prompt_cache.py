@@ -124,10 +124,14 @@ def test_system_prompt_uses_overlay_files_for_dm_persona(tmp_path) -> None:
 
     assert "global agents" in prompt
     assert "global soul" in prompt
+    assert "global tools" in prompt
     assert "overlay user" in prompt
     assert "overlay bootstrap" in prompt
     assert "global user" not in prompt
     assert "global bootstrap" not in prompt
+    assert f"Common prompt files: {workspace}/AGENTS.md, {workspace}/SOUL.md, {workspace}/TOOLS.md" in prompt
+    assert f"User-scoped prompt files: {overlay}/USER.md, {overlay}/BOOTSTRAP.md" in prompt
+    assert f"User-scoped long-term memory: {overlay}/memory/MEMORY.md" in prompt
 
 
 def test_system_prompt_skips_bootstrap_when_overlay_is_initialized(tmp_path) -> None:

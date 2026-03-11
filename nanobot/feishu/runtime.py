@@ -16,7 +16,7 @@ from nanobot.feishu.handler import FeishuEventHandler
 from nanobot.feishu.media import FeishuInboundMediaLoader
 from nanobot.feishu.memory import FeishuUserMemoryStore
 from nanobot.feishu.outbound import FeishuOutboundMessenger
-from nanobot.feishu.persona import FeishuPersonaOverlayManager
+from nanobot.feishu.persona import FeishuUserWorkspaceManager
 from nanobot.feishu.router import FeishuRouter
 from nanobot.feishu.streaming import FeishuCardStreamer
 from nanobot.feishu.ttl import FeishuTTLManager
@@ -63,7 +63,7 @@ def build_feishu_runtime(
     command_handler = FeishuCommandHandler(memory_store=memory_store, respond=bus.publish_outbound, session_manager=session_manager, archive_service=archive_service)
     media_loader = FeishuInboundMediaLoader(client_getter, groq_api_key=groq_api_key)
     outbound = FeishuOutboundMessenger(client_getter)
-    persona_manager = FeishuPersonaOverlayManager(workspace)
+    persona_manager = FeishuUserWorkspaceManager(workspace)
     streaming = FeishuCardStreamer(
         client_getter=client_getter,
         scope=config.streaming_scope,

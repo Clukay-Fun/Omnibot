@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from nanobot.agent.loop import AgentLoop
+from nanobot.agent.memory import MemoryStore
+from nanobot.agent.overlay import OverlayContext
+from nanobot.bus.events import InboundMessage
+from nanobot.bus.queue import MessageBus
+from nanobot.session.manager import Session
+
+
+def _make_loop(tmp_path):
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+    bus = MessageBus()
+
+    with patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
+        MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+        loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
+    return loop
+
+
+@pytest.mark.asyncio
+async def test_consolidate_memory_uses_overlay_root_from_session_metadata(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    overlay_root = tmp_path / "users" / "feishu" / "tenant-1" / "ou_user_1"
+    (overlay_root / "memory").mkdir(parents=True)
+
+    session = Session(key="feishu:dm:ou_user_1")
+    session.metadata = OverlayContext(
+        system_overlay_root=str(overlay_root),
+        system_overlay_bootstrap=True,
+    ).to_metadata()
+
+    captured = {}
+
+    async def _fake_consolidate(self, _session, _provider, _model, *, archive_all=False, memory_window=50):
+        captured["memory_dir"] = self.memory_dir
+        captured["archive_all"] = archive_all
+        captured["memory_window"] = memory_window
+        return True
+
+    with patch.object(MemoryStore, "consolidate", _fake_consolidate):
+        result = await loop._consolidate_memory(session)
+
+    assert result is True
+    assert captured["memory_dir"] == overlay_root / "memory"
+
+
+@pytest.mark.asyncio
+async def test_process_message_persists_overlay_context_before_failure(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    overlay_root = tmp_path / "users" / "feishu" / "tenant-1" / "ou_user_1"
+    overlay_root.mkdir(parents=True)
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="ou_user_1",
+        content="hello",
+        metadata=OverlayContext(
+            system_overlay_root=str(overlay_root),
+            system_overlay_bootstrap=True,
+        ).to_metadata(),
+        session_key_override="feishu:dm:ou_user_1",
+    )
+
+    loop._run_agent_loop = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await loop._process_message(msg)
+
+    session = loop.sessions.get_or_create("feishu:dm:ou_user_1")
+    overlay = OverlayContext.from_metadata(session.metadata)
+    assert overlay.system_overlay_root == str(overlay_root)
+    assert overlay.system_overlay_bootstrap is True
