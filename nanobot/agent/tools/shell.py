@@ -44,7 +44,11 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
-        return "Execute a shell command and return its output. Use with caution."
+        return (
+            "Execute a shell command and return its output. "
+            "Use when the answer depends on inspecting or operating on the local environment. "
+            "Do not use when the request can be answered directly without checking the local system."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:

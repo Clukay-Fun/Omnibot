@@ -205,23 +205,29 @@ class ListDirTool(Tool):
 
     @property
     def description(self) -> str:
-        return "List the contents of a directory."
+        return "List the contents of a directory. If path is omitted, list the workspace root."
 
     @property
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "The directory path to list"}},
-            "required": ["path"],
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The directory path to list. Defaults to the workspace root when omitted.",
+                    "default": ".",
+                }
+            },
         }
 
-    async def execute(self, path: str, **kwargs: Any) -> str:
+    async def execute(self, path: str | None = None, **kwargs: Any) -> str:
         try:
-            dir_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            target_path = path or "."
+            dir_path = _resolve_path(target_path, self._workspace, self._allowed_dir)
             if not dir_path.exists():
-                return f"Error: Directory not found: {path}"
+                return f"Error: Directory not found: {target_path}"
             if not dir_path.is_dir():
-                return f"Error: Not a directory: {path}"
+                return f"Error: Not a directory: {target_path}"
 
             items = []
             for item in sorted(dir_path.iterdir()):
@@ -229,7 +235,7 @@ class ListDirTool(Tool):
                 items.append(f"{prefix}{item.name}")
 
             if not items:
-                return f"Directory {path} is empty"
+                return f"Directory {target_path} is empty"
 
             return "\n".join(items)
         except PermissionError as e:

@@ -22,12 +22,14 @@ class FeishuEventHandler:
         media_loader: Callable[[Any, TranslatedFeishuMessage], Awaitable[None]] | None = None,
         command_handler: Any | None = None,
         memory_store: FeishuUserMemoryStore | None = None,
+        persona_manager: Any | None = None,
     ):
         self.adapter = adapter
         self.publish = publish
         self.media_loader = media_loader
         self.command_handler = command_handler
         self.memory_store = memory_store
+        self.persona_manager = persona_manager
 
     async def handle_message(self, envelope: Any) -> None:
         try:
@@ -38,6 +40,16 @@ class FeishuEventHandler:
                 return
             if self.command_handler is not None and await self.command_handler.handle(translated):
                 return
+            if self.persona_manager is not None:
+                overlay_root = self.persona_manager.overlay_root_for_chat(
+                    str(translated.metadata.get("chat_type") or ""),
+                    str(translated.metadata.get("tenant_key") or ""),
+                    str(translated.metadata.get("user_open_id") or ""),
+                )
+                if overlay_root is not None:
+                    translated.metadata = dict(translated.metadata)
+                    translated.metadata["system_overlay_root"] = str(overlay_root)
+                    translated.metadata["system_overlay_bootstrap"] = self.persona_manager.should_include_bootstrap(overlay_root)
             if self.memory_store is not None:
                 extra_context = self.memory_store.safe_build_extra_context(translated.metadata)
                 if extra_context:

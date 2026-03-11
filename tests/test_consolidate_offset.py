@@ -484,10 +484,6 @@ class TestConsolidationDeduplicationGuard:
     """Test that consolidation tasks are deduplicated and serialized."""
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="pre-existing baseline failure: tests patch provider.chat while AgentLoop uses chat_with_retry",
-        strict=False,
-    )
     async def test_consolidation_guard_prevents_duplicate_tasks(self, tmp_path: Path) -> None:
         """Concurrent messages above memory_window spawn only one consolidation task."""
         from nanobot.agent.loop import AgentLoop
@@ -530,10 +526,6 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="pre-existing baseline failure: tests patch provider.chat while AgentLoop uses chat_with_retry",
-        strict=False,
-    )
     async def test_new_command_guard_prevents_concurrent_consolidation(
         self, tmp_path: Path
     ) -> None:
@@ -588,10 +580,6 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="pre-existing baseline failure: tests patch provider.chat while AgentLoop uses chat_with_retry",
-        strict=False,
-    )
     async def test_consolidation_tasks_are_referenced(self, tmp_path: Path) -> None:
         """create_task results are tracked in _consolidation_tasks while in flight."""
         from nanobot.agent.loop import AgentLoop
@@ -635,10 +623,6 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="pre-existing baseline failure: tests patch provider.chat while AgentLoop uses chat_with_retry",
-        strict=False,
-    )
     async def test_new_waits_for_inflight_consolidation_and_preserves_messages(
         self, tmp_path: Path
     ) -> None:
@@ -741,10 +725,6 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason="pre-existing baseline failure: tests patch provider.chat while AgentLoop uses chat_with_retry",
-        strict=False,
-    )
     async def test_new_archives_only_unconsolidated_messages_after_inflight_task(
         self, tmp_path: Path
     ) -> None:

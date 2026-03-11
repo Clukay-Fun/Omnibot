@@ -48,7 +48,11 @@ class WebSearchTool(Tool):
     """Search the web using Brave Search API."""
 
     name = "web_search"
-    description = "Search the web. Returns titles, URLs, and snippets."
+    description = (
+        "Search the web for current or external facts, research, and recent information. "
+        "Use when the user is asking you to find or verify information beyond the current conversation. "
+        "Do not use for greetings, identity questions, or conversational remarks that do not require lookup."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -110,7 +114,11 @@ class WebFetchTool(Tool):
     """Fetch and extract content from a URL using Readability."""
 
     name = "web_fetch"
-    description = "Fetch URL and extract readable content (HTML → markdown/text)."
+    description = (
+        "Fetch a specific URL and extract readable content after you already know which page should be opened. "
+        "Use for reading an article, page, or search result in detail. "
+        "Do not use for general chat or broad discovery when no specific page needs to be opened."
+    )
     parameters = {
         "type": "object",
         "properties": {

@@ -357,6 +357,8 @@ class AgentLoop:
                 channel=channel,
                 chat_id=chat_id,
                 extra_context=(msg.metadata or {}).get("extra_context"),
+                system_overlay_root=(msg.metadata or {}).get("system_overlay_root"),
+                system_overlay_bootstrap=(msg.metadata or {}).get("system_overlay_bootstrap"),
             )
             final_content, _, all_msgs = await self._run_agent_loop(messages)
             self._save_turn(session, all_msgs, 1 + len(history))
@@ -435,6 +437,8 @@ class AgentLoop:
             channel=msg.channel,
             chat_id=msg.chat_id,
             extra_context=(msg.metadata or {}).get("extra_context"),
+            system_overlay_root=(msg.metadata or {}).get("system_overlay_root"),
+            system_overlay_bootstrap=(msg.metadata or {}).get("system_overlay_bootstrap"),
         )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
@@ -446,7 +450,8 @@ class AgentLoop:
             ))
 
         final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+            initial_messages,
+            on_progress=on_progress or _bus_progress,
         )
 
         if final_content is None:

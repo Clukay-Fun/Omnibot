@@ -1,8 +1,12 @@
 from typing import Any
+from pathlib import Path
 
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.tools.filesystem import ListDirTool
+from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
+from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 
 
 class SampleTool(Tool):
@@ -87,6 +91,44 @@ async def test_registry_returns_validation_error() -> None:
     reg.register(SampleTool())
     result = await reg.execute("sample", {"query": "hi"})
     assert "Invalid parameters" in result
+
+
+async def test_list_dir_defaults_to_workspace_root_when_path_omitted(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+
+    reg = ToolRegistry()
+    reg.register(ListDirTool(workspace=tmp_path))
+
+    result = await reg.execute("list_dir", {})
+
+    assert "notes.txt" in result
+    assert "src" in result
+
+
+def test_high_risk_tool_definitions_include_positive_and_negative_usage_boundaries() -> None:
+    reg = ToolRegistry()
+    reg.register(WebSearchTool())
+    reg.register(WebFetchTool())
+    reg.register(ExecTool())
+    reg.register(MessageTool())
+
+    definitions = {
+        definition["function"]["name"]: definition["function"]["description"]
+        for definition in reg.get_definitions()
+    }
+
+    assert "current or external facts" in definitions["web_search"]
+    assert "Do not use for greetings" in definitions["web_search"]
+
+    assert "specific URL" in definitions["web_fetch"]
+    assert "Do not use for general chat or broad discovery" in definitions["web_fetch"]
+
+    assert "local environment" in definitions["exec"]
+    assert "Do not use when the request can be answered directly" in definitions["exec"]
+
+    assert "another chat, another user, or a separate destination" in definitions["message"]
+    assert "Do not use this for the assistant's normal reply in the current conversation turn." in definitions["message"]
 
 
 def test_exec_extract_absolute_paths_keeps_full_windows_path() -> None:
