@@ -23,6 +23,7 @@ from nanobot.feishu.ttl import FeishuTTLManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
     from nanobot.config.schema import FeishuConfig
     from nanobot.providers.base import LLMProvider
     from nanobot.session.manager import SessionManager
@@ -77,6 +78,12 @@ def build_feishu_runtime(
         command_handler=command_handler,
         memory_store=memory_store,
         persona_manager=persona_manager,
+        prepare_placeholder=lambda translated: streaming.prepare_turn(
+            turn_id=str(translated.metadata.get("turn_id") or ""),
+            chat_id=translated.chat_id,
+            metadata=translated.metadata,
+            reply_to=str(translated.metadata.get("message_id") or "") or None,
+        ),
     )
     router = FeishuRouter(handler=handler, dedupe=FeishuEventDedupe(memory=FeishuLRUDedupe(max_size=config.dedupe_memory_size), store=FeishuSQLiteDedupe(dedupe_path)))
     return FeishuRuntime(outbound=outbound, handler=handler, router=router, streaming=streaming, archive_service=archive_service)

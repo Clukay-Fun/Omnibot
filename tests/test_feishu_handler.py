@@ -78,3 +78,62 @@ async def test_handler_serializes_overlay_context_for_private_chat(tmp_path) -> 
     overlay = OverlayContext.from_metadata(published_metadata)
     assert overlay.system_overlay_root == str(tmp_path / "users" / "feishu" / "tenant-1" / "ou_user_1")
     assert overlay.system_overlay_bootstrap is True
+
+
+@pytest.mark.asyncio
+async def test_handler_prepares_placeholder_before_publish() -> None:
+    publish = AsyncMock()
+    prepare_placeholder = AsyncMock(return_value=True)
+    adapter = AsyncMock()
+    translated = TranslatedFeishuMessage(
+        sender_id="ou_user_1",
+        chat_id="ou_user_1",
+        content="hello",
+        media=[],
+        metadata={"message_id": "om_1", "turn_id": "turn_1", "chat_type": "p2p"},
+        session_key="feishu:dm:ou_user_1",
+    )
+    adapter.translate_message = AsyncMock(return_value=translated)
+
+    handler = FeishuEventHandler(
+        adapter=adapter,
+        publish=publish,
+        prepare_placeholder=prepare_placeholder,
+    )
+
+    envelope = FeishuEnvelope(source="webhook", payload={"header": {"event_id": "evt_1"}, "event": {}})
+    await handler.handle_message(envelope)
+
+    prepare_placeholder.assert_awaited_once_with(translated)
+    publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handler_skips_placeholder_when_command_is_handled() -> None:
+    publish = AsyncMock()
+    prepare_placeholder = AsyncMock(return_value=True)
+    command_handler = AsyncMock()
+    command_handler.handle = AsyncMock(return_value=True)
+    adapter = AsyncMock()
+    translated = TranslatedFeishuMessage(
+        sender_id="ou_user_1",
+        chat_id="ou_user_1",
+        content="/help",
+        media=[],
+        metadata={"message_id": "om_1", "turn_id": "turn_1", "chat_type": "p2p"},
+        session_key="feishu:dm:ou_user_1",
+    )
+    adapter.translate_message = AsyncMock(return_value=translated)
+
+    handler = FeishuEventHandler(
+        adapter=adapter,
+        publish=publish,
+        command_handler=command_handler,
+        prepare_placeholder=prepare_placeholder,
+    )
+
+    envelope = FeishuEnvelope(source="webhook", payload={"header": {"event_id": "evt_1"}, "event": {}})
+    await handler.handle_message(envelope)
+
+    prepare_placeholder.assert_not_awaited()
+    publish.assert_not_awaited()

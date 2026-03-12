@@ -24,6 +24,7 @@ class FeishuEventHandler:
         command_handler: Any | None = None,
         memory_store: FeishuUserMemoryStore | None = None,
         persona_manager: Any | None = None,
+        prepare_placeholder: Callable[[TranslatedFeishuMessage], Awaitable[bool] | bool] | None = None,
     ):
         self.adapter = adapter
         self.publish = publish
@@ -31,6 +32,7 @@ class FeishuEventHandler:
         self.command_handler = command_handler
         self.memory_store = memory_store
         self.persona_manager = persona_manager
+        self.prepare_placeholder = prepare_placeholder
 
     async def handle_message(self, envelope: Any) -> None:
         try:
@@ -41,6 +43,10 @@ class FeishuEventHandler:
                 return
             if self.command_handler is not None and await self.command_handler.handle(translated):
                 return
+            if self.prepare_placeholder is not None:
+                prepared = self.prepare_placeholder(translated)
+                if inspect.isawaitable(prepared):
+                    await prepared
             if self.persona_manager is not None:
                 overlay_root = self.persona_manager.overlay_root_for_chat(
                     str(translated.metadata.get("chat_type") or ""),
