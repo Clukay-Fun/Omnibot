@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import datetime as datetime_module
+import os
 from datetime import datetime as real_datetime
 from importlib.resources import files as pkg_files
+from io import BytesIO
 from pathlib import Path
-import datetime as datetime_module
+
+from PIL import Image
 
 from nanobot.agent.context import ContextBuilder
 
@@ -60,6 +65,18 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
     assert "materially help answer the user's request" not in prompt
 
 
+def test_system_prompt_includes_explicitly_requested_skills(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    prompt = builder.build_system_prompt(skill_names=["feishu-ocr"])
+
+    assert "# Active Skills" in prompt
+    assert "# Feishu OCR" in prompt
+    assert "only process the first image" in prompt
+    assert "Do not use scripts or external OCR tools for v1." in prompt
+
+
 def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     """Runtime metadata should be merged with the user message."""
     workspace = _make_workspace(tmp_path)
@@ -84,6 +101,40 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert "Channel: cli" in user_content
     assert "Chat ID: direct" in user_content
     assert "Return exactly: OK" in user_content
+
+
+def test_multimodal_user_message_places_text_before_images(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+    image_path = tmp_path / "tiny.png"
+    image_path.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jx7kAAAAASUVORK5CYII="))
+
+    messages = builder.build_messages(
+        history=[],
+        current_message="Describe this image.",
+        media=[str(image_path)],
+        channel="feishu",
+        chat_id="direct",
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, list)
+    assert [item["type"] for item in user_content] == ["text", "text", "image_url"]
+    assert user_content[1]["text"] == "Describe this image."
+
+
+def test_prepare_image_for_model_reencodes_oversized_images() -> None:
+    raw_image = Image.frombytes("RGB", (512, 512), os.urandom(512 * 512 * 3))
+    image_path = BytesIO()
+    raw_image.save(image_path, format="PNG")
+    original = image_path.getvalue()
+
+    processed, mime = ContextBuilder._prepare_image_for_model(original, "image/png")
+
+    assert len(original) > ContextBuilder._MODEL_IMAGE_MAX_BYTES
+    assert mime == "image/jpeg"
+    assert len(processed) < len(original)
+    assert len(processed) <= ContextBuilder._MODEL_IMAGE_MAX_BYTES
 
 
 def test_extra_context_is_merged_into_user_message(tmp_path) -> None:

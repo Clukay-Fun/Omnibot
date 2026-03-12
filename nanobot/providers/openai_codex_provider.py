@@ -58,6 +58,21 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
+        image_count = sum(
+            1
+            for item in input_items
+            for content_item in (item.get("content") or [])
+            if content_item.get("type") == "input_image"
+        )
+        body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
+        logger.debug(
+            "Codex request prepared: model={}, input_items={}, images={}, body_bytes={}",
+            body["model"],
+            len(input_items),
+            image_count,
+            body_bytes,
+        )
+
         url = DEFAULT_CODEX_URL
 
         try:
@@ -231,7 +246,7 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
     async for line in response.aiter_lines():
         if line == "":
             if buffer:
-                data_lines = [l[5:].strip() for l in buffer if l.startswith("data:")]
+                data_lines = [entry[5:].strip() for entry in buffer if entry.startswith("data:")]
                 buffer = []
                 if not data_lines:
                     continue

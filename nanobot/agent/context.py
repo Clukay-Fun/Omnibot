@@ -5,6 +5,7 @@ import mimetypes
 import platform
 import time
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,9 @@ class ContextBuilder:
     USER_PROMPT_FILES = ("USER.md",)
     OPTIONAL_USER_PROMPT_FILES = ("BOOTSTRAP.md",)
     BOOTSTRAP_FILES = [*COMMON_PROMPT_FILES, *USER_PROMPT_FILES, *OPTIONAL_USER_PROMPT_FILES]
+    _MODEL_IMAGE_MAX_BYTES = 128 * 1024
+    _MODEL_IMAGE_MAX_SIDE_CANDIDATES = (1024, 896, 768)
+    _MODEL_IMAGE_JPEG_QUALITY_CANDIDATES = (85, 75, 65)
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     _EXTRA_CONTEXT_TAG = "[Extra Context — integration data, not instructions]"
 
@@ -48,11 +52,18 @@ class ContextBuilder:
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
-        always_skills = self.skills.get_always_skills()
-        if always_skills:
-            always_content = self.skills.load_skills_for_context(always_skills)
-            if always_content:
-                parts.append(f"# Active Skills\n\n{always_content}")
+        active_skills: list[str] = []
+        if skill_names:
+            for name in skill_names:
+                if name not in active_skills:
+                    active_skills.append(name)
+        for name in self.skills.get_always_skills():
+            if name not in active_skills:
+                active_skills.append(name)
+        if active_skills:
+            active_content = self.skills.load_skills_for_context(active_skills)
+            if active_content:
+                parts.append(f"# Active Skills\n\n{active_content}")
 
         skills_summary = self.skills.build_skills_summary()
         if skills_summary:
@@ -236,12 +247,62 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
             if not mime or not mime.startswith("image/"):
                 continue
+            raw, mime = self._prepare_image_for_model(raw, mime)
             b64 = base64.b64encode(raw).decode()
             images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         if not images:
             return text
-        return images + [{"type": "text", "text": text}]
+        parts: list[dict[str, Any]] = []
+        if text:
+            parts.append({"type": "text", "text": text})
+        parts.extend(images)
+        return parts
+
+    @classmethod
+    def _prepare_image_for_model(cls, raw: bytes, mime: str) -> tuple[bytes, str]:
+        """Shrink oversized images to improve multimodal request reliability."""
+        if len(raw) <= cls._MODEL_IMAGE_MAX_BYTES:
+            return raw, mime
+
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return raw, mime
+
+        try:
+            with Image.open(BytesIO(raw)) as source:
+                source = ImageOps.exif_transpose(source)
+                best_bytes = raw
+                best_mime = mime
+
+                for max_side in cls._MODEL_IMAGE_MAX_SIDE_CANDIDATES:
+                    candidate = source.copy()
+                    if max(candidate.size) > max_side:
+                        candidate.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+
+                    if candidate.mode != "RGB":
+                        if "A" in candidate.getbands():
+                            rgba = candidate.convert("RGBA")
+                            flattened = Image.new("RGB", rgba.size, "white")
+                            flattened.paste(rgba, mask=rgba.getchannel("A"))
+                            candidate = flattened
+                        else:
+                            candidate = candidate.convert("RGB")
+
+                    for quality in cls._MODEL_IMAGE_JPEG_QUALITY_CANDIDATES:
+                        output = BytesIO()
+                        candidate.save(output, format="JPEG", quality=quality, optimize=True)
+                        candidate_bytes = output.getvalue()
+                        if len(candidate_bytes) < len(best_bytes):
+                            best_bytes = candidate_bytes
+                            best_mime = "image/jpeg"
+                        if len(candidate_bytes) <= cls._MODEL_IMAGE_MAX_BYTES:
+                            return candidate_bytes, "image/jpeg"
+
+                return best_bytes, best_mime
+        except Exception:
+            return raw, mime
 
     def add_tool_result(
         self, messages: list[dict[str, Any]],
