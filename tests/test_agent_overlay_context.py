@@ -81,3 +81,31 @@ async def test_process_message_persists_overlay_context_before_failure(tmp_path)
     overlay = OverlayContext.from_metadata(session.metadata)
     assert overlay.system_overlay_root == str(overlay_root)
     assert overlay.system_overlay_bootstrap is True
+
+
+@pytest.mark.asyncio
+async def test_process_message_marks_tool_progress_in_outbound_metadata(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+
+    async def _fake_run_agent_loop(_messages, on_progress=None):
+        assert on_progress is not None
+        await on_progress('web_search("测试查询")', tool_hint=True)
+        return "done", [], []
+
+    loop._run_agent_loop = _fake_run_agent_loop  # type: ignore[method-assign]
+
+    msg = InboundMessage(
+        channel="feishu",
+        sender_id="ou_user_1",
+        chat_id="ou_user_1",
+        content="hello",
+    )
+
+    result = await loop._process_message(msg)
+
+    progress = await loop.bus.consume_outbound()
+    assert progress.metadata["_progress"] is True
+    assert progress.metadata["_tool_hint"] is True
+    assert progress.metadata["_is_tool_progress"] is True
+    assert result is not None
+    assert result.content == "done"

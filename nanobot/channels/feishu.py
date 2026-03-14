@@ -95,9 +95,7 @@ class FeishuChannel(BaseChannel):
     async def send(self, msg: OutboundMessage) -> None:
         metadata = dict(msg.metadata or {})
         if metadata.get("_progress"):
-            if await self._streaming.handle(msg):
-                return
-            await self._outbound.send(msg)
+            await self._streaming.handle(msg)
             return
 
         turn_id = str(metadata.get("turn_id") or "")

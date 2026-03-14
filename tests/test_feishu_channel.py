@@ -29,6 +29,18 @@ async def test_feishu_channel_routes_progress_to_streamer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feishu_channel_does_not_leak_progress_as_user_message_when_streamer_skips() -> None:
+    channel = _build_channel()
+    channel._streaming.handle = AsyncMock(return_value=False)
+    msg = OutboundMessage(channel="feishu", chat_id="ou_123", content="Thinking", metadata={"_progress": True, "turn_id": "turn-0"})
+
+    await FeishuChannel.send(channel, msg)
+
+    channel._streaming.handle.assert_awaited_once_with(msg)
+    channel._outbound.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_success() -> None:
     channel = _build_channel()
     channel._outbound.send = AsyncMock(return_value=True)

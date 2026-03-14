@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import PurePath
 from typing import Any, Callable
 
 from loguru import logger
@@ -38,6 +39,7 @@ class _PreparedTurn:
     chat_id: str
     reply_to: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    slow_feedback_task: asyncio.Task | None = None
 
 
 class FeishuCardStreamer:
@@ -53,11 +55,15 @@ class FeishuCardStreamer:
         scope: str = "dm",
         throttle_seconds: float = 0.5,
         sleep: Callable[[float], Any] | None = None,
+        notice_sleep: Callable[[float], Any] | None = None,
+        slow_notice_seconds: float = 5.0,
     ):
         self._client_getter = client_getter
         self.scope = scope
         self.throttle_seconds = throttle_seconds
         self._sleep = sleep or asyncio.sleep
+        self._notice_sleep = notice_sleep or asyncio.sleep
+        self.slow_notice_seconds = slow_notice_seconds
         self._states: dict[str, _StreamState] = {}
         self._prepared_turns: dict[str, _PreparedTurn] = {}
         self._disabled_turns: set[str] = set()
@@ -82,6 +88,7 @@ class FeishuCardStreamer:
             reply_to=reply_to,
             metadata=dict(meta),
         )
+        self._schedule_slow_feedback(turn_id)
         return True
 
     async def handle(self, msg: OutboundMessage) -> bool:
@@ -96,8 +103,12 @@ class FeishuCardStreamer:
         if not self._should_stream(metadata):
             return False
 
+        is_tool_progress = bool(metadata.get("_is_tool_progress"))
+
         state = self._states.get(turn_id)
         if state is None:
+            if not is_tool_progress:
+                return True
             state = await self._ensure_state(
                 turn_id=turn_id,
                 chat_id=msg.chat_id,
@@ -124,7 +135,9 @@ class FeishuCardStreamer:
 
     async def complete_turn(self, turn_id: str) -> bool:
         self._disabled_turns.discard(turn_id)
-        self._prepared_turns.pop(turn_id, None)
+        prepared = self._prepared_turns.pop(turn_id, None)
+        if prepared is not None:
+            await self._cancel_slow_feedback(prepared)
         state = self._states.pop(turn_id, None)
         if state is None:
             return False
@@ -138,11 +151,7 @@ class FeishuCardStreamer:
         if client is None:
             return False
 
-        payload = (
-            build_completed(state.entries)
-            if state.has_meaningful_entry
-            else build_minimal()
-        )
+        payload = build_completed(state.entries) if state.entries else build_minimal()
         ok = await self._patch_message(client, state.message_id, payload)
         if ok:
             state.completed = True
@@ -151,16 +160,23 @@ class FeishuCardStreamer:
     async def cleanup_turn(self, turn_id: str) -> bool:
         """Drop local turn state without marking completion."""
         self._disabled_turns.discard(turn_id)
-        self._prepared_turns.pop(turn_id, None)
+        prepared = self._prepared_turns.pop(turn_id, None)
+        if prepared is not None:
+            await self._cancel_slow_feedback(prepared)
         state = self._states.pop(turn_id, None)
         if state is None:
-            return False
+            return prepared is not None
         await self._cancel_flush(state)
         return True
 
     async def wait_for_idle(self) -> None:
         while True:
             tasks = [state.flush_task for state in self._states.values() if state.flush_task is not None]
+            tasks.extend(
+                prepared.slow_feedback_task
+                for prepared in self._prepared_turns.values()
+                if prepared.slow_feedback_task is not None
+            )
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -192,6 +208,8 @@ class FeishuCardStreamer:
                 metadata=dict(metadata),
             )
             self._prepared_turns[turn_id] = prepared
+        else:
+            await self._cancel_slow_feedback(prepared)
 
         client = self._client_getter()
         if client is None:
@@ -213,6 +231,62 @@ class FeishuCardStreamer:
         self._states[turn_id] = state
         self._prepared_turns.pop(turn_id, None)
         return state
+
+    def _schedule_slow_feedback(self, turn_id: str) -> None:
+        prepared = self._prepared_turns.get(turn_id)
+        if prepared is None:
+            return
+        task = prepared.slow_feedback_task
+        if task is not None and not task.done():
+            return
+
+        async def _run_feedback() -> None:
+            try:
+                await self._notice_sleep(self.slow_notice_seconds)
+                current = self._prepared_turns.get(turn_id)
+                if (
+                    current is None
+                    or turn_id in self._states
+                    or turn_id in self._disabled_turns
+                ):
+                    return
+                client = self._client_getter()
+                if client is None:
+                    return
+                message_id = await self._create_card(
+                    client,
+                    current.chat_id,
+                    current.reply_to,
+                    build_progress([self._INITIAL_ENTRY]),
+                )
+                if message_id:
+                    self._states[turn_id] = _StreamState(
+                        message_id=message_id,
+                        chat_id=current.chat_id,
+                        reply_to=current.reply_to,
+                        entries=[self._INITIAL_ENTRY],
+                    )
+                    self._prepared_turns.pop(turn_id, None)
+            except asyncio.CancelledError:
+                raise
+            finally:
+                current = self._prepared_turns.get(turn_id)
+                if current is not None:
+                    current.slow_feedback_task = None
+
+        prepared.slow_feedback_task = asyncio.create_task(_run_feedback())
+
+    async def _cancel_slow_feedback(self, prepared: _PreparedTurn) -> None:
+        task = prepared.slow_feedback_task
+        if task is None or task.done():
+            prepared.slow_feedback_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        prepared.slow_feedback_task = None
 
     def _should_stream(self, metadata: dict[str, Any]) -> bool:
         if self.scope == "off":
@@ -344,6 +418,9 @@ class FeishuCardStreamer:
 
     def _render_tool_hint(self, hint: str) -> str:
         name, arg = self._parse_tool_hint(hint)
+        specialized = self._render_specialized_tool_hint(name, arg)
+        if specialized:
+            return specialized
         if name in {"web_search", "web_fetch"}:
             prefix = "正在搜索网络"
         elif name in {"read_file", "list_dir"}:
@@ -359,6 +436,81 @@ class FeishuCardStreamer:
             return self._clip_entry(f"{prefix}：{name}")
         return self._clip_entry(f"{prefix}：{hint}")
 
+    def _render_specialized_tool_hint(self, name: str, arg: str) -> str | None:
+        if name == "read_file" and arg:
+            rendered = self._render_skill_file_hint(arg)
+            if rendered:
+                return rendered
+        if name == "list_dir" and arg:
+            rendered = self._render_skill_dir_hint(arg)
+            if rendered:
+                return rendered
+        if name == "exec" and arg:
+            rendered = self._render_skill_exec_hint(arg)
+            if rendered:
+                return rendered
+        return None
+
+    def _render_skill_file_hint(self, path: str) -> str | None:
+        normalized = path.strip()
+        if "nanobot/skills/feishu-workspace" not in normalized:
+            return None
+        if normalized.endswith("/README.md") or normalized.endswith("/SKILL.md"):
+            return "正在读取飞书工作台 skill 说明"
+        if normalized.endswith("/references/bitable.md"):
+            return "正在读取多维表格能力说明"
+        if normalized.endswith("/references/calendar.md"):
+            return "正在读取飞书日历能力说明"
+        if normalized.endswith("/references/docs.md"):
+            return "正在读取飞书文档能力说明"
+        filename = PurePath(normalized).name
+        if filename:
+            return self._clip_entry(f"正在读取 skill 文件：{filename}")
+        return None
+
+    def _render_skill_dir_hint(self, path: str) -> str | None:
+        normalized = path.strip()
+        if "nanobot/skills/feishu-workspace" not in normalized:
+            return None
+        if normalized.endswith("/scripts"):
+            return "正在查看飞书工作台 skill 脚本目录"
+        return "正在查看飞书工作台 skill 目录"
+
+    def _render_skill_exec_hint(self, command: str) -> str | None:
+        compact = " ".join(command.split())
+        if "nanobot/skills/feishu-workspace/scripts/" not in compact:
+            return None
+
+        if "/bitable.sh check" in compact:
+            return "正在检查多维表格能力"
+        if "/bitable.sh table list" in compact:
+            return "正在列出多维表格"
+        if "/bitable.sh view list" in compact:
+            return "正在列出多维表格视图"
+        if "/bitable.sh record list" in compact:
+            return "正在读取多维表格记录"
+        if "/bitable.sh record get" in compact:
+            return "正在读取多维表格记录详情"
+        if "/calendar.sh check" in compact:
+            return "正在检查飞书日历能力"
+        if "/calendar.sh event list" in compact:
+            return "正在列出日历事件"
+        if "/calendar.sh calendar list" in compact:
+            return "正在列出可访问日历"
+        if "/docs.sh check" in compact:
+            return "正在检查飞书文档能力"
+        if "/docs.sh doc read_text" in compact or "/docs.sh doc get" in compact:
+            return "正在读取飞书文档内容"
+        if "/docs.sh drive" in compact:
+            return "正在检查云空间文件"
+
+        script_name = ""
+        if "/scripts/" in compact:
+            script_name = compact.split("/scripts/", 1)[1].split(" ", 1)[0]
+        if script_name:
+            return self._clip_entry(f"正在执行 skill：{script_name}")
+        return "正在执行飞书工作台 skill"
+
     @classmethod
     def _parse_tool_hint(cls, hint: str) -> tuple[str, str]:
         if "(" not in hint or not hint.endswith(")") and "\", " not in hint:
@@ -370,7 +522,7 @@ class FeishuCardStreamer:
         arg = rest.rsplit(")", 1)[0].strip()
         if arg.startswith('"') and arg.endswith('"'):
             arg = arg[1:-1]
-        return name.strip(), cls._clip_entry(arg)
+        return name.strip(), arg
 
     @classmethod
     def _clip_entry(cls, text: str) -> str:

@@ -283,6 +283,28 @@ class FeishuClient:
             logger.error("Error patching Feishu {} message {}: {}", msg_type, message_id, e)
             return False
 
+    def delete_message_sync(self, message_id: str) -> bool:
+        """Delete an existing Feishu message."""
+        from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+        try:
+            request = DeleteMessageRequest.builder().message_id(message_id).build()
+            response = self.sdk_client.im.v1.message.delete(request)
+            if not response.success():
+                logger.error(
+                    "Failed to delete Feishu message {}: code={}, msg={}, log_id={}",
+                    message_id,
+                    response.code,
+                    response.msg,
+                    response.get_log_id(),
+                )
+                return False
+            logger.debug("Deleted Feishu message {}", message_id)
+            return True
+        except Exception as e:
+            logger.error("Error deleting Feishu message {}: {}", message_id, e)
+            return False
+
     def create_message_sync(
         self,
         receive_id_type: str,
