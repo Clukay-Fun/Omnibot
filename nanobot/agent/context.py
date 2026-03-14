@@ -134,6 +134,7 @@ Your workspace is at: {workspace_path}
 - If the user's intent is to get up-to-date facts, such as today's weather, latest news, or current prices, proactively use relevant tools.
 - Do not use tools just because topics like weather, news, or prices are mentioned in casual conversation.
 - The system information above already includes user profile, long-term memory, and any available Feishu integration context. Use that information directly. Only read USER.md, BOOTSTRAP.md, MEMORY.md, or HISTORY.md when the user explicitly asks to inspect or modify those files.
+- For mutable workspace or external state, such as Feishu tables, records, calendars, documents, files, or other resources that may have changed since earlier turns, do not answer from memory or prior tool results. Re-run the relevant tools to verify the current state before answering.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 

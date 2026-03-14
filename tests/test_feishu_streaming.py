@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import cast
 
@@ -16,26 +15,6 @@ class _Clock:
 
     async def sleep(self, delay: float) -> None:
         self.delays.append(delay)
-
-
-class _ManualSleep:
-    def __init__(self) -> None:
-        self.delays: list[float] = []
-        self._waiters: list[asyncio.Future[None]] = []
-
-    async def sleep(self, delay: float) -> None:
-        self.delays.append(delay)
-        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._waiters.append(fut)
-        await fut
-
-    async def release_next(self) -> None:
-        if not self._waiters:
-            return
-        waiter = self._waiters.pop(0)
-        if not waiter.done():
-            waiter.set_result(None)
-        await asyncio.sleep(0)
 
 
 class _FakeClient:
@@ -73,11 +52,6 @@ class _FakeClient:
 
 def _msg(content: str, **metadata) -> OutboundMessage:
     return OutboundMessage(channel="feishu", chat_id="ou_123", content=content, metadata=metadata)
-
-
-async def _drain_loop(turns: int = 3) -> None:
-    for _ in range(turns):
-        await asyncio.sleep(0)
 
 
 def _element_texts(payload: dict) -> list[str]:
@@ -162,14 +136,44 @@ async def test_streamer_first_tool_progress_patches_immediately() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streamer_non_tool_progress_does_not_create_card() -> None:
+async def test_streamer_accepts_legacy_tool_hint_without_is_tool_progress() -> None:
     client = _FakeClient()
-    notice_sleep = _ManualSleep()
     streamer = FeishuCardStreamer(
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
-        notice_sleep=notice_sleep.sleep,
+    )
+    await streamer.prepare_turn(
+        turn_id="turn-legacy-tool",
+        chat_id="ou_123",
+        metadata={"chat_type": "p2p"},
+        reply_to="om_source_legacy_tool",
+    )
+
+    handled = await streamer.handle(
+        _msg(
+            'exec("bash /Users/clukay/Program/ominibot/nanobot/skills/feishu-workspace/scripts/bitable.sh check")',
+            turn_id="turn-legacy-tool",
+            chat_type="p2p",
+            message_id="om_source_legacy_tool",
+            _progress=True,
+            _tool_hint=True,
+        )
+    )
+
+    assert handled is True
+    assert len(client.created) == 1
+    assert _element_texts(client.patched[-1][2])[-1] == "▏ 正在检查多维表格能力"
+    await streamer.cleanup_turn("turn-legacy-tool")
+
+
+@pytest.mark.asyncio
+async def test_streamer_non_tool_progress_does_not_create_card() -> None:
+    client = _FakeClient()
+    streamer = FeishuCardStreamer(
+        client_getter=lambda: cast(object, client),
+        scope="dm",
+        throttle_seconds=0.5,
     )
 
     await streamer.prepare_turn(
@@ -328,12 +332,10 @@ async def test_streamer_complete_turn_with_meaningful_entries_keeps_completed_ca
 @pytest.mark.asyncio
 async def test_streamer_complete_turn_without_any_feedback_is_noop() -> None:
     client = _FakeClient()
-    notice_sleep = _ManualSleep()
     streamer = FeishuCardStreamer(
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
-        notice_sleep=notice_sleep.sleep,
     )
     await streamer.prepare_turn(
         turn_id="turn-6",
@@ -350,58 +352,14 @@ async def test_streamer_complete_turn_without_any_feedback_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streamer_sends_delayed_thinking_card_for_slow_non_tool_turn() -> None:
-    client = _FakeClient()
-    clock = _Clock()
-    streamer = FeishuCardStreamer(
-        client_getter=lambda: cast(object, client),
-        scope="dm",
-        throttle_seconds=0.5,
-        notice_sleep=clock.sleep,
-    )
-
-    await streamer.prepare_turn(
-        turn_id="turn-notice",
-        chat_id="ou_123",
-        metadata={"chat_type": "p2p"},
-        reply_to="om_source_notice",
-    )
-    await _drain_loop()
-
-    assert clock.delays == [5.0]
-    assert client.created == [
-        (
-            "open_id",
-            "ou_123",
-            "interactive",
-            {
-                "config": {"wide_screen_mode": True},
-                "elements": [{"tag": "note", "elements": [{"tag": "plain_text", "content": "▏ 思考中…"}]}],
-            },
-            "om_source_notice",
-        )
-    ]
-    assert client.patched == []
-    assert await streamer.has_active_stream("turn-notice") is True
-
-    completed = await streamer.complete_turn("turn-notice")
-
-    assert completed is True
-    assert client.deleted == []
-    assert _element_texts(client.patched[-1][2])[-1] == "▏ 思考完成"
-
-
-@pytest.mark.asyncio
-async def test_streamer_tool_progress_before_delayed_card_creates_card_immediately() -> None:
+async def test_streamer_tool_progress_creates_card_immediately() -> None:
     client = _FakeClient()
     throttle_clock = _Clock()
-    notice_sleep = _ManualSleep()
     streamer = FeishuCardStreamer(
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
         sleep=throttle_clock.sleep,
-        notice_sleep=notice_sleep.sleep,
     )
 
     await streamer.prepare_turn(
@@ -429,14 +387,14 @@ async def test_streamer_tool_progress_before_delayed_card_creates_card_immediate
 
 
 @pytest.mark.asyncio
-async def test_streamer_appends_tool_progress_into_existing_delayed_thinking_card() -> None:
+async def test_streamer_appends_tool_progress_into_existing_thinking_card() -> None:
     client = _FakeClient()
     clock = _Clock()
     streamer = FeishuCardStreamer(
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
-        notice_sleep=clock.sleep,
+        sleep=clock.sleep,
     )
 
     await streamer.prepare_turn(
@@ -445,20 +403,17 @@ async def test_streamer_appends_tool_progress_into_existing_delayed_thinking_car
         metadata={"chat_type": "p2p"},
         reply_to="om_source_notice_then_tool",
     )
-    await _drain_loop()
-
-    assert client.created == [
-        (
-            "open_id",
-            "ou_123",
-            "interactive",
-            {
-                "config": {"wide_screen_mode": True},
-                "elements": [{"tag": "note", "elements": [{"tag": "plain_text", "content": "▏ 思考中…"}]}],
-            },
-            "om_source_notice_then_tool",
+    await streamer.handle(
+        _msg(
+            'read_file("/Users/clukay/Program/ominibot/nanobot/skills/feishu-workspace/SKILL.md")',
+            turn_id="turn-notice-then-tool",
+            chat_type="p2p",
+            message_id="om_source_notice_then_tool",
+            _progress=True,
+            _is_tool_progress=True,
+            _tool_hint=True,
         )
-    ]
+    )
 
     handled = await streamer.handle(
         _msg(
@@ -473,34 +428,10 @@ async def test_streamer_appends_tool_progress_into_existing_delayed_thinking_car
     )
 
     assert handled is True
+    await streamer.wait_for_idle()
     assert len(client.created) == 1
+    assert clock.delays == [pytest.approx(0.5, abs=0.01)]
     assert _element_texts(client.patched[-1][2])[-1] == "▏ 正在执行操作：pytest"
-
-
-@pytest.mark.asyncio
-async def test_streamer_slow_non_tool_turn_keeps_completed_card_without_delete() -> None:
-    client = _FakeClient()
-    clock = _Clock()
-    streamer = FeishuCardStreamer(
-        client_getter=lambda: cast(object, client),
-        scope="dm",
-        throttle_seconds=0.5,
-        notice_sleep=clock.sleep,
-    )
-
-    await streamer.prepare_turn(
-        turn_id="turn-slow-complete",
-        chat_id="ou_123",
-        metadata={"chat_type": "p2p"},
-        reply_to="om_source_slow_complete",
-    )
-    await _drain_loop()
-
-    completed = await streamer.complete_turn("turn-slow-complete")
-
-    assert completed is True
-    assert client.deleted == []
-    assert _element_texts(client.patched[-1][2])[-1] == "▏ 思考完成"
 
 
 @pytest.mark.asyncio

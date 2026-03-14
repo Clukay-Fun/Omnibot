@@ -60,6 +60,8 @@ def test_feishu_workspace_skill_is_valid_and_discoverable(tmp_path: Path) -> Non
     skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert 'bash "{baseDir}/scripts/bitable.sh"' in skill_md
     assert "tenant_access_token" in skill_md
+    assert "do not answer from prior conversation memory" in skill_md
+    assert "Always run a fresh list/get/read/check command" in skill_md
 
 
 def test_common_resolve_auth_prefers_env_token_and_import_failure_is_non_fatal(monkeypatch) -> None:

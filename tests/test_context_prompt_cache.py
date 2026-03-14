@@ -64,6 +64,7 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
     assert "Do not use tools just because topics like weather, news, or prices are mentioned in casual conversation." in prompt
     assert "The system information above already includes user profile, long-term memory, and any available Feishu integration context." in prompt
     assert "Only read USER.md, BOOTSTRAP.md, MEMORY.md, or HISTORY.md when the user explicitly asks to inspect or modify those files." in prompt
+    assert "For mutable workspace or external state, such as Feishu tables, records, calendars, documents, files, or other resources that may have changed since earlier turns, do not answer from memory or prior tool results." in prompt
     assert "On emoji-capable chat platforms" not in prompt
     assert "materially help answer the user's request" not in prompt
 

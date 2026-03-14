@@ -39,7 +39,6 @@ class _PreparedTurn:
     chat_id: str
     reply_to: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
-    slow_feedback_task: asyncio.Task | None = None
 
 
 class FeishuCardStreamer:
@@ -55,15 +54,11 @@ class FeishuCardStreamer:
         scope: str = "dm",
         throttle_seconds: float = 0.5,
         sleep: Callable[[float], Any] | None = None,
-        notice_sleep: Callable[[float], Any] | None = None,
-        slow_notice_seconds: float = 5.0,
     ):
         self._client_getter = client_getter
         self.scope = scope
         self.throttle_seconds = throttle_seconds
         self._sleep = sleep or asyncio.sleep
-        self._notice_sleep = notice_sleep or asyncio.sleep
-        self.slow_notice_seconds = slow_notice_seconds
         self._states: dict[str, _StreamState] = {}
         self._prepared_turns: dict[str, _PreparedTurn] = {}
         self._disabled_turns: set[str] = set()
@@ -88,7 +83,6 @@ class FeishuCardStreamer:
             reply_to=reply_to,
             metadata=dict(meta),
         )
-        self._schedule_slow_feedback(turn_id)
         return True
 
     async def handle(self, msg: OutboundMessage) -> bool:
@@ -103,7 +97,11 @@ class FeishuCardStreamer:
         if not self._should_stream(metadata):
             return False
 
-        is_tool_progress = bool(metadata.get("_is_tool_progress"))
+        is_tool_progress = bool(
+            metadata.get("_is_tool_progress")
+            if "_is_tool_progress" in metadata
+            else metadata.get("_tool_hint")
+        )
 
         state = self._states.get(turn_id)
         if state is None:
@@ -135,9 +133,7 @@ class FeishuCardStreamer:
 
     async def complete_turn(self, turn_id: str) -> bool:
         self._disabled_turns.discard(turn_id)
-        prepared = self._prepared_turns.pop(turn_id, None)
-        if prepared is not None:
-            await self._cancel_slow_feedback(prepared)
+        self._prepared_turns.pop(turn_id, None)
         state = self._states.pop(turn_id, None)
         if state is None:
             return False
@@ -161,8 +157,6 @@ class FeishuCardStreamer:
         """Drop local turn state without marking completion."""
         self._disabled_turns.discard(turn_id)
         prepared = self._prepared_turns.pop(turn_id, None)
-        if prepared is not None:
-            await self._cancel_slow_feedback(prepared)
         state = self._states.pop(turn_id, None)
         if state is None:
             return prepared is not None
@@ -172,11 +166,6 @@ class FeishuCardStreamer:
     async def wait_for_idle(self) -> None:
         while True:
             tasks = [state.flush_task for state in self._states.values() if state.flush_task is not None]
-            tasks.extend(
-                prepared.slow_feedback_task
-                for prepared in self._prepared_turns.values()
-                if prepared.slow_feedback_task is not None
-            )
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -208,8 +197,6 @@ class FeishuCardStreamer:
                 metadata=dict(metadata),
             )
             self._prepared_turns[turn_id] = prepared
-        else:
-            await self._cancel_slow_feedback(prepared)
 
         client = self._client_getter()
         if client is None:
@@ -231,62 +218,6 @@ class FeishuCardStreamer:
         self._states[turn_id] = state
         self._prepared_turns.pop(turn_id, None)
         return state
-
-    def _schedule_slow_feedback(self, turn_id: str) -> None:
-        prepared = self._prepared_turns.get(turn_id)
-        if prepared is None:
-            return
-        task = prepared.slow_feedback_task
-        if task is not None and not task.done():
-            return
-
-        async def _run_feedback() -> None:
-            try:
-                await self._notice_sleep(self.slow_notice_seconds)
-                current = self._prepared_turns.get(turn_id)
-                if (
-                    current is None
-                    or turn_id in self._states
-                    or turn_id in self._disabled_turns
-                ):
-                    return
-                client = self._client_getter()
-                if client is None:
-                    return
-                message_id = await self._create_card(
-                    client,
-                    current.chat_id,
-                    current.reply_to,
-                    build_progress([self._INITIAL_ENTRY]),
-                )
-                if message_id:
-                    self._states[turn_id] = _StreamState(
-                        message_id=message_id,
-                        chat_id=current.chat_id,
-                        reply_to=current.reply_to,
-                        entries=[self._INITIAL_ENTRY],
-                    )
-                    self._prepared_turns.pop(turn_id, None)
-            except asyncio.CancelledError:
-                raise
-            finally:
-                current = self._prepared_turns.get(turn_id)
-                if current is not None:
-                    current.slow_feedback_task = None
-
-        prepared.slow_feedback_task = asyncio.create_task(_run_feedback())
-
-    async def _cancel_slow_feedback(self, prepared: _PreparedTurn) -> None:
-        task = prepared.slow_feedback_task
-        if task is None or task.done():
-            prepared.slow_feedback_task = None
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        prepared.slow_feedback_task = None
 
     def _should_stream(self, metadata: dict[str, Any]) -> bool:
         if self.scope == "off":
@@ -343,6 +274,7 @@ class FeishuCardStreamer:
             return False
 
         payload = build_progress(state.entries)
+        logger.debug("Feishu thinking card patch for turn {}: {}", turn_id, state.entries)
         ok = await self._patch_message(client, state.message_id, payload)
         if ok:
             state.pending_patch = False

@@ -9,6 +9,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.overlay import OverlayContext
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.providers.base import ToolCallRequest
 from nanobot.session.manager import Session
 
 
@@ -109,3 +110,16 @@ async def test_process_message_marks_tool_progress_in_outbound_metadata(tmp_path
     assert progress.metadata["_is_tool_progress"] is True
     assert result is not None
     assert result.content == "done"
+
+
+def test_tool_hint_keeps_full_argument_for_downstream_progress_mapping(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    hint = loop._tool_hint([
+        ToolCallRequest(
+            id="call_1",
+            name="read_file",
+            arguments={"path": "/Users/clukay/Program/ominibot/nanobot/skills/feishu-workspace/references/bitable.md"},
+        )
+    ])
+
+    assert hint == 'read_file("/Users/clukay/Program/ominibot/nanobot/skills/feishu-workspace/references/bitable.md")'

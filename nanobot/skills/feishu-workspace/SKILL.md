@@ -27,6 +27,7 @@ bash "{baseDir}/scripts/docs.sh" ...
 - If the API returns a permission error, explain the boundary and stop. Do not keep retrying the same inaccessible target.
 - Deletion is entity-level only. Do not attempt container-level deletion such as removing an entire bitable app/table, calendar, or wiki space.
 - For docs, write operations are limited to appending plain-text paragraphs. Do not attempt rich block editing or full document replacement.
+- For any request about the current state of bitable tables, records, calendars, documents, wiki nodes, or drive files, do not answer from prior conversation memory. Always run a fresh list/get/read/check command to verify the current state before answering.
 
 ## Workflow
 
