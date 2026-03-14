@@ -16,6 +16,7 @@ from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 DEFAULT_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_ORIGINATOR = "nanobot"
+_HOSTED_WEB_SEARCH_TOOL = {"type": "web_search"}
 
 
 class OpenAICodexProvider(LLMProvider):
@@ -41,6 +42,7 @@ class OpenAICodexProvider(LLMProvider):
 
         token = await asyncio.to_thread(get_codex_token)
         headers = _build_headers(token.account_id, token.access)
+        request_tools, fallback_tools, hosted_web_search_enabled = _prepare_tools(tools)
 
         body: dict[str, Any] = {
             "model": _strip_model_prefix(model),
@@ -58,8 +60,8 @@ class OpenAICodexProvider(LLMProvider):
         if reasoning_effort:
             body["reasoning"] = {"effort": reasoning_effort}
 
-        if tools:
-            body["tools"] = _convert_tools(tools)
+        if request_tools:
+            body["tools"] = _convert_tools(request_tools)
 
         composition = _input_item_composition(input_items)
         body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
@@ -81,12 +83,22 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=True)
+                content, tool_calls, finish_reason = await _request_codex_with_ssl_fallback(url, headers, body)
             except Exception as e:
-                if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+                if not hosted_web_search_enabled:
                     raise
-                logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-                content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+                logger.warning(
+                    "Codex hosted web search request failed; retrying with local web_search fallback: {}",
+                    e,
+                )
+                fallback_body = dict(body)
+                if fallback_tools:
+                    fallback_body["tools"] = _convert_tools(fallback_tools)
+                else:
+                    fallback_body.pop("tools", None)
+                content, tool_calls, finish_reason = await _request_codex_with_ssl_fallback(
+                    url, headers, fallback_body
+                )
             _maybe_log_slow_request(
                 purpose=purpose,
                 model=body["model"],
@@ -150,10 +162,62 @@ async def _request_codex(
             return await _consume_sse(response)
 
 
+async def _request_codex_with_ssl_fallback(
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> tuple[str, list[ToolCallRequest], str]:
+    try:
+        return await _request_codex(url, headers, body, verify=True)
+    except Exception as e:
+        if "CERTIFICATE_VERIFY_FAILED" not in str(e):
+            raise
+        logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
+        return await _request_codex(url, headers, body, verify=False)
+
+
+def _prepare_tools(
+    tools: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None, bool]:
+    if not tools:
+        return None, None, False
+
+    fallback_tools = list(tools)
+    has_local_web_search = False
+    primary_tools: list[dict[str, Any]] = []
+
+    for tool in tools:
+        fn = (tool.get("function") or {}) if tool.get("type") == "function" else tool
+        if tool.get("type") == "function" and fn.get("name") == "web_search":
+            has_local_web_search = True
+            primary_tools.append(_mark_web_search_as_fallback(tool))
+        else:
+            primary_tools.append(tool)
+
+    if not has_local_web_search:
+        return fallback_tools, None, False
+
+    return [_HOSTED_WEB_SEARCH_TOOL, *primary_tools], fallback_tools, True
+
+
+def _mark_web_search_as_fallback(tool: dict[str, Any]) -> dict[str, Any]:
+    fn = dict(tool.get("function") or {})
+    desc = fn.get("description") or ""
+    fallback_desc = (
+        "Fallback DuckDuckGo web search. Use this only if the built-in web search tool is unavailable "
+        "or fails to answer the request."
+    )
+    fn["description"] = f"{desc} {fallback_desc}".strip() if desc else fallback_desc
+    return {**tool, "function": fn}
+
+
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert OpenAI function-calling schema to Codex flat format."""
     converted: list[dict[str, Any]] = []
     for tool in tools:
+        if tool.get("type") == "web_search":
+            converted.append(dict(tool))
+            continue
         fn = (tool.get("function") or {}) if tool.get("type") == "function" else tool
         name = fn.get("name")
         if not name:

@@ -68,7 +68,7 @@ def build_feishu_runtime(
     streaming = FeishuCardStreamer(
         client_getter=client_getter,
         scope=config.streaming_scope,
-        notice_delay_seconds=2.0,
+        throttle_seconds=config.stream_throttle_seconds,
     )
 
     handler = FeishuEventHandler(

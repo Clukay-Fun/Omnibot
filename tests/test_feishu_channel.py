@@ -32,7 +32,7 @@ async def test_feishu_channel_routes_progress_to_streamer() -> None:
 async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_success() -> None:
     channel = _build_channel()
     channel._outbound.send = AsyncMock(return_value=True)
-    channel._streaming.cleanup_turn = AsyncMock(return_value=True)
+    channel._streaming.complete_turn = AsyncMock(return_value=True)
     msg = OutboundMessage(
         channel="feishu",
         chat_id="ou_123",
@@ -47,7 +47,7 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
     assert delivered is not msg
     assert delivered.metadata["feishu_delivery"] == "reply_post"
     assert delivered.metadata["turn_id"] == "turn-2"
-    channel._streaming.cleanup_turn.assert_awaited_once_with("turn-2")
+    channel._streaming.complete_turn.assert_awaited_once_with("turn-2")
     channel._archive_service.kick_worker.assert_called_once_with()
 
 
@@ -55,7 +55,7 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
 async def test_feishu_channel_keeps_placeholder_when_final_send_fails() -> None:
     channel = _build_channel()
     channel._outbound.send = AsyncMock(return_value=False)
-    channel._streaming.cleanup_turn = AsyncMock(return_value=True)
+    channel._streaming.complete_turn = AsyncMock(return_value=True)
     msg = OutboundMessage(
         channel="feishu",
         chat_id="ou_123",
@@ -65,7 +65,7 @@ async def test_feishu_channel_keeps_placeholder_when_final_send_fails() -> None:
 
     await FeishuChannel.send(channel, msg)
 
-    channel._streaming.cleanup_turn.assert_not_awaited()
+    channel._streaming.complete_turn.assert_not_awaited()
     channel._archive_service.kick_worker.assert_not_called()
 
 
@@ -87,7 +87,7 @@ async def test_feishu_channel_final_without_archive_service_still_sends() -> Non
     channel = _build_channel()
     channel._archive_service = None
     channel._outbound.send = AsyncMock(return_value=True)
-    channel._streaming.cleanup_turn = AsyncMock(return_value=True)
+    channel._streaming.complete_turn = AsyncMock(return_value=True)
     msg = OutboundMessage(
         channel="feishu",
         chat_id="ou_123",
@@ -98,4 +98,4 @@ async def test_feishu_channel_final_without_archive_service_still_sends() -> Non
     await FeishuChannel.send(channel, msg)
 
     channel._outbound.send.assert_awaited_once()
-    channel._streaming.cleanup_turn.assert_awaited_once_with("turn-4")
+    channel._streaming.complete_turn.assert_awaited_once_with("turn-4")

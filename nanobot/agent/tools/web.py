@@ -2,7 +2,6 @@
 
 import html
 import json
-import os
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -45,7 +44,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using DuckDuckGo Instant Answer API."""
 
     name = "web_search"
     description = (
@@ -63,36 +62,32 @@ class WebSearchTool(Tool):
     }
 
     def __init__(self, api_key: str | None = None, max_results: int = 5, proxy: str | None = None):
+        # Keep api_key for backward-compatible construction from existing config,
+        # but DuckDuckGo Instant Answer does not require one.
         self._init_api_key = api_key
         self.max_results = max_results
         self.proxy = proxy
 
-    @property
-    def api_key(self) -> str:
-        """Resolve API key at call time so env/config changes are picked up."""
-        return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
-
     async def execute(self, query: str, count: int | None = None, **kwargs: Any) -> str:
-        if not self.api_key:
-            return (
-                "Error: Brave Search API key not configured. Set it in "
-                "~/.nanobot/config.json under tools.web.search.apiKey "
-                "(or export BRAVE_API_KEY), then restart the gateway."
-            )
-
         try:
             n = min(max(count or self.max_results, 1), 10)
             logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
             async with httpx.AsyncClient(proxy=self.proxy) as client:
                 r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
+                    "https://api.duckduckgo.com/",
+                    params={
+                        "q": query,
+                        "format": "json",
+                        "no_html": "1",
+                        "no_redirect": "1",
+                        "skip_disambig": "0",
+                    },
+                    headers={"Accept": "application/json"},
                     timeout=10.0
                 )
                 r.raise_for_status()
 
-            results = r.json().get("web", {}).get("results", [])[:n]
+            results = _extract_duckduckgo_results(r.json(), query, n)
             if not results:
                 return f"No results for: {query}"
 
@@ -108,6 +103,71 @@ class WebSearchTool(Tool):
         except Exception as e:
             logger.error("WebSearch error: {}", e)
             return f"Error: {e}"
+
+
+def _extract_duckduckgo_results(payload: dict[str, Any], query: str, limit: int) -> list[dict[str, str]]:
+    """Extract the most useful answer/topic results from DuckDuckGo Instant Answer."""
+    results: list[dict[str, str]] = []
+
+    def _append(title: str, url: str, description: str) -> None:
+        if len(results) >= limit:
+            return
+        title = (title or query).strip()
+        url = (url or "").strip()
+        description = (description or "").strip()
+        if not title and not description:
+            return
+        entry = {"title": title, "url": url, "description": description}
+        if entry not in results:
+            results.append(entry)
+
+    abstract = (payload.get("AbstractText") or "").strip()
+    abstract_url = (payload.get("AbstractURL") or "").strip()
+    heading = (payload.get("Heading") or query).strip()
+    answer = (payload.get("Answer") or "").strip()
+    answer_type = (payload.get("AnswerType") or "").strip()
+    definition = (payload.get("Definition") or "").strip()
+    definition_url = (payload.get("DefinitionURL") or "").strip()
+
+    if abstract:
+        _append(heading or query, abstract_url, abstract)
+    if answer:
+        _append(answer_type or heading or query, abstract_url, answer)
+    if definition:
+        _append(f"{heading or query} definition", definition_url or abstract_url, definition)
+
+    def _walk_related(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            if len(results) >= limit:
+                return
+            topics = item.get("Topics")
+            if isinstance(topics, list):
+                _walk_related(topics)
+                continue
+            text = (item.get("Text") or "").strip()
+            url = (item.get("FirstURL") or "").strip()
+            if not text:
+                continue
+            title, _, desc = text.partition(" - ")
+            _append(title or query, url, desc or text)
+
+    related_topics = payload.get("RelatedTopics")
+    if isinstance(related_topics, list):
+        _walk_related(related_topics)
+
+    results_section = payload.get("Results")
+    if isinstance(results_section, list):
+        for item in results_section:
+            if len(results) >= limit:
+                break
+            text = (item.get("Text") or "").strip()
+            url = (item.get("FirstURL") or "").strip()
+            if not text:
+                continue
+            title, _, desc = text.partition(" - ")
+            _append(title or query, url, desc or text)
+
+    return results[:limit]
 
 
 class WebFetchTool(Tool):
@@ -133,10 +193,22 @@ class WebFetchTool(Tool):
         self.max_chars = max_chars
         self.proxy = proxy
 
-    async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
+    async def execute(
+        self,
+        url: str,
+        extract_mode: str = "markdown",
+        max_chars_override: int | None = None,
+        **kwargs: Any,
+    ) -> str:
         from readability import Document
 
-        max_chars = maxChars or self.max_chars
+        # Keep backwards compatibility with tool-call schema aliases.
+        if "extractMode" in kwargs:
+            extract_mode = kwargs.pop("extractMode")
+        if "maxChars" in kwargs:
+            max_chars_override = kwargs.pop("maxChars")
+
+        max_chars = max_chars_override or self.max_chars
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
@@ -158,14 +230,15 @@ class WebFetchTool(Tool):
                 text, extractor = json.dumps(r.json(), indent=2, ensure_ascii=False), "json"
             elif "text/html" in ctype or r.text[:256].lower().startswith(("<!doctype", "<html")):
                 doc = Document(r.text)
-                content = self._to_markdown(doc.summary()) if extractMode == "markdown" else _strip_tags(doc.summary())
+                content = self._to_markdown(doc.summary()) if extract_mode == "markdown" else _strip_tags(doc.summary())
                 text = f"# {doc.title()}\n\n{content}" if doc.title() else content
                 extractor = "readability"
             else:
                 text, extractor = r.text, "raw"
 
             truncated = len(text) > max_chars
-            if truncated: text = text[:max_chars]
+            if truncated:
+                text = text[:max_chars]
 
             return json.dumps({"url": url, "finalUrl": str(r.url), "status": r.status_code,
                               "extractor": extractor, "truncated": truncated, "length": len(text), "text": text}, ensure_ascii=False)

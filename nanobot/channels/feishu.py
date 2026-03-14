@@ -113,7 +113,7 @@ class FeishuChannel(BaseChannel):
                 metadata=local_metadata,
             )
             if await self._outbound.send(delivery_msg):
-                await self._streaming.cleanup_turn(turn_id)
+                await self._streaming.complete_turn(turn_id)
                 if self._archive_service is not None:
                     self._archive_service.kick_worker()
             return

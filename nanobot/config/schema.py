@@ -295,7 +295,7 @@ class GatewayConfig(Base):
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
-    api_key: str = ""  # Brave Search API key
+    api_key: str = ""  # Legacy field; DuckDuckGo fallback does not require a key
     max_results: int = 5
 
 
