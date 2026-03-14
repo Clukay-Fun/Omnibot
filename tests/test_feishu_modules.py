@@ -21,6 +21,23 @@ def test_renderer_detects_text_and_interactive_content() -> None:
     assert FeishuRenderer.detect_msg_format("# Heading") == "interactive"
 
 
+def test_renderer_reply_post_prefers_post_and_preserves_links() -> None:
+    msg_type, payload = FeishuRenderer.render_reply_post("**加粗** [链接](https://example.com)")
+
+    assert msg_type == "post"
+    content = FeishuRenderer.markdown_to_plain_text("**加粗** [链接](https://example.com)")
+    assert content == "加粗 链接 (https://example.com)"
+    assert "\"href\": \"https://example.com\"" in payload
+
+
+def test_renderer_reply_post_emojizes_aliases() -> None:
+    msg_type, payload = FeishuRenderer.render_reply_post("你好 :wave: :sparkles:")
+
+    assert msg_type == "post"
+    assert "👋" in payload
+    assert "✨" in payload
+
+
 def test_renderer_splits_multiple_tables() -> None:
     chunks = FeishuRenderer.split_elements_by_table_limit([
         _md("intro"),

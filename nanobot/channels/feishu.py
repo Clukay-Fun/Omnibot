@@ -1,18 +1,20 @@
 """Thin Feishu channel shim that wires the Feishu pipeline into BaseChannel."""
 from __future__ import annotations
+
 import asyncio
 import importlib.util
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
 from loguru import logger
+
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig
 from nanobot.feishu.client import FeishuClient
-from nanobot.feishu.parser import _extract_post_content
-from nanobot.feishu.runtime import build_feishu_runtime
 from nanobot.feishu.router import FeishuEnvelope, FeishuRouter
+from nanobot.feishu.runtime import build_feishu_runtime
 from nanobot.feishu.security import FeishuWebhookSecurity
 from nanobot.feishu.webhook import FeishuWebhookServer
 from nanobot.feishu.websocket import FeishuWebSocketBridge
@@ -91,8 +93,29 @@ class FeishuChannel(BaseChannel):
         logger.info("Feishu bot stopped")
 
     async def send(self, msg: OutboundMessage) -> None:
-        if await self._streaming.handle(msg):
+        metadata = dict(msg.metadata or {})
+        if metadata.get("_progress"):
+            if await self._streaming.handle(msg):
+                return
+            await self._outbound.send(msg)
             return
+
+        turn_id = str(metadata.get("turn_id") or "")
+        if turn_id:
+            local_metadata = dict(metadata)
+            local_metadata["feishu_delivery"] = "reply_post"
+            delivery_msg = OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content=msg.content,
+                reply_to=msg.reply_to,
+                media=list(msg.media),
+                metadata=local_metadata,
+            )
+            if await self._outbound.send(delivery_msg):
+                await self._streaming.cleanup_turn(turn_id)
+            return
+
         await self._outbound.send(msg)
 
     def _on_message_sync(self, data: Any) -> None:
