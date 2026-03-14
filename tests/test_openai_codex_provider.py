@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+from nanobot.providers.openai_codex_provider import OpenAICodexProvider, _consume_sse
 
 
 def _messages() -> list[dict]:
@@ -51,7 +51,7 @@ async def test_codex_provider_prefers_hosted_web_search_before_local(monkeypatch
         lambda: SimpleNamespace(account_id="acct", access="token"),
     )
 
-    async def _fake_request(_url, _headers, body, verify):
+    async def _fake_request(_url, _headers, body, verify, progress_callback=None):
         request_bodies.append({"verify": verify, "body": body})
         return "ok", [], "stop"
 
@@ -78,7 +78,7 @@ async def test_codex_provider_falls_back_to_local_web_search_when_hosted_request
         lambda: SimpleNamespace(account_id="acct", access="token"),
     )
 
-    async def _fake_request(_url, _headers, body, verify):
+    async def _fake_request(_url, _headers, body, verify, progress_callback=None):
         request_bodies.append({"verify": verify, "body": body})
         if len(request_bodies) == 1:
             raise RuntimeError("HTTP 400: hosted web search unavailable")
@@ -101,3 +101,49 @@ async def test_codex_provider_falls_back_to_local_web_search_when_hosted_request
     second_tools = request_bodies[1]["body"]["tools"]
     assert any(tool.get("type") == "function" and tool.get("name") == "web_search" for tool in second_tools)
     assert all(tool.get("type") != "web_search" for tool in second_tools)
+
+
+class _FakeSSEHttpxResponse:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = lines
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+
+@pytest.mark.asyncio
+async def test_consume_sse_emits_progress_for_hosted_web_search() -> None:
+    events = [
+        'data: {"type":"response.output_item.added","item":{"id":"ws_1","type":"web_search_call","status":"in_progress"}}',
+        "",
+        'data: {"type":"response.web_search_call.searching","item_id":"ws_1"}',
+        "",
+        'data: {"type":"response.output_item.done","item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"北京市隆安（深圳）律师事务所 地址"}}}',
+        "",
+        'data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}',
+        "",
+        'data: {"type":"response.content_part.added","item_id":"msg_1","part":{"type":"output_text","text":""}}',
+        "",
+        'data: {"type":"response.output_text.delta","delta":"深圳市"}',
+        "",
+        'data: {"type":"response.completed","response":{"status":"completed"}}',
+        "",
+    ]
+    progress: list[tuple[str, bool]] = []
+
+    async def _progress_callback(content: str, *, tool_hint: bool = False) -> None:
+        progress.append((content, tool_hint))
+
+    content, tool_calls, finish_reason = await _consume_sse(
+        _FakeSSEHttpxResponse(events),
+        progress_callback=_progress_callback,
+    )
+
+    assert content == "深圳市"
+    assert tool_calls == []
+    assert finish_reason == "stop"
+    assert progress == [
+        ('web_search("联网查询")', True),
+        ('web_search("北京市隆安（深圳）律师事务所 地址")', True),
+    ]

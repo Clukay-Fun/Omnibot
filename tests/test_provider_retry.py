@@ -26,9 +26,11 @@ class CapturingProvider(LLMProvider):
     def __init__(self):
         super().__init__()
         self.purposes: list[str | None] = []
+        self.progress_callbacks: list[object | None] = []
 
     async def chat(self, *args, **kwargs) -> LLMResponse:
         self.purposes.append(kwargs.get("purpose"))
+        self.progress_callbacks.append(kwargs.get("progress_callback"))
         return LLMResponse(content="ok")
 
     def get_default_model(self) -> str:
@@ -116,3 +118,19 @@ async def test_chat_with_retry_forwards_purpose() -> None:
 
     assert response.content == "ok"
     assert provider.purposes == ["foreground_reply"]
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_forwards_progress_callback() -> None:
+    provider = CapturingProvider()
+
+    async def _progress(_content: str, *, tool_hint: bool = False) -> None:
+        return None
+
+    response = await provider.chat_with_retry(
+        messages=[{"role": "user", "content": "hello"}],
+        progress_callback=_progress,
+    )
+
+    assert response.content == "ok"
+    assert provider.progress_callbacks == [_progress]

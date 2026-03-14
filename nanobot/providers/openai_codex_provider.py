@@ -35,6 +35,7 @@ class OpenAICodexProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         purpose: str | None = None,
+        progress_callback: Any | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
@@ -83,7 +84,9 @@ class OpenAICodexProvider(LLMProvider):
 
         try:
             try:
-                content, tool_calls, finish_reason = await _request_codex_with_ssl_fallback(url, headers, body)
+                content, tool_calls, finish_reason = await _request_codex_with_ssl_fallback(
+                    url, headers, body, progress_callback=progress_callback
+                )
             except Exception as e:
                 if not hosted_web_search_enabled:
                     raise
@@ -97,7 +100,7 @@ class OpenAICodexProvider(LLMProvider):
                 else:
                     fallback_body.pop("tools", None)
                 content, tool_calls, finish_reason = await _request_codex_with_ssl_fallback(
-                    url, headers, fallback_body
+                    url, headers, fallback_body, progress_callback=progress_callback
                 )
             _maybe_log_slow_request(
                 purpose=purpose,
@@ -153,27 +156,29 @@ async def _request_codex(
     headers: dict[str, str],
     body: dict[str, Any],
     verify: bool,
+    progress_callback: Any | None = None,
 ) -> tuple[str, list[ToolCallRequest], str]:
     async with httpx.AsyncClient(timeout=60.0, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
             if response.status_code != 200:
                 text = await response.aread()
                 raise RuntimeError(_friendly_error(response.status_code, text.decode("utf-8", "ignore")))
-            return await _consume_sse(response)
+            return await _consume_sse(response, progress_callback=progress_callback)
 
 
 async def _request_codex_with_ssl_fallback(
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
+    progress_callback: Any | None = None,
 ) -> tuple[str, list[ToolCallRequest], str]:
     try:
-        return await _request_codex(url, headers, body, verify=True)
+        return await _request_codex(url, headers, body, verify=True, progress_callback=progress_callback)
     except Exception as e:
         if "CERTIFICATE_VERIFY_FAILED" not in str(e):
             raise
         logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
-        return await _request_codex(url, headers, body, verify=False)
+        return await _request_codex(url, headers, body, verify=False, progress_callback=progress_callback)
 
 
 def _prepare_tools(
@@ -397,10 +402,14 @@ async def _iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], 
         buffer.append(line)
 
 
-async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequest], str]:
+async def _consume_sse(
+    response: httpx.Response,
+    progress_callback: Any | None = None,
+) -> tuple[str, list[ToolCallRequest], str]:
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
+    hosted_search_queries: dict[str, str] = {}
     finish_reason = "stop"
 
     async for event in _iter_sse(response):
@@ -416,8 +425,13 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                     "name": item.get("name"),
                     "arguments": item.get("arguments") or "",
                 }
+            elif item.get("type") == "web_search_call":
+                hosted_search_queries[item.get("id") or ""] = ""
         elif event_type == "response.output_text.delta":
             content += event.get("delta") or ""
+        elif event_type == "response.web_search_call.searching":
+            if progress_callback:
+                await progress_callback('web_search("联网查询")', tool_hint=True)
         elif event_type == "response.function_call_arguments.delta":
             call_id = event.get("call_id")
             if call_id and call_id in tool_call_buffers:
@@ -445,6 +459,14 @@ async def _consume_sse(response: httpx.Response) -> tuple[str, list[ToolCallRequ
                         arguments=args,
                     )
                 )
+            elif item.get("type") == "web_search_call":
+                item_id = item.get("id") or ""
+                query = ((item.get("action") or {}).get("query") or "").strip()
+                if query:
+                    hosted_search_queries[item_id] = query
+                if progress_callback:
+                    display_query = hosted_search_queries.get(item_id) or "联网查询"
+                    await progress_callback(f'web_search("{display_query}")', tool_hint=True)
         elif event_type == "response.completed":
             status = (event.get("response") or {}).get("status")
             finish_reason = _map_finish_reason(status)

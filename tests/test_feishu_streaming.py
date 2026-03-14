@@ -49,7 +49,7 @@ def _msg(content: str, **metadata) -> OutboundMessage:
 
 
 @pytest.mark.asyncio
-async def test_streamer_prepare_turn_creates_initial_interactive_card() -> None:
+async def test_streamer_prepare_turn_only_registers_turn_without_creating_card() -> None:
     client = _FakeClient()
     clock = _Clock()
     streamer = FeishuCardStreamer(
@@ -67,17 +67,9 @@ async def test_streamer_prepare_turn_creates_initial_interactive_card() -> None:
     )
 
     assert prepared is True
-    assert client.created == [
-        (
-            "open_id",
-            "ou_123",
-            "interactive",
-            {"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": "…"}]},
-            "om_source_1",
-        )
-    ]
+    assert client.created == []
     assert client.patched == []
-    assert await streamer.has_active_stream("turn-1") is True
+    assert await streamer.has_active_stream("turn-1") is False
 
 
 @pytest.mark.asyncio
@@ -110,6 +102,15 @@ async def test_streamer_first_progress_patches_immediately() -> None:
 
     assert handled is True
     assert clock.delays == []
+    assert client.created == [
+        (
+            "open_id",
+            "ou_123",
+            "interactive",
+            {"config": {"wide_screen_mode": True}, "elements": [{"tag": "markdown", "content": "…"}]},
+            "om_source_2",
+        )
+    ]
     assert client.patched == [
         (
             "om_created_1",
@@ -258,11 +259,9 @@ async def test_streamer_complete_turn_without_meaningful_entries_uses_minimal_ca
 
     completed = await streamer.complete_turn("turn-6")
 
-    assert completed is True
-    assert client.patched[-1][2] == {
-        "config": {"wide_screen_mode": True},
-        "elements": [{"tag": "note", "elements": [{"tag": "plain_text", "content": "\u200b"}]}],
-    }
+    assert completed is False
+    assert client.created == []
+    assert client.patched == []
 
 
 @pytest.mark.asyncio
@@ -340,8 +339,9 @@ async def test_streamer_create_failure_disables_turn() -> None:
         )
     )
 
-    assert prepared is False
+    assert prepared is True
     assert handled is True
+    assert len(client.created) == 1
     assert client.patched == []
     assert await streamer.has_active_stream("turn-9") is False
 
@@ -361,7 +361,7 @@ async def test_streamer_can_prepare_new_turn_after_completion() -> None:
 
     assert prepared is True
     assert await streamer.has_active_stream("turn-a") is False
-    assert await streamer.has_active_stream("turn-b") is True
+    assert await streamer.has_active_stream("turn-b") is False
 
 
 @pytest.mark.asyncio
@@ -389,5 +389,5 @@ async def test_streamer_keeps_turns_isolated_for_fast_consecutive_messages() -> 
 
     assert await streamer.has_active_stream("turn-x") is False
     assert await streamer.has_active_stream("turn-y") is True
-    assert client.created[0][4] == "om_source_x"
-    assert client.created[1][4] == "om_source_y"
+    assert len(client.created) == 1
+    assert client.created[0][4] == "om_source_y"

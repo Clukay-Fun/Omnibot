@@ -33,6 +33,13 @@ class _StreamState:
     last_patch_at: float | None = None
 
 
+@dataclass
+class _PreparedTurn:
+    chat_id: str
+    reply_to: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 class FeishuCardStreamer:
     """Create and update Feishu interactive thinking cards for slow turns."""
 
@@ -52,6 +59,7 @@ class FeishuCardStreamer:
         self.throttle_seconds = throttle_seconds
         self._sleep = sleep or asyncio.sleep
         self._states: dict[str, _StreamState] = {}
+        self._prepared_turns: dict[str, _PreparedTurn] = {}
         self._disabled_turns: set[str] = set()
 
     async def prepare_turn(
@@ -63,25 +71,16 @@ class FeishuCardStreamer:
         reply_to: str | None = None,
     ) -> bool:
         if not turn_id or turn_id in self._states or turn_id in self._disabled_turns:
-            return turn_id in self._states
+            return turn_id in self._states or turn_id in self._prepared_turns
 
         meta = metadata or {}
         if not self._should_stream(meta):
             return False
 
-        client = self._client_getter()
-        if client is None:
-            return False
-
-        message_id = await self._create_card(client, chat_id, reply_to, build_initial())
-        if not message_id:
-            self._disabled_turns.add(turn_id)
-            return False
-
-        self._states[turn_id] = _StreamState(
-            message_id=message_id,
+        self._prepared_turns[turn_id] = _PreparedTurn(
             chat_id=chat_id,
             reply_to=reply_to,
+            metadata=dict(meta),
         )
         return True
 
@@ -99,20 +98,12 @@ class FeishuCardStreamer:
 
         state = self._states.get(turn_id)
         if state is None:
-            logger.warning(
-                "Feishu thinking card was not prepared for turn {}; falling back to on-demand creation",
-                turn_id,
-            )
-            prepared = await self.prepare_turn(
+            state = await self._ensure_state(
                 turn_id=turn_id,
                 chat_id=msg.chat_id,
                 metadata=metadata,
                 reply_to=self._reply_target(msg),
             )
-            if not prepared:
-                self._disabled_turns.add(turn_id)
-                return True
-            state = self._states.get(turn_id)
             if state is None:
                 return True
 
@@ -133,6 +124,7 @@ class FeishuCardStreamer:
 
     async def complete_turn(self, turn_id: str) -> bool:
         self._disabled_turns.discard(turn_id)
+        self._prepared_turns.pop(turn_id, None)
         state = self._states.pop(turn_id, None)
         if state is None:
             return False
@@ -159,6 +151,7 @@ class FeishuCardStreamer:
     async def cleanup_turn(self, turn_id: str) -> bool:
         """Drop local turn state without marking completion."""
         self._disabled_turns.discard(turn_id)
+        self._prepared_turns.pop(turn_id, None)
         state = self._states.pop(turn_id, None)
         if state is None:
             return False
@@ -174,6 +167,52 @@ class FeishuCardStreamer:
 
     async def has_active_stream(self, turn_id: str) -> bool:
         return turn_id in self._states
+
+    async def _ensure_state(
+        self,
+        *,
+        turn_id: str,
+        chat_id: str,
+        metadata: dict[str, Any],
+        reply_to: str | None,
+    ) -> _StreamState | None:
+        state = self._states.get(turn_id)
+        if state is not None:
+            return state
+
+        prepared = self._prepared_turns.get(turn_id)
+        if prepared is None:
+            logger.warning(
+                "Feishu thinking card was not prepared for turn {}; falling back to on-demand creation",
+                turn_id,
+            )
+            prepared = _PreparedTurn(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=dict(metadata),
+            )
+            self._prepared_turns[turn_id] = prepared
+
+        client = self._client_getter()
+        if client is None:
+            self._prepared_turns.pop(turn_id, None)
+            self._disabled_turns.add(turn_id)
+            return None
+
+        message_id = await self._create_card(client, prepared.chat_id, prepared.reply_to, build_initial())
+        if not message_id:
+            self._prepared_turns.pop(turn_id, None)
+            self._disabled_turns.add(turn_id)
+            return None
+
+        state = _StreamState(
+            message_id=message_id,
+            chat_id=prepared.chat_id,
+            reply_to=prepared.reply_to,
+        )
+        self._states[turn_id] = state
+        self._prepared_turns.pop(turn_id, None)
+        return state
 
     def _should_stream(self, metadata: dict[str, Any]) -> bool:
         if self.scope == "off":

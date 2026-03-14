@@ -201,6 +201,7 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
+                progress_callback=on_progress,
             )
 
             if response.has_tool_calls:

@@ -215,6 +215,7 @@ class LiteLLMProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         purpose: str | None = None,
+        progress_callback: Any | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
