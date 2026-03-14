@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,6 +12,7 @@ def _build_channel() -> FeishuChannel:
     channel = object.__new__(FeishuChannel)
     channel._streaming = AsyncMock()
     channel._outbound = AsyncMock()
+    channel._archive_service = MagicMock()
     return channel
 
 
@@ -47,6 +48,7 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
     assert delivered.metadata["feishu_delivery"] == "reply_post"
     assert delivered.metadata["turn_id"] == "turn-2"
     channel._streaming.cleanup_turn.assert_awaited_once_with("turn-2")
+    channel._archive_service.kick_worker.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -64,6 +66,7 @@ async def test_feishu_channel_keeps_placeholder_when_final_send_fails() -> None:
     await FeishuChannel.send(channel, msg)
 
     channel._streaming.cleanup_turn.assert_not_awaited()
+    channel._archive_service.kick_worker.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -76,3 +79,23 @@ async def test_feishu_channel_passes_non_turn_messages_through_unchanged() -> No
 
     channel._outbound.send.assert_awaited_once_with(msg)
     channel._streaming.cleanup_turn.assert_not_awaited()
+    channel._archive_service.kick_worker.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_feishu_channel_final_without_archive_service_still_sends() -> None:
+    channel = _build_channel()
+    channel._archive_service = None
+    channel._outbound.send = AsyncMock(return_value=True)
+    channel._streaming.cleanup_turn = AsyncMock(return_value=True)
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_123",
+        content="Final answer",
+        metadata={"turn_id": "turn-4", "message_id": "om_source_4"},
+    )
+
+    await FeishuChannel.send(channel, msg)
+
+    channel._outbound.send.assert_awaited_once()
+    channel._streaming.cleanup_turn.assert_awaited_once_with("turn-4")

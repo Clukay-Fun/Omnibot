@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -32,9 +33,11 @@ class OpenAICodexProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        purpose: str | None = None,
     ) -> LLMResponse:
         model = model or self.default_model
         system_prompt, input_items = _convert_messages(messages)
+        purpose = purpose or "unspecified"
 
         token = await asyncio.to_thread(get_codex_token)
         headers = _build_headers(token.account_id, token.access)
@@ -58,22 +61,23 @@ class OpenAICodexProvider(LLMProvider):
         if tools:
             body["tools"] = _convert_tools(tools)
 
-        image_count = sum(
-            1
-            for item in input_items
-            for content_item in (item.get("content") or [])
-            if content_item.get("type") == "input_image"
-        )
+        composition = _input_item_composition(input_items)
         body_bytes = len(json.dumps(body, ensure_ascii=False).encode("utf-8"))
         logger.debug(
-            "Codex request prepared: model={}, input_items={}, images={}, body_bytes={}",
+            "Codex request prepared: purpose={}, model={}, input_items={}, user_messages={}, assistant_messages={}, tool_call_items={}, tool_result_items={}, images={}, body_bytes={}",
+            purpose,
             body["model"],
             len(input_items),
-            image_count,
+            composition["user_messages"],
+            composition["assistant_messages"],
+            composition["tool_call_items"],
+            composition["tool_result_items"],
+            composition["images"],
             body_bytes,
         )
 
         url = DEFAULT_CODEX_URL
+        started_at = time.monotonic()
 
         try:
             try:
@@ -83,12 +87,28 @@ class OpenAICodexProvider(LLMProvider):
                     raise
                 logger.warning("SSL certificate verification failed for Codex API; retrying with verify=False")
                 content, tool_calls, finish_reason = await _request_codex(url, headers, body, verify=False)
+            _maybe_log_slow_request(
+                purpose=purpose,
+                model=body["model"],
+                input_items=len(input_items),
+                composition=composition,
+                body_bytes=body_bytes,
+                elapsed_seconds=time.monotonic() - started_at,
+            )
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
             )
         except Exception as e:
+            _maybe_log_slow_request(
+                purpose=purpose,
+                model=body["model"],
+                input_items=len(input_items),
+                composition=composition,
+                body_bytes=body_bytes,
+                elapsed_seconds=time.monotonic() - started_at,
+            )
             return LLMResponse(
                 content=f"Error calling Codex: {str(e)}",
                 finish_reason="error",
@@ -225,6 +245,58 @@ def _convert_user_message(content: Any) -> dict[str, Any]:
         if converted:
             return {"role": "user", "content": converted}
     return {"role": "user", "content": [{"type": "input_text", "text": ""}]}
+
+
+def _input_item_composition(input_items: list[dict[str, Any]]) -> dict[str, int]:
+    composition = {
+        "user_messages": 0,
+        "assistant_messages": 0,
+        "tool_call_items": 0,
+        "tool_result_items": 0,
+        "images": 0,
+    }
+    for item in input_items:
+        item_type = item.get("type")
+        role = item.get("role")
+        if role == "user":
+            composition["user_messages"] += 1
+            composition["images"] += sum(
+                1 for content_item in (item.get("content") or [])
+                if content_item.get("type") == "input_image"
+            )
+        elif item_type == "message" and role == "assistant":
+            composition["assistant_messages"] += 1
+        elif item_type == "function_call":
+            composition["tool_call_items"] += 1
+        elif item_type == "function_call_output":
+            composition["tool_result_items"] += 1
+    return composition
+
+
+def _maybe_log_slow_request(
+    *,
+    purpose: str,
+    model: str,
+    input_items: int,
+    composition: dict[str, int],
+    body_bytes: int,
+    elapsed_seconds: float,
+) -> None:
+    if elapsed_seconds < 5.0:
+        return
+    logger.warning(
+        "Codex slow request: purpose={}, model={}, elapsed_ms={}, input_items={}, user_messages={}, assistant_messages={}, tool_call_items={}, tool_result_items={}, images={}, body_bytes={}",
+        purpose,
+        model,
+        int(elapsed_seconds * 1000),
+        input_items,
+        composition["user_messages"],
+        composition["assistant_messages"],
+        composition["tool_call_items"],
+        composition["tool_result_items"],
+        composition["images"],
+        body_bytes,
+    )
 
 
 def _split_tool_call_id(tool_call_id: Any) -> tuple[str, str | None]:

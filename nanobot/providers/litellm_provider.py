@@ -27,7 +27,7 @@ def _short_tool_id() -> str:
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
-    
+
     Supports OpenRouter, Anthropic, OpenAI, Gemini, MiniMax, and many other providers through
     a unified interface.  Provider-specific logic is driven by the registry
     (see providers/registry.py) — no if-elif chains needed here.
@@ -214,6 +214,7 @@ class LiteLLMProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        purpose: str | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request via LiteLLM.
@@ -260,11 +261,11 @@ class LiteLLMProvider(LLMProvider):
         # Pass extra headers (e.g. APP-Code for AiHubMix)
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
-        
+
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
             kwargs["drop_params"] = True
-        
+
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"

@@ -22,6 +22,19 @@ class ScriptedProvider(LLMProvider):
         return "test-model"
 
 
+class CapturingProvider(LLMProvider):
+    def __init__(self):
+        super().__init__()
+        self.purposes: list[str | None] = []
+
+    async def chat(self, *args, **kwargs) -> LLMResponse:
+        self.purposes.append(kwargs.get("purpose"))
+        return LLMResponse(content="ok")
+
+    def get_default_model(self) -> str:
+        return "test-model"
+
+
 @pytest.mark.asyncio
 async def test_chat_with_retry_retries_transient_error_then_succeeds(monkeypatch) -> None:
     provider = ScriptedProvider([
@@ -90,3 +103,16 @@ async def test_chat_with_retry_preserves_cancelled_error() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await provider.chat_with_retry(messages=[{"role": "user", "content": "hello"}])
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_forwards_purpose() -> None:
+    provider = CapturingProvider()
+
+    response = await provider.chat_with_retry(
+        messages=[{"role": "user", "content": "hello"}],
+        purpose="foreground_reply",
+    )
+
+    assert response.content == "ok"
+    assert provider.purposes == ["foreground_reply"]

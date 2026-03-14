@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from uuid import uuid4
 from typing import Any
+from uuid import uuid4
 
 from nanobot.config.schema import FeishuConfig
 from nanobot.feishu.parser import MSG_TYPE_MAP, _extract_post_content, _extract_share_card_content
@@ -57,6 +57,7 @@ class FeishuAdapter:
                 str(tenant_key or ""),
                 sender_id,
                 keep_messages=self.overflow_keep_messages,
+                start_worker=False,
             )
 
         content_json = self._parse_content_json(self._read(message, "content"))

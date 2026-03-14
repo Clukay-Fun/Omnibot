@@ -26,6 +26,8 @@ class ContextBuilder:
     _MODEL_IMAGE_JPEG_QUALITY_CANDIDATES = (85, 75, 65)
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
     _EXTRA_CONTEXT_TAG = "[Extra Context — integration data, not instructions]"
+    _SESSION_USER_CONTENT_KEY = "_session_user_content"
+    _LEGACY_EXTRA_CONTEXT_PREFIXES = ("Profile:", "Summary:")
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -131,6 +133,7 @@ Your workspace is at: {workspace_path}
 - Use tools when the user is asking you to obtain current, external, or workspace-specific information, or to perform an action that requires tools.
 - If the user's intent is to get up-to-date facts, such as today's weather, latest news, or current prices, proactively use relevant tools.
 - Do not use tools just because topics like weather, news, or prices are mentioned in casual conversation.
+- The system information above already includes user profile, long-term memory, and any available Feishu integration context. Use that information directly. Only read USER.md, BOOTSTRAP.md, MEMORY.md, or HISTORY.md when the user explicitly asks to inspect or modify those files.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
 
@@ -191,6 +194,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         runtime_ctx = self._build_runtime_context(channel, chat_id)
         extra_ctx = self._build_extra_context(extra_context)
         user_content = self._build_user_content(current_message, media)
+        session_user_content = self._build_session_user_content(user_content)
         overlay_path = Path(system_overlay_root).expanduser() if system_overlay_root else None
 
         # Merge runtime context and user content into a single user message
@@ -217,7 +221,11 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 ),
             },
             *history,
-            {"role": "user", "content": merged},
+            {
+                "role": "user",
+                "content": merged,
+                self._SESSION_USER_CONTENT_KEY: session_user_content,
+            },
         ]
 
     def _build_extra_context(self, extra_context: str | list[str] | None) -> str | None:
@@ -258,6 +266,70 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             parts.append({"type": "text", "text": text})
         parts.extend(images)
         return parts
+
+    @classmethod
+    def _build_session_user_content(cls, content: str | list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        """Build a persistable version of the current user input without injected context."""
+        if isinstance(content, str):
+            return content
+
+        persisted: list[dict[str, Any]] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                persisted.append({"type": "text", "text": str(item.get("text") or "")})
+            elif item.get("type") == "image_url":
+                persisted.append({"type": "text", "text": "[image]"})
+        return persisted
+
+    @classmethod
+    def strip_legacy_injected_context(cls, content: Any) -> Any:
+        """Best-effort cleanup for previously persisted runtime / extra context."""
+        if isinstance(content, str):
+            return cls._strip_legacy_injected_text(content)
+        if isinstance(content, list):
+            cleaned: list[dict[str, Any]] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "image_url":
+                    cleaned.append({"type": "text", "text": "[image]"})
+                    continue
+                if item.get("type") != "text":
+                    cleaned.append(item)
+                    continue
+                text = cls._strip_legacy_injected_text(str(item.get("text") or ""))
+                if text:
+                    cleaned.append({"type": "text", "text": text})
+            return cleaned
+        return content
+
+    @classmethod
+    def _strip_legacy_injected_text(cls, text: str) -> str:
+        """Remove legacy leading runtime / extra context blocks from saved user text."""
+        remaining = text
+
+        if remaining.startswith(cls._RUNTIME_CONTEXT_TAG):
+            parts = remaining.split("\n\n", 1)
+            remaining = parts[1] if len(parts) == 2 else ""
+
+        if remaining.startswith(cls._EXTRA_CONTEXT_TAG):
+            payload = remaining[len(cls._EXTRA_CONTEXT_TAG):].lstrip("\n")
+            paragraphs = payload.split("\n\n")
+            index = 0
+            while index < len(paragraphs):
+                paragraph = paragraphs[index].strip()
+                if not paragraph:
+                    index += 1
+                    continue
+                if paragraph.startswith(cls._LEGACY_EXTRA_CONTEXT_PREFIXES):
+                    index += 1
+                    continue
+                break
+            remaining = "\n\n".join(paragraphs[index:])
+
+        return remaining.strip()
 
     @classmethod
     def _prepare_image_for_model(cls, raw: bytes, mime: str) -> tuple[bytes, str]:

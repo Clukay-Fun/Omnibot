@@ -17,8 +17,8 @@ def _make_loop(tmp_path):
     provider.get_default_model.return_value = "test-model"
     bus = MessageBus()
 
-    with patch("nanobot.agent.loop.SubagentManager") as MockSubMgr:
-        MockSubMgr.return_value.cancel_by_session = AsyncMock(return_value=0)
+    with patch("nanobot.agent.loop.SubagentManager") as mock_sub_mgr:
+        mock_sub_mgr.return_value.cancel_by_session = AsyncMock(return_value=0)
         loop = AgentLoop(bus=bus, provider=provider, workspace=tmp_path)
     return loop
 
@@ -37,10 +37,13 @@ async def test_consolidate_memory_uses_overlay_root_from_session_metadata(tmp_pa
 
     captured = {}
 
-    async def _fake_consolidate(self, _session, _provider, _model, *, archive_all=False, memory_window=50):
+    async def _fake_consolidate(
+        self, _session, _provider, _model, *, archive_all=False, memory_window=50, purpose=None
+    ):
         captured["memory_dir"] = self.memory_dir
         captured["archive_all"] = archive_all
         captured["memory_window"] = memory_window
+        captured["purpose"] = purpose
         return True
 
     with patch.object(MemoryStore, "consolidate", _fake_consolidate):
@@ -48,6 +51,7 @@ async def test_consolidate_memory_uses_overlay_root_from_session_metadata(tmp_pa
 
     assert result is True
     assert captured["memory_dir"] == overlay_root / "memory"
+    assert captured["purpose"] == "memory_consolidation"
 
 
 @pytest.mark.asyncio

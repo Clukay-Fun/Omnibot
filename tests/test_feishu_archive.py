@@ -99,3 +99,45 @@ async def test_overflow_archive_waits_for_next_message_before_requeue(tmp_path: 
     assert first is True
     assert second is False
     await service.wait_for_idle()
+
+
+@pytest.mark.asyncio
+async def test_overflow_archive_can_delay_worker_until_kicked(tmp_path: Path) -> None:
+    service, session_manager, memory_store, provider = _make_archive_service(tmp_path)
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call-1",
+                    name="save_feishu_user_memory",
+                    arguments={"profile": "likes tea", "summary": "archived later"},
+                )
+            ],
+        )
+    )
+
+    session = session_manager.get_or_create("feishu:dm:ou_user_1")
+    for i in range(8):
+        session.add_message("user" if i % 2 == 0 else "assistant", f"msg-{i}")
+    session_manager.save(session)
+
+    queued = await service.maybe_enqueue_overflow(
+        "feishu:dm:ou_user_1",
+        "tenant-1",
+        "ou_user_1",
+        keep_messages=4,
+        start_worker=False,
+    )
+
+    assert queued is True
+    provider.chat_with_retry.assert_not_awaited()
+    assert memory_store.count_snapshots("pending") == 1
+
+    service.kick_worker()
+    await service.wait_for_idle()
+
+    provider.chat_with_retry.assert_awaited_once()
+    record = memory_store.get("tenant-1", "ou_user_1")
+    assert record is not None
+    assert record.summary == "archived later"

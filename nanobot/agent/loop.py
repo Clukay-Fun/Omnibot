@@ -8,7 +8,7 @@ import re
 import weakref
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from loguru import logger
 
@@ -107,10 +107,12 @@ class AgentLoop:
         self._mcp_connected = False
         self._mcp_connecting = False
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
+        self._pending_consolidations: set[str] = set()  # Session keys queued to consolidate after reply
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._background_memory_lock = asyncio.Lock()
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -294,6 +296,7 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message under the session lock."""
+        should_schedule_background = False
         async with self._get_session_lock(msg.session_key):
             try:
                 response = await self._process_message(msg)
@@ -304,6 +307,7 @@ class AgentLoop:
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="", metadata=msg.metadata or {},
                     ))
+                should_schedule_background = True
             except asyncio.CancelledError:
                 logger.info("Task cancelled for session {}", msg.session_key)
                 raise
@@ -313,6 +317,8 @@ class AgentLoop:
                     channel=msg.channel, chat_id=msg.chat_id,
                     content="Sorry, I encountered an error.",
                 ))
+        if should_schedule_background:
+            self._schedule_pending_consolidation(msg.session_key)
 
     def _get_session_lock(self, session_key: str) -> asyncio.Lock:
         """Return a per-session lock so different sessions can run concurrently."""
@@ -383,6 +389,7 @@ class AgentLoop:
         cmd = msg.content.strip().lower()
         if cmd == "/new":
             lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+            self._pending_consolidations.discard(session.key)
             self._consolidating.add(session.key)
             try:
                 async with lock:
@@ -415,22 +422,12 @@ class AgentLoop:
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
 
         unconsolidated = len(session.messages) - session.last_consolidated
-        if (unconsolidated >= self.memory_window and session.key not in self._consolidating):
-            self._consolidating.add(session.key)
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
-
-            async def _consolidate_and_unlock():
-                try:
-                    async with lock:
-                        await self._consolidate_memory(session)
-                finally:
-                    self._consolidating.discard(session.key)
-                    _task = asyncio.current_task()
-                    if _task is not None:
-                        self._consolidation_tasks.discard(_task)
-
-            _task = asyncio.create_task(_consolidate_and_unlock())
-            self._consolidation_tasks.add(_task)
+        if (
+            unconsolidated >= self._consolidation_trigger_threshold
+            and session.key not in self._consolidating
+            and session.key not in self._pending_consolidations
+        ):
+            self._pending_consolidations.add(session.key)
 
         self._set_tool_context(msg.channel, msg.chat_id, metadata.get("message_id"))
         if message_tool := self.tools.get("message"):
@@ -489,6 +486,9 @@ class AgentLoop:
             if role == "tool" and isinstance(content, str) and len(content) > self._TOOL_RESULT_MAX_CHARS:
                 entry["content"] = content[:self._TOOL_RESULT_MAX_CHARS] + "\n... (truncated)"
             elif role == "user":
+                if ContextBuilder._SESSION_USER_CONTENT_KEY in entry:
+                    entry["content"] = entry.pop(ContextBuilder._SESSION_USER_CONTENT_KEY)
+                    content = entry["content"]
                 if isinstance(content, str) and content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
                     # Strip the runtime-context prefix, keep only the user text.
                     parts = content.split("\n\n", 1)
@@ -520,7 +520,39 @@ class AgentLoop:
         return await MemoryStore(memory_root).consolidate(
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
+            purpose="memory_consolidation",
         )
+
+    @property
+    def _consolidation_trigger_threshold(self) -> int:
+        return max(20, self.memory_window // 2)
+
+    def _schedule_pending_consolidation(self, session_key: str) -> None:
+        if session_key not in self._pending_consolidations or session_key in self._consolidating:
+            return
+
+        self._pending_consolidations.discard(session_key)
+        self._consolidating.add(session_key)
+        session_lock = self._consolidation_locks.setdefault(session_key, asyncio.Lock())
+
+        async def _run() -> None:
+            try:
+                async with self._background_memory_lock:
+                    async with session_lock:
+                        session = self.sessions.get_or_create(session_key)
+                        unconsolidated = len(session.messages) - session.last_consolidated
+                        if unconsolidated < self._consolidation_trigger_threshold:
+                            return
+                        await self._consolidate_memory(session)
+                        self.sessions.save(session)
+            finally:
+                self._consolidating.discard(session_key)
+                task = asyncio.current_task()
+                if task is not None:
+                    self._consolidation_tasks.discard(task)
+
+        task = asyncio.create_task(_run())
+        self._consolidation_tasks.add(task)
 
     async def process_direct(
         self,
@@ -542,4 +574,5 @@ class AgentLoop:
         )
         async with self._get_session_lock(session_key):
             response = await self._process_message(msg, session_key=session_key, on_progress=on_progress)
+        self._schedule_pending_consolidation(session_key)
         return response.content if response else ""

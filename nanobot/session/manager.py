@@ -45,6 +45,8 @@ class Session:
 
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
         """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        from nanobot.agent.context import ContextBuilder
+
         unconsolidated = self.messages[self.last_consolidated:]
         sliced = unconsolidated[-max_messages:]
 
@@ -56,7 +58,12 @@ class Session:
 
         out: list[dict[str, Any]] = []
         for m in sliced:
-            entry: dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+            content = m.get("content", "")
+            if m.get("role") == "user":
+                content = ContextBuilder.strip_legacy_injected_context(content)
+                if content in ("", [], None):
+                    continue
+            entry: dict[str, Any] = {"role": m["role"], "content": content}
             for k in ("tool_calls", "tool_call_id", "name"):
                 if k in m:
                     entry[k] = m[k]
@@ -115,6 +122,8 @@ class SessionManager:
 
     def _load(self, key: str) -> Session | None:
         """Load a session from disk."""
+        from nanobot.agent.context import ContextBuilder
+
         path = self._get_session_path(key)
         if not path.exists():
             legacy_path = self._get_legacy_session_path(key)
@@ -147,6 +156,10 @@ class SessionManager:
                         created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
                         last_consolidated = data.get("last_consolidated", 0)
                     else:
+                        if data.get("role") == "user":
+                            data["content"] = ContextBuilder.strip_legacy_injected_context(data.get("content", ""))
+                            if data["content"] in ("", [], None):
+                                continue
                         messages.append(data)
 
             return Session(
@@ -162,7 +175,19 @@ class SessionManager:
 
     def save(self, session: Session) -> None:
         """Save a session to disk."""
+        from nanobot.agent.context import ContextBuilder
+
         path = self._get_session_path(session.key)
+
+        normalized_messages = []
+        for msg in session.messages:
+            clean = dict(msg)
+            if clean.get("role") == "user":
+                clean["content"] = ContextBuilder.strip_legacy_injected_context(clean.get("content", ""))
+                if clean["content"] in ("", [], None):
+                    continue
+            normalized_messages.append(clean)
+        session.messages = normalized_messages
 
         with open(path, "w", encoding="utf-8") as f:
             metadata_line = {
@@ -174,7 +199,7 @@ class SessionManager:
                 "last_consolidated": session.last_consolidated
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
+            for msg in normalized_messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session

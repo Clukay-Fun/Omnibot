@@ -74,6 +74,7 @@ class MemoryStore:
         *,
         archive_all: bool = False,
         memory_window: int = 50,
+        purpose: str | None = None,
     ) -> bool:
         """Consolidate old messages into MEMORY.md + HISTORY.md via LLM tool call.
 
@@ -118,6 +119,7 @@ class MemoryStore:
                 ],
                 tools=_SAVE_MEMORY_TOOL,
                 model=model,
+                purpose=purpose,
             )
 
             if not response.has_tool_calls:

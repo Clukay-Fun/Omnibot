@@ -93,6 +93,7 @@ class FeishuMemoryArchiver:
                 tools=_SAVE_FEISHU_MEMORY_TOOL,
                 model=self.model,
                 temperature=0.0,
+                purpose="feishu_archive",
             )
         except Exception:
             logger.exception("Feishu memory archive call failed")
@@ -165,6 +166,7 @@ class FeishuAsyncArchiveService:
         user_open_id: str,
         *,
         keep_messages: int,
+        start_worker: bool = True,
     ) -> bool:
         if keep_messages <= 0:
             return False
@@ -194,7 +196,8 @@ class FeishuAsyncArchiveService:
         session.metadata[FEISHU_ARCHIVE_PENDING_UNTIL_KEY] = overflow_end
         session.updated_at = datetime.now()
         self.session_manager.save(session)
-        self._ensure_worker()
+        if start_worker:
+            self._ensure_worker()
         return True
 
     async def wait_for_idle(self) -> None:
@@ -207,6 +210,11 @@ class FeishuAsyncArchiveService:
     def resume_pending(self) -> None:
         """Resume any persisted pending snapshots after process restart."""
         self.memory_store.reset_running_snapshots()
+        if self.memory_store.count_snapshots("pending") > 0:
+            self._ensure_worker()
+
+    def kick_worker(self) -> None:
+        """Best-effort trigger for draining pending snapshots."""
         if self.memory_store.count_snapshots("pending") > 0:
             self._ensure_worker()
 

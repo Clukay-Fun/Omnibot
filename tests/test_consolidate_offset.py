@@ -1,10 +1,11 @@
 """Test session management with cache-friendly message handling."""
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from pathlib import Path
+
 from nanobot.session.manager import Session, SessionManager
 
 # Test constants
@@ -484,8 +485,88 @@ class TestConsolidationDeduplicationGuard:
     """Test that consolidation tasks are deduplicated and serialized."""
 
     @pytest.mark.asyncio
+    async def test_process_message_registers_consolidation_at_half_window_threshold(
+        self, tmp_path: Path
+    ) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=100
+        )
+
+        loop.provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        below = loop.sessions.get_or_create("cli:below")
+        for i in range(49):
+            below.add_message("user", f"msg{i}")
+        loop.sessions.save(below)
+
+        msg_below = InboundMessage(channel="cli", sender_id="user", chat_id="below", content="hello")
+        await loop._process_message(msg_below)
+        assert "cli:below" not in loop._pending_consolidations
+
+        at_threshold = loop.sessions.get_or_create("cli:at")
+        for i in range(50):
+            at_threshold.add_message("user", f"msg{i}")
+        loop.sessions.save(at_threshold)
+
+        msg_at = InboundMessage(channel="cli", sender_id="user", chat_id="at", content="hello")
+        await loop._process_message(msg_at)
+
+        assert loop._consolidation_trigger_threshold == 50
+        assert "cli:at" in loop._pending_consolidations
+
+    @pytest.mark.asyncio
+    async def test_process_message_only_registers_background_consolidation(
+        self, tmp_path: Path
+    ) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.events import InboundMessage
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        loop.provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+        loop.tools.get_definitions = MagicMock(return_value=[])
+
+        session = loop.sessions.get_or_create("cli:test")
+        for i in range(15):
+            session.add_message("user", f"msg{i}")
+            session.add_message("assistant", f"resp{i}")
+        loop.sessions.save(session)
+
+        started = asyncio.Event()
+
+        async def _fake_consolidate(_session, archive_all: bool = False) -> None:
+            started.set()
+
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+
+        msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
+        await loop._process_message(msg)
+
+        assert not started.is_set()
+        assert "cli:test" in loop._pending_consolidations
+
+        loop._schedule_pending_consolidation("cli:test")
+        await started.wait()
+
+    @pytest.mark.asyncio
     async def test_consolidation_guard_prevents_duplicate_tasks(self, tmp_path: Path) -> None:
-        """Concurrent messages above memory_window spawn only one consolidation task."""
+        """Sequential replies above threshold enqueue only one background consolidation."""
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
@@ -517,8 +598,8 @@ class TestConsolidationDeduplicationGuard:
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
-        await loop._process_message(msg)
-        await loop._process_message(msg)
+        await loop._dispatch(msg)
+        await loop._dispatch(msg)
         await asyncio.sleep(0.1)
 
         assert consolidation_calls == 1, (
@@ -554,19 +635,22 @@ class TestConsolidationDeduplicationGuard:
         consolidation_calls = 0
         active = 0
         max_active = 0
+        started = asyncio.Event()
 
         async def _fake_consolidate(_session, archive_all: bool = False) -> None:
             nonlocal consolidation_calls, active, max_active
             consolidation_calls += 1
             active += 1
             max_active = max(max_active, active)
+            started.set()
             await asyncio.sleep(0.05)
             active -= 1
 
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
-        await loop._process_message(msg)
+        await loop._dispatch(msg)
+        await started.wait()
 
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
         await loop._process_message(new_msg)
@@ -612,7 +696,7 @@ class TestConsolidationDeduplicationGuard:
         loop._consolidate_memory = _slow_consolidate  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
-        await loop._process_message(msg)
+        await loop._dispatch(msg)
 
         await started.wait()
         assert len(loop._consolidation_tasks) == 1, "Task must be referenced while in-flight"
@@ -664,7 +748,7 @@ class TestConsolidationDeduplicationGuard:
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
-        await loop._process_message(msg)
+        await loop._dispatch(msg)
         await started.wait()
 
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
@@ -768,7 +852,7 @@ class TestConsolidationDeduplicationGuard:
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
-        await loop._process_message(msg)
+        await loop._dispatch(msg)
         await started.wait()
 
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
