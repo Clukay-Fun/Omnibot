@@ -148,16 +148,34 @@ nanobot gateway -v
 模板文件在：
 
 - [deploy/systemd/nanobot-gateway.service.example](../deploy/systemd/nanobot-gateway.service.example)
+- [deploy/scripts/install-systemd-service.sh](../deploy/scripts/install-systemd-service.sh)
 
 使用方式：
 
-1. 复制到 `/etc/systemd/system/nanobot-gateway.service`
-2. 按你的实际路径修改 `User`、`WorkingDirectory`、`ExecStart`
+1. 先运行预检：
+
+```bash
+bash deploy/scripts/preflight-feishu.sh /opt/ominibot /home/nanobot/.nanobot/config.json
+```
+
+2. 用安装脚本生成并注册 service。
+
+如果你采用推荐路径：
+
+- 运行用户：`nanobot`
+- 项目目录：`/opt/ominibot`
+- 用户目录：`/home/nanobot`
+
+可以直接执行：
+
+```bash
+sudo SERVICE_USER=nanobot APP_DIR=/opt/ominibot HOME_DIR=/home/nanobot \
+  bash /opt/ominibot/deploy/scripts/install-systemd-service.sh
+```
+
 3. 启用并启动：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable nanobot-gateway
 sudo systemctl start nanobot-gateway
 sudo systemctl status nanobot-gateway
 ```
@@ -256,3 +274,7 @@ docker compose -f docker-compose.feishu.yml logs -f
 - 已经决定如何备份 `~/.nanobot/`
 
 如果你照这个顺序来，第一次上线会稳很多。
+
+如果你想按清单逐项执行，可以直接看：
+
+- [docs/SERVER_DEPLOY_CHECKLIST.md](./SERVER_DEPLOY_CHECKLIST.md)
