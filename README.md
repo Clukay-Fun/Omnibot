@@ -1,25 +1,23 @@
-<div align="center">
-  <h1>Ominibot: 全能飞书专属智能体</h1>
-  <p>
-    <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
-    <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-  </p>
-</div>
+# Ominibot
 
-🐈 **Ominibot** 是一款深度定制的高级私域 AI 守护程序。它是为了在 **Feishu (飞书)** 生态中提供企业级、高度拟人化服务而从原版极简架构中独立演进出的专属形态。
+Ominibot 是一个以飞书为主的个人 AI 助手运行时。当前仓库已经包含：
 
-在保持核心引擎极致轻量化的同时，Ominibot 针对飞书渠道提供了完善的原生支持。它原生覆盖飞书长连接（WebSocket）及反向代理网关接入，配合创新的 `BOOTSTRAP.md` 破冰设定协议，为您打造一位带有真实记忆、可持续进化的全能办公伙伴。
+- Feishu 私聊 / 群聊接入
+- per-user workspace 和记忆
+- Thinking card + 正文分离的飞书回复体验
+- Feishu workspace skill（多维表格 / 日历 / 文档 / Wiki / Drive）
 
-## 🎯 飞书专项核心特性
+如果你准备第一次把它部署到服务器，建议先按“单渠道、单模型、WebSocket”这条最小路径跑通，不要一开始就同时启用 webhook、群聊、多个 provider 或其他渠道。
 
-- **极致的飞书原生体验**：全面支持飞书私聊、群聊环境，支持流式富文本消息（打字机效果呈现思考过程与卡片动态更新），并可基于群聊和单人严格隔离上下文环境。
-- **状态化记忆闭环**：通过 `SOUL.md`、`USER.md` 和自动生成的 `MEMORY.md` 日常日志文件，机器人能记住与你每一次的飞书会话细节，甚至通过观察主动将关键信息沉淀为长期知识。
-- **离线沙盒指令与心跳轮询**：脱离单纯的被动回答，支持定时读取 `HEARTBEAT.md` 扫描心跳任务，配合系统的 cron 事件流，实现跨飞书聊天框的定时播报、后台监控和主动行动。
-- **极简强悍的模型对接**：提供 `nanobot provider login openai-codex` 一键式 OAuth 授权，快速绑定最强代码与逻辑能力基座。
+## 环境要求
 
-## 📦 安装与部署
+- Python `>=3.11`
+- 推荐 Linux 服务器：Ubuntu 22.04 / 24.04
+- 首次部署建议使用非 root 用户运行
 
-**从源码安装 (推荐用于进阶配置)**
+## 安装
+
+### 从源码安装
 
 ```bash
 git clone <your-ominibot-repo-url>
@@ -27,36 +25,41 @@ cd ominibot
 pip install -e .
 ```
 
-## 🚀 飞书部署快速指南
-
-### 1. 首次初始化体验
-
-在新环境中启动，系统会自动生成 `BOOTSTRAP.md` 初始化向导。
+### 初始化配置和工作区
 
 ```bash
 nanobot onboard
 ```
-*在你的飞书对话框或终端中，按照向导完成对专属机器人的初始“性格捏脸”和系统认知赋值。*
 
-### 2. 高级引擎配置接入
+这个命令会创建：
 
-如果你拥有 OpenAI Codex 会员，可以直接通过命令行快速打通认证：
+- `~/.nanobot/config.json`
+- `~/.nanobot/workspace`
 
-```bash
-nanobot provider login openai-codex
-```
+并把缺失的模板文件同步到工作区。
 
-配置你的核心引擎参数档 (位于 `~/.nanobot/config.json`)，着重于飞书节点：
+## 最小飞书配置
+
+第一次部署建议只开飞书 `websocket` 模式。
 
 ```json
 {
+  "agents": {
+    "defaults": {
+      "workspace": "~/.nanobot/workspace",
+      "model": "gpt-5.2-codex",
+      "memoryWindow": 100
+    }
+  },
   "channels": {
     "sendProgress": true,
+    "sendToolHints": true,
     "feishu": {
       "enabled": true,
       "mode": "websocket",
-      "appId": "cli_a920xxx",
-      "appSecret": "VgP1uMOexxx",
+      "appId": "cli_xxx",
+      "appSecret": "xxx",
+      "allowFrom": ["*"],
       "groupSessionMode": "shared",
       "streamingScope": "dm",
       "streamThrottleSeconds": 0.5
@@ -65,19 +68,43 @@ nanobot provider login openai-codex
 }
 ```
 
-### 3. 开启守护运行
+说明：
+
+- 第一次接入时，`allowFrom` 可以先用 `["*"]` 跑通；确认自己的 `open_id` 后再收紧。
+- 如果你希望飞书里出现工具过程卡片，`sendProgress` 和 `sendToolHints` 建议同时开启。
+- `websocket` 模式不依赖公网回调地址，最适合第一次部署。
+
+## 启动
 
 ```bash
 nanobot gateway
 ```
 
-就是这么简单！你的飞书专属智能体已经在后台静默运行了。
+建议第一次先前台跑，确认日志和飞书收发都正常；跑通之后再交给 `systemd` 或 Docker 托管。
 
-## 📚 详细文档
+## 部署文档
 
-- 📖 **生产级飞书部署方案** (涵盖 Webhook 混合模式与安全性探讨)，请详阅 [FEISHU_DEPLOYMENT.md](./docs/FEISHU_DEPLOYMENT.md)。
-- 🤖 **关于 Agent 的自我修养**：对于想要深入调教 Ominibot 工作边界、语气人设的高玩，请直接修改位于工作空间（默认 `~/.nanobot/` 等路径）下的 `AGENTS.md` 和 `SOUL.md` 文件。
+- 飞书部署与冒烟测试：[docs/FEISHU_DEPLOYMENT.md](./docs/FEISHU_DEPLOYMENT.md)
+- `systemd` 服务模板：[deploy/systemd/nanobot-gateway.service.example](./deploy/systemd/nanobot-gateway.service.example)
 
----
+## 持久化目录
 
-*“你不是简单的企业内部聊天机器人。你在飞书里，正成长为具体生活和工作的守护者。” —— Ominibot 灵魂手册*
+部署时一定要持久化整个 `~/.nanobot/` 目录。这里面包含：
+
+- `config.json`
+- `workspace/`
+- `sessions/`
+- `logs/`
+- `media/`
+
+如果你用 Docker，请把这个目录挂载出来；如果你直接在服务器上跑，请把它纳入备份。
+
+## 当前最适合的新手上线方式
+
+1. 只启用 Feishu
+2. 只启用一个 provider / 一个模型
+3. 使用 `websocket`
+4. 先前台运行 `nanobot gateway`
+5. 确认飞书私聊可以收发后，再切到 `systemd`
+
+这样最容易排错，也最不容易在第一天把状态目录、端口和权限一起搞乱。

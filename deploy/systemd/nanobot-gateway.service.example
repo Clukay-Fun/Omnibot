@@ -1,0 +1,21 @@
+[Unit]
+Description=Nanobot Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nanobot
+Group=nanobot
+WorkingDirectory=/opt/ominibot
+Environment=HOME=/home/nanobot
+ExecStart=/opt/ominibot/.venv/bin/nanobot gateway --config /home/nanobot/.nanobot/config.json
+Restart=always
+RestartSec=5
+
+# Adjust these if your model/provider usage is heavier.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
