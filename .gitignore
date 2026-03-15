@@ -7,6 +7,9 @@ build/
 docs/
 !docs/
 docs/*
+!docs/FEISHU_CONFIG_GUIDE.md
+!docs/FEISHU_DEPLOYMENT.md
+!docs/SERVER_DEPLOY_CHECKLIST.md
 !docs/plans/
 docs/plans/*
 !docs/plans/2026-03-15-feishu-workspace-skill-design.md

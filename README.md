@@ -86,10 +86,13 @@ nanobot gateway
 
 - 飞书部署与冒烟测试：[docs/FEISHU_DEPLOYMENT.md](./docs/FEISHU_DEPLOYMENT.md)
 - 飞书配置字段说明：[docs/FEISHU_CONFIG_GUIDE.md](./docs/FEISHU_CONFIG_GUIDE.md)
+- 服务器部署检查清单：[docs/SERVER_DEPLOY_CHECKLIST.md](./docs/SERVER_DEPLOY_CHECKLIST.md)
 - 最小配置示例：[deploy/examples/config.feishu-websocket.min.json.example](./deploy/examples/config.feishu-websocket.min.json.example)
 - Feishu-only Dockerfile：[Dockerfile.feishu](./Dockerfile.feishu)
 - Feishu-only Compose 示例：[docker-compose.feishu.yml](./docker-compose.feishu.yml)
 - `systemd` 服务模板：[deploy/systemd/nanobot-gateway.service.example](./deploy/systemd/nanobot-gateway.service.example)
+- 预检脚本：[deploy/scripts/preflight-feishu.sh](./deploy/scripts/preflight-feishu.sh)
+- `systemd` 安装脚本：[deploy/scripts/install-systemd-service.sh](./deploy/scripts/install-systemd-service.sh)
 
 ## 持久化目录
 
