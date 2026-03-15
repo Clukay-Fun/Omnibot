@@ -1,0 +1,22 @@
+services:
+  nanobot-gateway:
+    container_name: nanobot-feishu-gateway
+    build:
+      context: .
+      dockerfile: Dockerfile.feishu
+    command: ["gateway"]
+    restart: unless-stopped
+    volumes:
+      - ~/.nanobot:/root/.nanobot
+
+  nanobot-cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.feishu
+    profiles:
+      - cli
+    command: ["status"]
+    volumes:
+      - ~/.nanobot:/root/.nanobot
+    stdin_open: true
+    tty: true

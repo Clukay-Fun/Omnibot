@@ -84,6 +84,10 @@ nanobot onboard
 }
 ```
 
+如果你想直接从现成模板开始填，可以复制：
+
+- [deploy/examples/config.feishu-websocket.min.json.example](../deploy/examples/config.feishu-websocket.min.json.example)
+
 关键说明：
 
 - `mode = websocket`
@@ -175,6 +179,32 @@ journalctl -u nanobot-gateway -f
 如果你已经熟悉 Docker，可以继续用；如果你是第一次上服务器，先把源码版跑通更稳。
 
 另外，若你只使用 Feishu `websocket` 模式，通常不需要把 `18790` 端口暴露到公网。
+
+如果你确实想直接用 Docker，建议优先使用这套 Feishu-only 示例，而不是当前全量镜像：
+
+- [Dockerfile.feishu](../Dockerfile.feishu)
+- [docker-compose.feishu.yml](../docker-compose.feishu.yml)
+
+这套示例的设计目标是：
+
+- 不构建 WhatsApp bridge
+- 不安装 Node
+- 不默认暴露 `18790`
+- 只保留 Feishu `websocket` 最小运行路径
+
+启动方式：
+
+```bash
+docker compose -f docker-compose.feishu.yml up -d --build
+```
+
+查看日志：
+
+```bash
+docker compose -f docker-compose.feishu.yml logs -f
+```
+
+如果后面你要改成 `webhook` 或 `hybrid`，再单独补端口映射和公网入口，不要在第一次部署时一并处理。
 
 ## 10. 持久化和备份
 
