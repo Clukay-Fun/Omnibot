@@ -1,47 +1,49 @@
 # Bitable Reference
 
-## 最小权限
+## 最小权限 Scope
 
-根据飞书开放平台当前文档文案，至少需要开通以下多维表格权限：
+根据飞书开放平台当前文案，至少需要开通：
 
 - `查看、评论和导出多维表格`
 - `查看、评论、编辑和管理多维表格`
 
-如果接口返回 `99991672`，优先检查这两项是否已在应用后台开通。
+如果接口返回 `99991672`，先检查这些权限是否已在应用后台开通。
 
-## 支持范围
+## 可用命令列表
 
+- `check`
 - `app get`
 - `table list|get`
 - `view list|get`
 - `field list|get|create|update|delete`
 - `record list|get|create|update|delete|batch_create|batch_update|batch_delete`
 
-不支持：
+命令支持原始 `app_token` / `table_id` / `view_id`，也支持标准 `base` URL。所有 list 默认 `page_size=20`，需要更多结果时显式传 `--page-token`。
 
-- 创建或删除整个 bitable app
-- 创建或删除整个 table
-- wiki 内嵌 bitable URL
+## 常见场景示例
 
-## URL / ID
+检查权限和连通性：
 
-支持：
+```bash
+bash "{baseDir}/scripts/bitable.sh" check --app-token app_token
+```
 
-- 原始 `app_token`
-- 原始 `table_id`
-- 原始 `view_id`
-- `https://xxx.feishu.cn/base/<app_token>`
-- 带查询参数的 bitable URL，例如 `?table=tblxxx&view=vewxxx`
+列出 table：
 
-不支持：
+```bash
+bash "{baseDir}/scripts/bitable.sh" table list --app-token app_token
+```
 
-- `wiki/...` 里的内嵌 bitable URL
+列出 record：
 
-## 分页
+```bash
+bash "{baseDir}/scripts/bitable.sh" record list \
+  --app-token app_token \
+  --table-id tbl_id \
+  --view-id view_id
+```
 
-所有 list 默认 `page_size=20`，需要更多结果时显式传 `--page-token`。
-
-示例：
+翻页读取 record：
 
 ```bash
 bash "{baseDir}/scripts/bitable.sh" record list \
@@ -51,30 +53,7 @@ bash "{baseDir}/scripts/bitable.sh" record list \
   --page-token next_token
 ```
 
-## 常用示例
-
-先做检查：
-
-```bash
-bash "{baseDir}/scripts/bitable.sh" check --app-token app_token
-```
-
-获取 app：
-
-```bash
-bash "{baseDir}/scripts/bitable.sh" app get --app-token app_token
-```
-
-列记录：
-
-```bash
-bash "{baseDir}/scripts/bitable.sh" record list \
-  --app-token app_token \
-  --table-id tbl_id \
-  --view-id view_id
-```
-
-创建记录：
+创建 record：
 
 ```bash
 bash "{baseDir}/scripts/bitable.sh" record create \
@@ -83,16 +62,7 @@ bash "{baseDir}/scripts/bitable.sh" record create \
   --data-json '{"fields":{"Name":"Alice","Status":"Open"}}'
 ```
 
-批量更新记录：
-
-```bash
-bash "{baseDir}/scripts/bitable.sh" record batch_update \
-  --app-token app_token \
-  --table-id tbl_id \
-  --data-json '{"records":[{"record_id":"rec1","fields":{"Status":"Done"}}]}'
-```
-
-更新字段：
+更新 field：
 
 ```bash
 bash "{baseDir}/scripts/bitable.sh" field update \
@@ -101,3 +71,10 @@ bash "{baseDir}/scripts/bitable.sh" field update \
   --field-id fld_id \
   --data-json '{"field_name":"Priority","type":1}'
 ```
+
+## 已知限制
+
+- 不支持创建或删除整个 bitable app。
+- 不支持创建或删除整个 table。
+- 不支持 `wiki/...` 内嵌 bitable URL。
+- 当前状态类问题必须重新执行 `check`、`list`、`get` 或其他对应命令，不要直接复用历史结果。

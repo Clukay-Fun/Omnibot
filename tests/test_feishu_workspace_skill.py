@@ -17,6 +17,11 @@ from nanobot.agent.skills import SkillsLoader
 SKILL_DIR = Path("nanobot/skills/feishu-workspace").resolve()
 SCRIPT_DIR = SKILL_DIR / "scripts"
 QUICK_VALIDATE_PATH = Path("nanobot/skills/skill-creator/scripts/quick_validate.py").resolve()
+REFERENCE_FILES = {
+    "bitable": SKILL_DIR / "references" / "bitable.md",
+    "calendar": SKILL_DIR / "references" / "calendar.md",
+    "docs": SKILL_DIR / "references" / "docs.md",
+}
 
 
 def _load_script_module(alias: str, filename: str):
@@ -58,10 +63,86 @@ def test_feishu_workspace_skill_is_valid_and_discoverable(tmp_path: Path) -> Non
     assert any(skill["name"] == "feishu-workspace" for skill in skills)
 
     skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-    assert 'bash "{baseDir}/scripts/bitable.sh"' in skill_md
     assert "tenant_access_token" in skill_md
-    assert "do not answer from prior conversation memory" in skill_md
-    assert "Always run a fresh list/get/read/check command" in skill_md
+    assert "不要直接复用历史回答" in skill_md
+    assert "{baseDir}/references/bitable.md" in skill_md
+    assert "{baseDir}/references/calendar.md" in skill_md
+    assert "{baseDir}/references/docs.md" in skill_md
+
+
+def test_feishu_workspace_skill_md_is_action_focused() -> None:
+    skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+    for heading in (
+        "## 一句话定位",
+        "## 触发条件",
+        "## 开始前必做检查",
+        "## 可执行操作清单",
+        "## 不要尝试的操作清单",
+        "## 失败处理规则",
+    ):
+        assert heading in skill_md
+
+    assert "```bash" not in skill_md
+    assert "Typical Commands" not in skill_md
+    assert "部分支持" not in skill_md
+    assert "后续补齐" not in skill_md
+    assert "路线图" not in skill_md
+
+
+def test_feishu_workspace_references_share_uniform_structure() -> None:
+    for path in REFERENCE_FILES.values():
+        text = path.read_text(encoding="utf-8")
+        for heading in (
+            "## 最小权限 Scope",
+            "## 可用命令列表",
+            "## 常见场景示例",
+            "## 已知限制",
+        ):
+            assert heading in text
+
+
+def test_feishu_workspace_skill_actions_are_covered_by_references() -> None:
+    skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    bitable_md = REFERENCE_FILES["bitable"].read_text(encoding="utf-8")
+    calendar_md = REFERENCE_FILES["calendar"].read_text(encoding="utf-8")
+    docs_md = REFERENCE_FILES["docs"].read_text(encoding="utf-8")
+
+    assert "读取 bitable 的 app、table、view、field、record 当前状态" in skill_md
+    assert "app get" in bitable_md
+    assert "table list|get" in bitable_md
+    assert "view list|get" in bitable_md
+    assert "field list|get|create|update|delete" in bitable_md
+    assert "record list|get|create|update|delete|batch_create|batch_update|batch_delete" in bitable_md
+
+    assert "读取 calendar、event 当前状态" in skill_md
+    assert "calendar list|get" in calendar_md
+    assert "event list|get|create|update|delete" in calendar_md
+
+    assert "读取 doc 文本、wiki 节点、drive 文件当前状态" in skill_md
+    assert "drive list|search|get|delete" in docs_md
+    assert "doc create|read_text|append_text|trash" in docs_md
+    assert "wiki space_list|space_get|node_list|node_get|node_create|node_delete" in docs_md
+
+
+def test_feishu_workspace_skill_boundaries_are_not_contradicted_by_references() -> None:
+    skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    bitable_md = REFERENCE_FILES["bitable"].read_text(encoding="utf-8")
+    calendar_md = REFERENCE_FILES["calendar"].read_text(encoding="utf-8")
+    docs_md = REFERENCE_FILES["docs"].read_text(encoding="utf-8")
+
+    assert "不要承诺访问用户私有日历、私有云盘文件" in skill_md
+    assert "不要假设能访问用户私人日历" in calendar_md
+    assert "不要假设能访问用户私人文件" in docs_md
+
+    assert "不要做容器级删除" in skill_md
+    assert "不支持创建或删除整个 bitable app" in bitable_md
+    assert "不支持创建或删除整个 table" in bitable_md
+    assert "不支持创建或删除整个 calendar" in calendar_md
+    assert "不支持权限管理、移动、所有权转移、空间级删除" in docs_md
+
+    assert "不要做 doc 富文本 block 编辑" in skill_md
+    assert "不支持富文本 block 精细编辑" in docs_md
 
 
 def test_common_resolve_auth_prefers_env_token_and_import_failure_is_non_fatal(monkeypatch) -> None:
