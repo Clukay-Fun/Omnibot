@@ -325,6 +325,43 @@ class FeishuClient:
             reply_in_thread=reply_in_thread,
         )
 
+    def list_users_sync(
+        self,
+        *,
+        page_token: str | None = None,
+        page_size: int = 100,
+    ) -> tuple[list[Any], str | None, bool]:
+        """List Feishu users and return items plus pagination state."""
+        from lark_oapi.api.contact.v3 import ListUserRequest
+
+        try:
+            builder = (
+                ListUserRequest.builder()
+                .user_id_type("open_id")
+                .page_size(page_size)
+            )
+            if page_token:
+                builder = builder.page_token(page_token)
+            request = builder.build()
+            response = self.sdk_client.contact.v3.user.list(request)
+            if not response.success():
+                logger.error(
+                    "Failed to list Feishu users: code={}, msg={}, log_id={}",
+                    response.code,
+                    response.msg,
+                    response.get_log_id(),
+                )
+                return [], None, False
+
+            data = getattr(response, "data", None)
+            items = list(getattr(data, "items", None) or [])
+            next_page_token = getattr(data, "page_token", None) or None
+            has_more = bool(getattr(data, "has_more", False))
+            return items, next_page_token, has_more
+        except Exception as e:
+            logger.error("Error listing Feishu users: {}", e)
+            return [], None, False
+
     def send_message_sync(
         self,
         receive_id_type: str,

@@ -18,6 +18,59 @@ class _StopGateway(RuntimeError):
     pass
 
 
+def test_feishu_broadcast_requires_message_source(monkeypatch) -> None:
+    monkeypatch.setattr("nanobot.cli.commands._load_runtime_config", lambda *_args, **_kwargs: Config())
+
+    result = runner.invoke(app, ["feishu", "broadcast"])
+
+    assert result.exit_code == 1
+    assert "Specify exactly one of --message or --message-file" in result.stdout
+
+
+def test_feishu_broadcast_send_requires_confirm_token(monkeypatch, tmp_path: Path) -> None:
+    config = Config()
+    config.channels.feishu.enabled = True
+    config.channels.feishu.app_id = "app_id"
+    config.channels.feishu.app_secret = "app_secret"
+
+    monkeypatch.setattr("nanobot.cli.commands._load_runtime_config", lambda *_args, **_kwargs: config)
+
+    result = runner.invoke(app, ["feishu", "broadcast", "--message", "上线通知", "--send"])
+
+    assert result.exit_code == 1
+    assert "--confirm SEND" in result.stdout
+
+
+def test_feishu_broadcast_dry_run_shows_recipient_count(monkeypatch) -> None:
+    from nanobot.feishu.broadcast import BroadcastRecipient
+
+    config = Config()
+    config.channels.feishu.enabled = True
+    config.channels.feishu.app_id = "app_id"
+    config.channels.feishu.app_secret = "app_secret"
+
+    class _Service:
+        def list_active_recipients(self, page_size: int = 100, limit: int | None = None):
+            assert page_size == 100
+            assert limit is None
+            return [
+                BroadcastRecipient(open_id="ou_1", name="Alice"),
+                BroadcastRecipient(open_id="ou_2", name="Bob"),
+            ]
+
+    monkeypatch.setattr("nanobot.cli.commands._load_runtime_config", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr("nanobot.cli.commands.FeishuClient.build", lambda _cfg: object())
+    monkeypatch.setattr("nanobot.cli.commands.FeishuOutboundMessenger", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr("nanobot.cli.commands.FeishuBroadcastService", lambda **_kwargs: _Service())
+
+    result = runner.invoke(app, ["feishu", "broadcast", "--message", "上线通知"])
+
+    assert result.exit_code == 0
+    assert "Dry run" in result.stdout
+    assert "2 active users" in result.stdout
+    assert "Alice" in result.stdout
+
+
 @pytest.fixture
 def mock_paths():
     """Mock config/workspace paths for test isolation."""

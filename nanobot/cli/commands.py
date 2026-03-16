@@ -6,6 +6,7 @@ import select
 import signal
 import sys
 from pathlib import Path
+from typing import Callable
 
 # Force UTF-8 encoding for Windows console
 if sys.platform == "win32":
@@ -31,6 +32,9 @@ from rich.text import Text
 from nanobot import __logo__, __version__
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
+from nanobot.feishu.broadcast import FeishuBroadcastService
+from nanobot.feishu.client import FeishuClient
+from nanobot.feishu.outbound import FeishuOutboundMessenger
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
@@ -249,7 +253,7 @@ def _make_provider(config: Config):
 
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.registry import find_by_name
-    spec = find_by_name(provider_name)
+    spec = find_by_name(provider_name) if provider_name else None
     if not model.startswith("bedrock/") and not (p and p.api_key) and not (spec and spec.is_oauth):
         console.print("[red]Error: No API key configured.[/red]")
         console.print("Set one in ~/.nanobot/config.json under providers section")
@@ -293,7 +297,7 @@ def gateway(
     port: int | None = typer.Option(None, "--port", "-p", help="Gateway port"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the nanobot gateway."""
     from nanobot.agent.loop import AgentLoop
@@ -310,15 +314,15 @@ def gateway(
         import logging
         logging.basicConfig(level=logging.DEBUG)
 
-    config = _load_runtime_config(config, workspace)
-    port = port if port is not None else config.gateway.port
+    runtime_config = _load_runtime_config(config_path, workspace)
+    port = port if port is not None else runtime_config.gateway.port
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    sync_workspace_templates(config.workspace_path)
+    sync_workspace_templates(runtime_config.workspace_path)
     bus = MessageBus()
-    provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
-    feishu_workspace_manager = FeishuUserWorkspaceManager(config.workspace_path)
+    provider = _make_provider(runtime_config)
+    session_manager = SessionManager(runtime_config.workspace_path)
+    feishu_workspace_manager = FeishuUserWorkspaceManager(runtime_config.workspace_path)
 
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -328,21 +332,21 @@ def gateway(
     agent = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
+        workspace=runtime_config.workspace_path,
+        model=runtime_config.agents.defaults.model,
+        temperature=runtime_config.agents.defaults.temperature,
+        max_tokens=runtime_config.agents.defaults.max_tokens,
+        max_iterations=runtime_config.agents.defaults.max_tool_iterations,
+        memory_window=runtime_config.agents.defaults.memory_window,
+        reasoning_effort=runtime_config.agents.defaults.reasoning_effort,
+        brave_api_key=runtime_config.tools.web.search.api_key or None,
+        web_proxy=runtime_config.tools.web.proxy or None,
+        exec_config=runtime_config.tools.exec,
         cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
+        restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
         session_manager=session_manager,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
+        mcp_servers=runtime_config.tools.mcp_servers,
+        channels_config=runtime_config.channels,
     )
 
     # Set cron callback (needs agent)
@@ -388,7 +392,7 @@ def gateway(
 
     # Create channel manager
     channels = ChannelManager(
-        config,
+        runtime_config,
         bus,
         session_manager=session_manager,
         provider=provider,
@@ -437,16 +441,16 @@ def gateway(
     def _fallback_heartbeat_target() -> HeartbeatTarget:
         channel, chat_id = _pick_heartbeat_target()
         return HeartbeatTarget(
-            workspace_root=config.workspace_path,
+            workspace_root=runtime_config.workspace_path,
             channel=channel,
             chat_id=chat_id,
             session_key="heartbeat",
             overlay_context=None,
         )
 
-    hb_cfg = config.gateway.heartbeat
+    hb_cfg = runtime_config.gateway.heartbeat
     heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
+        workspace=runtime_config.workspace_path,
         provider=provider,
         model=agent.model,
         on_execute=on_heartbeat_execute,
@@ -500,7 +504,7 @@ def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
-    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+    config_path: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
@@ -512,11 +516,11 @@ def agent(
     from nanobot.config.paths import get_cron_dir
     from nanobot.cron.service import CronService
 
-    config = _load_runtime_config(config, workspace)
-    sync_workspace_templates(config.workspace_path)
+    runtime_config = _load_runtime_config(config_path, workspace)
+    sync_workspace_templates(runtime_config.workspace_path)
 
     bus = MessageBus()
-    provider = _make_provider(config)
+    provider = _make_provider(runtime_config)
 
     # Create cron service for tool usage (no callback needed for CLI unless running)
     cron_store_path = get_cron_dir() / "jobs.json"
@@ -530,20 +534,20 @@ def agent(
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
-        workspace=config.workspace_path,
-        model=config.agents.defaults.model,
-        temperature=config.agents.defaults.temperature,
-        max_tokens=config.agents.defaults.max_tokens,
-        max_iterations=config.agents.defaults.max_tool_iterations,
-        memory_window=config.agents.defaults.memory_window,
-        reasoning_effort=config.agents.defaults.reasoning_effort,
-        brave_api_key=config.tools.web.search.api_key or None,
-        web_proxy=config.tools.web.proxy or None,
-        exec_config=config.tools.exec,
+        workspace=runtime_config.workspace_path,
+        model=runtime_config.agents.defaults.model,
+        temperature=runtime_config.agents.defaults.temperature,
+        max_tokens=runtime_config.agents.defaults.max_tokens,
+        max_iterations=runtime_config.agents.defaults.max_tool_iterations,
+        memory_window=runtime_config.agents.defaults.memory_window,
+        reasoning_effort=runtime_config.agents.defaults.reasoning_effort,
+        brave_api_key=runtime_config.tools.web.search.api_key or None,
+        web_proxy=runtime_config.tools.web.proxy or None,
+        exec_config=runtime_config.tools.exec,
         cron_service=cron,
-        restrict_to_workspace=config.tools.restrict_to_workspace,
-        mcp_servers=config.tools.mcp_servers,
-        channels_config=config.channels,
+        restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
+        mcp_servers=runtime_config.tools.mcp_servers,
+        channels_config=runtime_config.channels,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on
@@ -684,6 +688,9 @@ def agent(
 
 channels_app = typer.Typer(help="Manage channels")
 app.add_typer(channels_app, name="channels")
+
+feishu_app = typer.Typer(help="Manage Feishu operations")
+app.add_typer(feishu_app, name="feishu")
 
 
 @channels_app.command("status")
@@ -866,6 +873,86 @@ def channels_login():
         console.print("[red]npm not found. Please install Node.js.[/red]")
 
 
+def _resolve_broadcast_message(message: str | None, message_file: str | None) -> str:
+    if bool(message) == bool(message_file):
+        console.print("[red]Specify exactly one of --message or --message-file.[/red]")
+        raise typer.Exit(1)
+
+    if message is not None:
+        content = message.strip()
+    else:
+        assert message_file is not None
+        path = Path(message_file).expanduser().resolve()
+        if not path.exists():
+            console.print(f"[red]Message file not found: {path}[/red]")
+            raise typer.Exit(1)
+        content = path.read_text(encoding="utf-8").strip()
+
+    if not content:
+        console.print("[red]Broadcast message cannot be empty.[/red]")
+        raise typer.Exit(1)
+    return content
+
+
+@feishu_app.command("broadcast")
+def feishu_broadcast(
+    message: str | None = typer.Option(None, "--message", help="Broadcast message text"),
+    message_file: str | None = typer.Option(None, "--message-file", help="UTF-8 file containing the broadcast message"),
+    send: bool = typer.Option(False, "--send", help="Actually send the broadcast; default is dry-run"),
+    confirm: str = typer.Option("", "--confirm", help="Type SEND to confirm a real broadcast"),
+    page_size: int = typer.Option(100, "--page-size", min=1, max=100, help="Feishu contact page size"),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="Optional max recipients for testing"),
+    throttle_seconds: float = typer.Option(0.2, "--throttle-seconds", min=0.0, help="Delay between sends"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Broadcast a one-off Feishu announcement to all active employees."""
+    content = _resolve_broadcast_message(message, message_file)
+    runtime_config = _load_runtime_config(config)
+    feishu_config = runtime_config.channels.feishu
+
+    if not feishu_config.enabled:
+        console.print("[red]Feishu channel is not enabled in config.[/red]")
+        raise typer.Exit(1)
+    if not feishu_config.app_id or not feishu_config.app_secret:
+        console.print("[red]Feishu appId/appSecret are required for broadcast.[/red]")
+        raise typer.Exit(1)
+
+    if send and confirm != "SEND":
+        console.print("[red]Real broadcast requires --confirm SEND.[/red]")
+        raise typer.Exit(1)
+
+    client = FeishuClient.build(feishu_config)
+    messenger = FeishuOutboundMessenger(lambda: client)
+    service = FeishuBroadcastService(client=client, messenger=messenger)
+
+    recipients = service.list_active_recipients(page_size=page_size, limit=limit)
+    console.print(f"Found {len(recipients)} active users.")
+    for recipient in recipients[:10]:
+        console.print(f"- {recipient.name} ({recipient.open_id})")
+    if len(recipients) > 10:
+        console.print(f"[dim]... and {len(recipients) - 10} more[/dim]")
+
+    if not recipients:
+        console.print("[yellow]No active recipients found.[/yellow]")
+        raise typer.Exit(0)
+
+    if not send:
+        console.print(f"[green]Dry run:[/green] would send to {len(recipients)} active users.")
+        raise typer.Exit(0)
+
+    result = asyncio.run(service.broadcast(content, recipients, throttle_seconds=throttle_seconds))
+    console.print(
+        f"[green]Broadcast finished.[/green] total={result.total} sent={len(result.succeeded)} failed={len(result.failed)}"
+    )
+    if result.failed:
+        console.print("[yellow]Failed recipients:[/yellow]")
+        for recipient in result.failed[:20]:
+            console.print(f"- {recipient.name} ({recipient.open_id})")
+        if len(result.failed) > 20:
+            console.print(f"[dim]... and {len(result.failed) - 20} more failures[/dim]")
+        raise typer.Exit(1)
+
+
 # ============================================================================
 # Status Commands
 # ============================================================================
@@ -916,7 +1003,7 @@ provider_app = typer.Typer(help="Manage providers")
 app.add_typer(provider_app, name="provider")
 
 
-_LOGIN_HANDLERS: dict[str, callable] = {}
+_LOGIN_HANDLERS: dict[str, Callable[..., object]] = {}
 
 
 def _register_login(name: str):
