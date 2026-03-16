@@ -9,6 +9,7 @@ docs/
 docs/*
 !docs/FEISHU_CONFIG_GUIDE.md
 !docs/FEISHU_DEPLOYMENT.md
+!docs/FEISHU_SERVER_RUNBOOK.md
 !docs/SERVER_DEPLOY_CHECKLIST.md
 !docs/plans/
 docs/plans/*
