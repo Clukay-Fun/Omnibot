@@ -1,0 +1,3 @@
+[submodule "nanobot/skills/anthropics-skills"]
+	path = nanobot/skills/anthropics-skills
+	url = https://github.com/anthropics/skills
