@@ -120,8 +120,12 @@ def test_feishu_workspace_skill_actions_are_covered_by_references() -> None:
     assert "event list|get|create|update|delete" in calendar_md
 
     assert "读取 doc 文本、wiki 节点、drive 文件当前状态" in skill_md
+    assert "云文档协作者、公开分享设置、公开密码" in skill_md
     assert "drive list|search|get|delete" in docs_md
     assert "doc create|read_text|append_text|trash" in docs_md
+    assert "permission member list|auth|create|batch_create|update|delete|transfer_owner" in docs_md
+    assert "permission public get|patch" in docs_md
+    assert "permission public password create|update|delete" in docs_md
     assert "wiki space_list|space_get|node_list|node_get|node_create|node_delete" in docs_md
 
 
@@ -139,7 +143,7 @@ def test_feishu_workspace_skill_boundaries_are_not_contradicted_by_references() 
     assert "不支持创建或删除整个 bitable app" in bitable_md
     assert "不支持创建或删除整个 table" in bitable_md
     assert "不支持创建或删除整个 calendar" in calendar_md
-    assert "不支持权限管理、移动、所有权转移、空间级删除" in docs_md
+    assert "仅支持官方已接入的协作者、公开分享和公开密码能力" in docs_md
 
     assert "不要做 doc 富文本 block 编辑" in skill_md
     assert "不支持富文本 block 精细编辑" in docs_md
@@ -412,6 +416,225 @@ def test_docs_trash_and_drive_delete_include_required_type_query(monkeypatch, ca
 
     output_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
     assert output_lines
+
+
+def test_docs_permission_member_create_builds_expected_request(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        seen.append({"method": request.method, "path": request.url.path, "query": dict(request.url.params), "body": body})
+        return httpx.Response(200, json={"code": 0, "data": {"member": {"member_id": "ou_123"}}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "permission",
+            "member",
+            "create",
+            "--token",
+            "doccn123",
+            "--doc-type",
+            "docx",
+            "--member-type",
+            "openid",
+            "--member-id",
+            "ou_123",
+            "--perm",
+            "edit",
+            "--collaborator-type",
+            "user",
+            "--need-notification",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "POST"
+    assert seen[0]["path"] == "/open-apis/drive/v1/permissions/doccn123/members"
+    assert seen[0]["query"]["type"] == "docx"
+    assert seen[0]["query"]["need_notification"] == "true"
+    assert seen[0]["body"] == {
+        "member_type": "openid",
+        "member_id": "ou_123",
+        "perm": "edit",
+        "type": "user",
+    }
+    output = json.loads(capsys.readouterr().out)
+    assert output["meta"]["resource"] == "permission.member"
+    assert output["meta"]["action"] == "create"
+
+
+def test_docs_permission_member_delete_sends_query_and_body_fields(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        seen.append({"method": request.method, "path": request.url.path, "query": dict(request.url.params), "body": body})
+        return httpx.Response(200, json={"code": 0, "data": {"deleted": True}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "permission",
+            "member",
+            "delete",
+            "--token",
+            "doccn123",
+            "--doc-type",
+            "docx",
+            "--member-id",
+            "ou_123",
+            "--member-type",
+            "openid",
+            "--perm-type",
+            "container",
+            "--collaborator-type",
+            "user",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "DELETE"
+    assert seen[0]["path"] == "/open-apis/drive/v1/permissions/doccn123/members/ou_123"
+    assert seen[0]["query"]["type"] == "docx"
+    assert seen[0]["query"]["member_type"] == "openid"
+    assert seen[0]["body"] == {"type": "user", "perm_type": "container"}
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+
+
+def test_docs_permission_member_transfer_owner_uses_query_flags(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        seen.append({"method": request.method, "path": request.url.path, "query": dict(request.url.params), "body": body})
+        return httpx.Response(200, json={"code": 0, "data": {"transferred": True}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "permission",
+            "member",
+            "transfer_owner",
+            "--token",
+            "doccn123",
+            "--doc-type",
+            "docx",
+            "--member-type",
+            "openid",
+            "--member-id",
+            "ou_456",
+            "--keep-old-owner",
+            "--old-owner-perm",
+            "edit",
+            "--no-need-notification",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "POST"
+    assert seen[0]["path"] == "/open-apis/drive/v1/permissions/doccn123/members/transfer_owner"
+    assert seen[0]["query"]["type"] == "docx"
+    assert seen[0]["query"]["remove_old_owner"] == "false"
+    assert seen[0]["query"]["old_owner_perm"] == "edit"
+    assert seen[0]["query"]["need_notification"] == "false"
+    assert seen[0]["body"] == {"member_type": "openid", "member_id": "ou_456"}
+    output = json.loads(capsys.readouterr().out)
+    assert output["ok"] is True
+
+
+def test_docs_permission_public_patch_defaults_to_v2_and_parses_docx_url(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        seen.append({"method": request.method, "path": request.url.path, "query": dict(request.url.params), "body": body})
+        return httpx.Response(200, json={"code": 0, "data": {"permission_public": {"share_entity": "anyone"}}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "permission",
+            "public",
+            "patch",
+            "--token",
+            "https://example.feishu.cn/docx/doccn123",
+            "--external-access-entity",
+            "open",
+            "--share-entity",
+            "anyone",
+            "--link-share-entity",
+            "tenant_readable",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "PATCH"
+    assert seen[0]["path"] == "/open-apis/drive/v2/permissions/doccn123/public"
+    assert seen[0]["query"]["type"] == "docx"
+    assert seen[0]["body"] == {
+        "external_access_entity": "open",
+        "share_entity": "anyone",
+        "link_share_entity": "tenant_readable",
+    }
+    output = json.loads(capsys.readouterr().out)
+    assert output["meta"]["resource"] == "permission.public"
+    assert output["meta"]["action"] == "patch"
+
+
+def test_docs_permission_public_password_update_uses_v1_endpoint(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"method": request.method, "path": request.url.path, "query": dict(request.url.params)})
+        return httpx.Response(200, json={"code": 0, "data": {"password": "new-secret"}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "permission",
+            "public",
+            "password",
+            "update",
+            "--token",
+            "doccn123",
+            "--doc-type",
+            "docx",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "PUT"
+    assert seen[0]["path"] == "/open-apis/drive/v1/permissions/doccn123/public/password"
+    assert seen[0]["query"]["type"] == "docx"
+    output = json.loads(capsys.readouterr().out)
+    assert output["meta"]["action"] == "password_update"
 
 
 def test_shell_wrapper_fails_without_repo_venv(tmp_path: Path) -> None:

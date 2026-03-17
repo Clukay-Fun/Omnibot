@@ -97,4 +97,5 @@ async def test_adapter_triggers_overflow_archive_before_translation() -> None:
         "tenant-1",
         "ou_user_1",
         keep_messages=100,
+        start_worker=False,
     )

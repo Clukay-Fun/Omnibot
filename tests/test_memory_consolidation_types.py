@@ -268,3 +268,62 @@ class TestMemoryConsolidationTypeHandling:
         assert result is True
         assert provider.calls == 2
         assert delays == [1]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_auto_tool_choice_when_forced_call_is_unsupported(
+        self, tmp_path: Path
+    ) -> None:
+        store = MemoryStore(tmp_path)
+        provider = AsyncMock()
+        provider.chat_with_retry = AsyncMock(
+            side_effect=[
+                LLMResponse(
+                    content='Provider says tool_choice should be ["none", "auto"]',
+                    finish_reason="error",
+                ),
+                _make_tool_response(
+                    history_entry="[2026-01-01] User discussed testing.",
+                    memory_update="# Memory\nUser likes testing.",
+                ),
+            ]
+        )
+        session = _make_session(message_count=60)
+
+        result = await store.consolidate(
+            session,
+            provider,
+            "test-model",
+            memory_window=50,
+            temperature=0.2,
+            max_tokens=321,
+            reasoning_effort="medium",
+        )
+
+        assert result is True
+        assert provider.chat_with_retry.await_count == 2
+        first_call = provider.chat_with_retry.await_args_list[0].kwargs
+        second_call = provider.chat_with_retry.await_args_list[1].kwargs
+        assert first_call["tool_choice"]["function"]["name"] == "save_memory"
+        assert second_call["tool_choice"] == "auto"
+        assert second_call["temperature"] == 0.2
+        assert second_call["max_tokens"] == 321
+        assert second_call["reasoning_effort"] == "medium"
+
+    @pytest.mark.asyncio
+    async def test_archive_messages_raw_archives_after_repeated_failures(self, tmp_path: Path) -> None:
+        store = MemoryStore(tmp_path)
+        provider = AsyncMock()
+        provider.chat_with_retry = AsyncMock(
+            return_value=LLMResponse(content="I summarized the conversation.", tool_calls=[])
+        )
+
+        result = await store.archive_messages(
+            _make_session(message_count=8).messages,
+            provider,
+            "test-model",
+        )
+
+        assert result is True
+        assert provider.chat_with_retry.await_count == store._MAX_FAILURES_BEFORE_RAW_ARCHIVE
+        history = store.history_file.read_text(encoding="utf-8")
+        assert "[RAW]" in history

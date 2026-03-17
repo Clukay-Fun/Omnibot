@@ -129,6 +129,7 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: Any | None = None,
         purpose: str | None = None,
         progress_callback: Any | None = None,
     ) -> LLMResponse:
@@ -160,6 +161,7 @@ class LLMProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: Any | None = None,
         purpose: str | None = None,
         progress_callback: Any | None = None,
     ) -> LLMResponse:
@@ -173,6 +175,7 @@ class LLMProvider(ABC):
                     max_tokens=max_tokens,
                     temperature=temperature,
                     reasoning_effort=reasoning_effort,
+                    tool_choice=tool_choice,
                     purpose=purpose,
                     progress_callback=progress_callback,
                 )
@@ -207,6 +210,7 @@ class LLMProvider(ABC):
                 max_tokens=max_tokens,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                tool_choice=tool_choice,
                 purpose=purpose,
                 progress_callback=progress_callback,
             )

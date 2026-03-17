@@ -34,6 +34,7 @@ class OpenAICodexProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: Any | None = None,
         purpose: str | None = None,
         progress_callback: Any | None = None,
     ) -> LLMResponse:
@@ -54,7 +55,7 @@ class OpenAICodexProvider(LLMProvider):
             "text": {"verbosity": "medium"},
             "include": ["reasoning.encrypted_content"],
             "prompt_cache_key": _prompt_cache_key(messages),
-            "tool_choice": "auto",
+            "tool_choice": _resolve_tool_choice(tool_choice),
             "parallel_tool_calls": True,
         }
 
@@ -137,6 +138,18 @@ def _strip_model_prefix(model: str) -> str:
     if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
         return model.split("/", 1)[1]
     return model
+
+
+def _resolve_tool_choice(tool_choice: Any | None) -> Any:
+    if tool_choice is None:
+        return "auto"
+    if isinstance(tool_choice, str):
+        return tool_choice
+    if isinstance(tool_choice, dict):
+        func = tool_choice.get("function")
+        if isinstance(func, dict) and isinstance(func.get("name"), str):
+            return {"type": "function", "name": func["name"]}
+    return "auto"
 
 
 def _build_headers(account_id: str, token: str) -> dict[str, str]:
