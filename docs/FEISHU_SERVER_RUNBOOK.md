@@ -323,7 +323,39 @@ Active: active (running)
 
 ## 十、后续更新流程
 
-### 1. 标准更新命令
+### 1. 一键更新（推荐）
+
+新增了一键更新脚本：`scripts/ops/update-server.sh`
+
+默认行为：
+
+- 默认项目目录：`/opt/omnibot`
+- 默认分支：`dev/upstream-clean-main`
+- 默认服务用户：`nanobot`
+- 默认服务名：`nanobot-gateway`
+- 检测到本地脏工作区时直接停止，不自动 stash
+- 更新前打印旧 commit 和回滚命令
+
+无代理环境：
+
+```bash
+sudo bash /opt/omnibot/scripts/ops/update-server.sh
+```
+
+有代理环境：
+
+```bash
+sudo HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 ALL_PROXY=socks5://127.0.0.1:7891 \
+  bash /opt/omnibot/scripts/ops/update-server.sh
+```
+
+如果要更新到别的分支：
+
+```bash
+sudo bash /opt/omnibot/scripts/ops/update-server.sh feature/some-branch
+```
+
+### 2. 标准更新命令（手动）
 
 ```bash
 sudo -u nanobot -H git -C /opt/omnibot fetch --all --tags
@@ -335,7 +367,7 @@ sudo systemctl restart nanobot-gateway
 sudo systemctl status nanobot-gateway --no-pager
 ```
 
-### 2. 如果 `pyproject.toml` 之类有本地改动挡住 `pull`
+### 3. 如果 `pyproject.toml` 之类有本地改动挡住 `pull`
 
 先确认是不是历史手工修补残留：
 
@@ -351,7 +383,7 @@ sudo -u nanobot -H git -C /opt/omnibot stash push -m "temp-before-update" -- pyp
 sudo -u nanobot -H git -C /opt/omnibot pull --ff-only
 ```
 
-### 3. 更新后确认版本
+### 4. 更新后确认版本
 
 ```bash
 sudo -u nanobot -H git -C /opt/omnibot rev-parse --short HEAD
