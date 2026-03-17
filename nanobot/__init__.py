@@ -2,5 +2,8 @@
 nanobot - A lightweight AI agent framework
 """
 
-__version__ = "0.1.4.post4"
 __logo__ = "🐈"
+
+from nanobot.version import __version__, format_version, get_version_info
+
+__all__ = ["__logo__", "__version__", "format_version", "get_version_info"]

@@ -126,6 +126,7 @@ def test_feishu_workspace_skill_actions_are_covered_by_references() -> None:
     assert "permission member list|auth|create|batch_create|update|delete|transfer_owner" in docs_md
     assert "permission public get|patch" in docs_md
     assert "permission public password create|update|delete" in docs_md
+    assert "raw request" in docs_md
     assert "wiki space_list|space_get|node_list|node_get|node_create|node_delete" in docs_md
 
 
@@ -143,7 +144,7 @@ def test_feishu_workspace_skill_boundaries_are_not_contradicted_by_references() 
     assert "不支持创建或删除整个 bitable app" in bitable_md
     assert "不支持创建或删除整个 table" in bitable_md
     assert "不支持创建或删除整个 calendar" in calendar_md
-    assert "仅支持官方已接入的协作者、公开分享和公开密码能力" in docs_md
+    assert "未覆盖的 Feishu 官方 endpoint 请改用 `raw request`" in docs_md
 
     assert "不要做 doc 富文本 block 编辑" in skill_md
     assert "不支持富文本 block 精细编辑" in docs_md
@@ -635,6 +636,100 @@ def test_docs_permission_public_password_update_uses_v1_endpoint(monkeypatch, ca
     assert seen[0]["query"]["type"] == "docx"
     output = json.loads(capsys.readouterr().out)
     assert output["meta"]["action"] == "password_update"
+
+
+def test_common_request_raw_uses_tenant_auth_and_query_merge() -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": dict(request.url.params),
+                "auth": request.headers.get("Authorization"),
+            }
+        )
+        return httpx.Response(
+            200,
+            json={"code": 0, "msg": "ok", "data": {"ping": True}},
+            headers={"x-tt-logid": "req-1"},
+        )
+
+    api = _TransportAPI("docs", ["scope-a"], handler)
+    payload = api.request_raw(
+        "GET",
+        "https://open.feishu.cn/open-apis/drive/v1/files?folder_token=fld_1",
+        params={"page_size": 50},
+    )
+
+    assert seen[0]["method"] == "GET"
+    assert seen[0]["path"] == "/open-apis/drive/v1/files"
+    assert seen[0]["query"]["folder_token"] == "fld_1"
+    assert seen[0]["query"]["page_size"] == "50"
+    assert seen[0]["auth"] == "Bearer test-token"
+    assert payload["request_id"] == "req-1"
+    assert payload["feishu_ok"] is True
+    assert payload["body_json"]["data"]["ping"] is True
+
+
+def test_docs_raw_request_accepts_bearer_env_and_preserves_feishu_errors(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": dict(request.url.params),
+                "auth": request.headers.get("Authorization"),
+                "body": json.loads(request.content.decode("utf-8")) if request.content else None,
+            }
+        )
+        return httpx.Response(
+            400,
+            json={"code": 1063001, "msg": "Invalid parameter"},
+            headers={"x-request-id": "req-raw-1"},
+        )
+
+    monkeypatch.setenv("FEISHU_USER_ACCESS_TOKEN", "user-token-1")
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    exit_code = docs_mod.main(
+        [
+            "raw",
+            "request",
+            "--method",
+            "POST",
+            "--path",
+            "/open-apis/drive/v1/permissions/doccn123/members",
+            "--query-json",
+            '{"type":"docx"}',
+            "--data-json",
+            '{"member_id":"ou_123","member_type":"openid","perm":"edit"}',
+            "--auth-mode",
+            "bearer",
+            "--bearer-token-env",
+            "FEISHU_USER_ACCESS_TOKEN",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "POST"
+    assert seen[0]["path"] == "/open-apis/drive/v1/permissions/doccn123/members"
+    assert seen[0]["query"]["type"] == "docx"
+    assert seen[0]["auth"] == "Bearer user-token-1"
+    assert seen[0]["body"]["member_id"] == "ou_123"
+    output = json.loads(capsys.readouterr().out)
+    assert output["meta"]["resource"] == "raw"
+    assert output["data"]["status"] == 400
+    assert output["data"]["feishu_code"] == 1063001
+    assert output["data"]["feishu_message"] == "Invalid parameter"
+    assert output["data"]["feishu_ok"] is False
 
 
 def test_shell_wrapper_fails_without_repo_venv(tmp_path: Path) -> None:

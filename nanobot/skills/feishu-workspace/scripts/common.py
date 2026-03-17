@@ -25,6 +25,7 @@ BASE_HEADERS = {
     "Content-Type": "application/json; charset=utf-8",
     "User-Agent": "nanobot-feishu-workspace/1.0",
 }
+DEFAULT_RAW_MAX_CHARS = 20000
 
 
 class SkillError(Exception):
@@ -174,6 +175,81 @@ class FeishuAPI:
             expected_scopes=expected_scopes,
         )
         return payload
+
+    def request_raw(
+        self,
+        method: str,
+        target: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: Any = None,
+        content: str | bytes | None = None,
+        headers: dict[str, str] | None = None,
+        auth_mode: str = "tenant",
+        bearer_token: str | None = None,
+        max_chars: int = DEFAULT_RAW_MAX_CHARS,
+    ) -> dict[str, Any]:
+        path, target_query = normalize_openapi_target(target)
+        merged_params = _merge_query_params(target_query, params)
+        request_headers = dict(BASE_HEADERS)
+        request_headers.update(headers or {})
+
+        if auth_mode == "tenant":
+            request_headers["Authorization"] = f"Bearer {self.ensure_token()}"
+        elif auth_mode == "bearer":
+            if not bearer_token:
+                raise SkillError("validation_error", "auth_mode=bearer requires a bearer token.")
+            request_headers["Authorization"] = f"Bearer {bearer_token}"
+        elif auth_mode != "none":
+            raise SkillError("validation_error", f"Unsupported auth_mode: {auth_mode}")
+
+        response = self._client.request(
+            method.upper(),
+            f"https://open.feishu.cn{path}",
+            headers=request_headers,
+            params=_clean_dict(merged_params),
+            json=json_body,
+            content=content,
+        )
+        body_text = response.text
+        truncated = len(body_text) > max_chars
+        if truncated:
+            body_text = body_text[:max_chars]
+
+        body_json: Any = None
+        if not truncated:
+            try:
+                body_json = response.json()
+            except ValueError:
+                body_json = None
+
+        request_id = self._extract_request_id(response, body_json if isinstance(body_json, dict) else {})
+        feishu_code = None
+        feishu_message = None
+        feishu_ok = response.status_code < 400
+        if isinstance(body_json, dict):
+            feishu_code = body_json.get("code")
+            feishu_message = body_json.get("msg") or body_json.get("message")
+            if feishu_code not in (0, "0", None):
+                feishu_ok = False
+
+        return {
+            "method": method.upper(),
+            "path": path,
+            "url": str(response.request.url),
+            "status": response.status_code,
+            "status_ok": response.status_code < 400,
+            "auth_mode": auth_mode,
+            "request_id": request_id,
+            "query": _clean_dict(merged_params) or {},
+            "headers": dict(response.headers.items()),
+            "body_text": body_text,
+            "truncated": truncated,
+            "body_json": body_json,
+            "feishu_code": feishu_code,
+            "feishu_message": feishu_message,
+            "feishu_ok": feishu_ok,
+        }
 
     def check(
         self,
@@ -392,9 +468,42 @@ def _clean_dict(value: dict[str, Any] | None) -> dict[str, Any] | None:
             continue
         if isinstance(item, bool):
             result[key] = "true" if item else "false"
+        elif isinstance(item, list):
+            result[key] = [("true" if child else "false") if isinstance(child, bool) else child for child in item if child is not None]
         else:
             result[key] = item
     return result
+
+
+def normalize_openapi_target(target: str) -> tuple[str, dict[str, Any]]:
+    if target.startswith("http://") or target.startswith("https://"):
+        parsed = urlparse(target)
+        host = parsed.netloc.lower()
+        if host not in {"open.feishu.cn", "open.larksuite.com"}:
+            raise SkillError("validation_error", f"Raw Feishu API requests only support open.feishu.cn/open.larksuite.com, got: {host}")
+        if not parsed.path.startswith("/open-apis/"):
+            raise SkillError("validation_error", f"Raw Feishu API requests must target /open-apis/, got: {parsed.path}")
+        return parsed.path, _parse_query_dict(parsed.query)
+    if not target.startswith("/open-apis/"):
+        raise SkillError("validation_error", f"Raw Feishu API path must start with /open-apis/, got: {target}")
+    return target, {}
+
+
+def _parse_query_dict(query: str) -> dict[str, Any]:
+    parsed = parse_qs(query, keep_blank_values=True)
+    result: dict[str, Any] = {}
+    for key, values in parsed.items():
+        if not values:
+            continue
+        result[key] = values if len(values) > 1 else values[0]
+    return result
+
+
+def _merge_query_params(base: dict[str, Any] | None, override: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (override or {}).items():
+        merged[key] = value
+    return merged
 
 
 def load_text_arg(text: str | None, text_file: str | None) -> str:

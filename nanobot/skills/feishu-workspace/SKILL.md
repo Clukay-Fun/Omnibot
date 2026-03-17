@@ -25,6 +25,9 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
   - Calendar: `{baseDir}/references/calendar.md`
   - Docs / Wiki / Drive: `{baseDir}/references/docs.md`
 - 如果用户没有给出必要的资源标识，先索要链接、ID、token 或足够明确的对象名称。
+- 如果当前会话来自飞书，优先查看运行时上下文是否已经提供 `Feishu User Open ID`、`Feishu Tenant Key` 等标识。用户说“把我加进去”“给我权限”时，优先直接复用当前 `Feishu User Open ID` 作为协作者 `member_id`，不要重复索要。
+- 如果用户要的是飞书官方 API，但当前 wrapper 没有对应 endpoint，先用 `web_search` / `web_fetch` 查 `open.feishu.cn` 官方文档，再切到 `http-api` skill 发请求。
+- 如果用户明确要“直接调任意飞书 API”，可以使用当前 skill 的原始 `open-apis` 请求入口，不必等 wrapper 逐个补 endpoint。
 
 ## 可执行操作清单
 
@@ -33,6 +36,7 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 可以读取 calendar、event 当前状态，并执行 event 的受支持实体级操作。
 - 可以读取 doc 文本、wiki 节点、drive 文件当前状态，并执行 doc、wiki node、drive file 的受支持实体级操作。
 - 可以读取和修改受支持的云文档协作者、公开分享设置、公开密码等权限能力。
+- 可以直接请求任意 Feishu `open-apis` 路径，并复用当前应用鉴权或显式 bearer token。
 - 对任何当前状态类问题，都重新运行 `check`、`list`、`get`、`read` 或其他对应 wrapper 命令，不要直接复用历史回答。
 
 ## 不要尝试的操作清单
@@ -43,6 +47,9 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 不要做 doc 富文本 block 编辑、整文替换、图片/表格/嵌入块写入。
 - 不要手写 API 请求；直接使用 `{baseDir}/scripts/*.sh` wrapper。
 - 不要把当前 wrapper 未接入的 URL、资源类型或权限能力说成已经可用。
+- 不要把飞书聊天上下文里的 `open_id` 获取方式和服务器 shell 手工执行混为一谈。离开实时消息上下文后，`docs.sh` 不会自动带入当前用户身份。
+- 不要在 wrapper 已支持的 Feishu 能力上退回到通用 HTTP；只有缺失 endpoint 时才切换。
+- 不要把“任意飞书 API”理解成“任意外部域名”；原始请求入口也只面向 Feishu 官方 `open-apis`。
 
 ## 失败处理规则
 

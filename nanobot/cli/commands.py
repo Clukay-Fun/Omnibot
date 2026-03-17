@@ -29,7 +29,8 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from nanobot import __logo__, __version__
+from nanobot import __logo__
+from nanobot.version import format_version
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.feishu.broadcast import FeishuBroadcastService
@@ -152,7 +153,7 @@ async def _read_interactive_input_async() -> str:
 
 def version_callback(value: bool):
     if value:
-        console.print(f"{__logo__} nanobot v{__version__}")
+        console.print(f"{__logo__} {format_version()}")
         raise typer.Exit()
 
 

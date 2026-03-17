@@ -22,6 +22,7 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `summarize` | Summarize URLs, files, and YouTube videos |
 | `tmux` | Remote-control tmux sessions |
 | `clawhub` | Search and install skills from ClawHub registry |
+| `http-api` | Call external HTTP APIs through a controlled wrapper |
 | `skill-creator` | Create new skills |
 | `feishu-ocr` | Read text and enterprise information from Feishu images via the existing multimodal pipeline |
 | `feishu-workspace` | Operate Feishu bitable, calendar, docs, wiki, and drive resources |

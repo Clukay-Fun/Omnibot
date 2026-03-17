@@ -1,6 +1,6 @@
 [project]
 name = "nanobot-ai"
-version = "0.1.4.post4"
+dynamic = ["version"]
 description = "A lightweight personal AI assistant framework"
 requires-python = ">=3.11"
 license = {text = "MIT"}
@@ -70,6 +70,9 @@ nanobot = "nanobot.cli.commands:app"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "nanobot/version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["nanobot"]

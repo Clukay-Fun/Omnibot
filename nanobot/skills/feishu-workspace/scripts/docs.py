@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ EXPECTED_SCOPES = [
 TEXT_BLOCK_TYPE = 2
 PERMISSION_DOC_TYPES = ("doc", "sheet", "file", "wiki", "bitable", "docx", "folder", "mindnote", "minutes", "slides")
 PUBLIC_PERMISSION_API_VERSIONS = ("v1", "v2")
+RAW_AUTH_MODES = ("tenant", "bearer", "none")
 
 
 def _success(api: common.FeishuAPI, args: argparse.Namespace, payload: dict[str, Any], *, paging: dict[str, Any] | None = None) -> int:
@@ -646,6 +648,68 @@ def _handle_permission(api: common.FeishuAPI, args: argparse.Namespace) -> int:
     raise common.SkillError("validation_error", f"Unsupported permission target: {args.permission_target}")
 
 
+def _parse_raw_headers(args: argparse.Namespace) -> dict[str, str]:
+    headers = _parse_object_json_arg(args.headers_json, field_name="headers_json")
+    for key, value in list(headers.items()):
+        headers[key] = str(value)
+    return headers
+
+
+def _resolve_bearer_token(args: argparse.Namespace) -> str | None:
+    if args.bearer_token and args.bearer_token_env:
+        raise common.SkillError("validation_error", "Use either --bearer-token or --bearer-token-env, not both.")
+    if args.bearer_token_env:
+        token = os.environ.get(args.bearer_token_env)
+        if not token:
+            raise common.SkillError(
+                "validation_error",
+                f"Environment variable {args.bearer_token_env} is not set for bearer auth.",
+            )
+        return token
+    return args.bearer_token
+
+
+def _handle_raw(api: common.FeishuAPI, args: argparse.Namespace) -> int:
+    query = common.parse_json_arg(args.query_json, field_name="query_json")
+    if query is not None and not isinstance(query, dict):
+        raise common.SkillError("validation_error", "query_json must be a JSON object.")
+
+    body_json = common.parse_json_arg(args.data_json, field_name="data_json")
+    if args.data_json and args.body_text is not None:
+        raise common.SkillError("validation_error", "Use either --data-json or --body-text, not both.")
+
+    headers = _parse_raw_headers(args)
+    content: str | bytes | None = None
+    if args.body_text is not None:
+        content = args.body_text
+        headers.setdefault("Content-Type", args.content_type or "text/plain; charset=utf-8")
+
+    target = args.url or args.path
+    if not target:
+        raise common.SkillError("validation_error", "raw request requires --path or --url.")
+
+    payload = api.request_raw(
+        args.method,
+        target,
+        params=query,
+        json_body=body_json,
+        content=content,
+        headers=headers,
+        auth_mode=args.auth_mode,
+        bearer_token=_resolve_bearer_token(args),
+        max_chars=args.max_chars,
+    )
+    return common.output_success(
+        payload,
+        meta={
+            "module": MODULE_NAME,
+            "resource": "raw",
+            "action": "request",
+            "auth_source": api.auth_metadata()["auth_source"],
+        },
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = common.build_parser("docs.py", "Operate Feishu docs, wiki, and drive resources.")
     subparsers = parser.add_subparsers(dest="resource", required=True)
@@ -835,6 +899,23 @@ def build_parser() -> argparse.ArgumentParser:
         password_action.add_argument("--doc-type", choices=PERMISSION_DOC_TYPES)
         password_action.add_argument("--params-json")
 
+    raw = subparsers.add_parser("raw", help="Raw Feishu Open API requests.")
+    raw_sub = raw.add_subparsers(dest="action", required=True)
+    raw_request = raw_sub.add_parser("request")
+    target_group = raw_request.add_mutually_exclusive_group(required=True)
+    target_group.add_argument("--path")
+    target_group.add_argument("--url")
+    raw_request.add_argument("--method", default="GET")
+    raw_request.add_argument("--query-json")
+    raw_request.add_argument("--data-json")
+    raw_request.add_argument("--body-text")
+    raw_request.add_argument("--content-type")
+    raw_request.add_argument("--headers-json")
+    raw_request.add_argument("--auth-mode", choices=RAW_AUTH_MODES, default="tenant")
+    raw_request.add_argument("--bearer-token")
+    raw_request.add_argument("--bearer-token-env")
+    raw_request.add_argument("--max-chars", type=int, default=common.DEFAULT_RAW_MAX_CHARS)
+
     return parser
 
 
@@ -851,6 +932,8 @@ def main(argv: list[str] | None = None) -> int:
             return _handle_wiki(api, args)
         if args.resource == "permission":
             return _handle_permission(api, args)
+        if args.resource == "raw":
+            return _handle_raw(api, args)
     raise common.SkillError("validation_error", f"Unsupported resource: {args.resource}")
 
 

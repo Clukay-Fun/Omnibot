@@ -27,6 +27,15 @@ def test_feishu_broadcast_requires_message_source(monkeypatch) -> None:
     assert "Specify exactly one of --message or --message-file" in result.stdout
 
 
+def test_version_flag_shows_formatted_version(monkeypatch) -> None:
+    monkeypatch.setattr("nanobot.cli.commands.format_version", lambda: "nanobot v0.1.5 (f7ab86f)")
+
+    result = runner.invoke(app, ["--version"])
+
+    assert result.exit_code == 0
+    assert "nanobot v0.1.5 (f7ab86f)" in result.stdout
+
+
 def test_feishu_broadcast_send_requires_confirm_token(monkeypatch, tmp_path: Path) -> None:
     config = Config()
     config.channels.feishu.enabled = True

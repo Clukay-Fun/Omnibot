@@ -107,6 +107,31 @@ def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:
     assert "Return exactly: OK" in user_content
 
 
+def test_runtime_context_includes_selected_feishu_metadata(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    messages = builder.build_messages(
+        history=[],
+        current_message="Add me as collaborator",
+        channel="feishu",
+        chat_id="ou_user_1",
+        runtime_metadata={
+            "user_open_id": "ou_user_1",
+            "tenant_key": "tenant-1",
+            "chat_type": "p2p",
+            "content_json": {"text": "ignored"},
+        },
+    )
+
+    user_content = messages[-1]["content"]
+    assert isinstance(user_content, str)
+    assert "Feishu User Open ID: ou_user_1" in user_content
+    assert "Feishu Tenant Key: tenant-1" in user_content
+    assert "Feishu Chat Type: p2p" in user_content
+    assert "content_json" not in user_content
+
+
 def test_multimodal_user_message_places_text_before_images(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
