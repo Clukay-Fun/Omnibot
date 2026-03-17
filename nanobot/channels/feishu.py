@@ -13,6 +13,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import FeishuConfig
 from nanobot.feishu.client import FeishuClient
+from nanobot.feishu.parser import _extract_post_content
 from nanobot.feishu.router import FeishuEnvelope, FeishuRouter
 from nanobot.feishu.runtime import build_feishu_runtime
 from nanobot.feishu.security import FeishuWebhookSecurity
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from nanobot.session.manager import SessionManager
 
 FEISHU_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
+__all__ = ["FeishuChannel", "_extract_post_content"]
 
 
 class FeishuChannel(BaseChannel):

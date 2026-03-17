@@ -60,6 +60,9 @@ class ProviderSpec:
     # Provider supports cache_control on content blocks (e.g. Anthropic prompt caching)
     supports_prompt_caching: bool = False
 
+    # Provider supports vision/image inputs (default to True unless overridden)
+    supports_vision: bool = True
+
     @property
     def label(self) -> str:
         return self.display_name or self.name.title()

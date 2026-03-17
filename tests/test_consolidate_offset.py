@@ -607,10 +607,10 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    async def test_new_command_guard_prevents_concurrent_consolidation(
+    async def test_new_archival_is_serialized_with_inflight_consolidation(
         self, tmp_path: Path
     ) -> None:
-        """/new command does not run consolidation concurrently with in-flight consolidation."""
+        """/new archival does not overlap with an in-flight consolidation."""
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
@@ -633,9 +633,11 @@ class TestConsolidationDeduplicationGuard:
         loop.sessions.save(session)
 
         consolidation_calls = 0
+        archive_calls = 0
         active = 0
         max_active = 0
         started = asyncio.Event()
+        release = asyncio.Event()
 
         async def _fake_consolidate(_session, archive_all: bool = False) -> None:
             nonlocal consolidation_calls, active, max_active
@@ -643,22 +645,35 @@ class TestConsolidationDeduplicationGuard:
             active += 1
             max_active = max(max_active, active)
             started.set()
-            await asyncio.sleep(0.05)
+            await release.wait()
             active -= 1
 
+        async def _fake_archive(_session) -> bool:
+            nonlocal archive_calls, active, max_active
+            archive_calls += 1
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return True
+
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+        loop._archive_session_tail = _fake_archive  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
         await loop._dispatch(msg)
         await started.wait()
 
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
-        await loop._process_message(new_msg)
-        await asyncio.sleep(0.1)
+        response = await loop._process_message(new_msg)
 
-        assert consolidation_calls == 2, (
-            f"Expected normal + /new consolidations, got {consolidation_calls}"
-        )
+        assert response is not None
+        assert "new session started" in response.content.lower()
+        release.set()
+        await loop.close_mcp()
+
+        assert consolidation_calls == 1
+        assert archive_calls == 1
         assert max_active == 1, (
             f"Expected serialized consolidation, observed concurrency={max_active}"
         )
@@ -707,10 +722,10 @@ class TestConsolidationDeduplicationGuard:
         )
 
     @pytest.mark.asyncio
-    async def test_new_waits_for_inflight_consolidation_and_preserves_messages(
+    async def test_new_returns_immediately_and_clears_session_while_archival_waits(
         self, tmp_path: Path
     ) -> None:
-        """/new waits for in-flight consolidation and archives before clear."""
+        """/new returns immediately, clears the session, and archives in the background."""
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
@@ -737,15 +752,17 @@ class TestConsolidationDeduplicationGuard:
         archived_count = 0
 
         async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
-            nonlocal archived_count
-            if archive_all:
-                archived_count = len(sess.messages)
-                return True
             started.set()
             await release.wait()
             return True
 
+        async def _fake_archive(sess) -> bool:
+            nonlocal archived_count
+            archived_count = len(sess.messages[sess.last_consolidated:])
+            return True
+
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+        loop._archive_session_tail = _fake_archive  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
         await loop._dispatch(msg)
@@ -755,20 +772,24 @@ class TestConsolidationDeduplicationGuard:
         pending_new = asyncio.create_task(loop._process_message(new_msg))
 
         await asyncio.sleep(0.02)
-        assert not pending_new.done(), "/new should wait while consolidation is in-flight"
+        assert pending_new.done(), "/new should return immediately while archival waits in the background"
 
-        release.set()
         response = await pending_new
         assert response is not None
         assert "new session started" in response.content.lower()
-        assert archived_count > 0, "Expected /new archival to process a non-empty snapshot"
 
         session_after = loop.sessions.get_or_create("cli:test")
-        assert session_after.messages == [], "Session should be cleared after successful archival"
+        assert session_after.messages == [], "Session should be cleared immediately"
+
+        release.set()
+        await loop.close_mcp()
+        assert archived_count > 0, "Expected /new archival to process a non-empty snapshot"
 
     @pytest.mark.asyncio
-    async def test_new_does_not_clear_session_when_archive_fails(self, tmp_path: Path) -> None:
-        """/new must keep session data if archive step reports failure."""
+    async def test_new_keeps_replacement_session_even_if_background_archive_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """/new should not resurrect the old session even if background archival fails."""
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
@@ -789,30 +810,25 @@ class TestConsolidationDeduplicationGuard:
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
         loop.sessions.save(session)
-        before_count = len(session.messages)
+        async def _failing_archive(_session) -> bool:
+            raise RuntimeError("boom")
 
-        async def _failing_consolidate(sess, archive_all: bool = False) -> bool:
-            if archive_all:
-                return False
-            return True
-
-        loop._consolidate_memory = _failing_consolidate  # type: ignore[method-assign]
+        loop._archive_session_tail = _failing_archive  # type: ignore[method-assign]
 
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
         response = await loop._process_message(new_msg)
 
         assert response is not None
-        assert "failed" in response.content.lower()
+        assert "new session started" in response.content.lower()
+        await loop.close_mcp()
         session_after = loop.sessions.get_or_create("cli:test")
-        assert len(session_after.messages) == before_count, (
-            "Session must remain intact when /new archival fails"
-        )
+        assert session_after.messages == []
 
     @pytest.mark.asyncio
     async def test_new_archives_only_unconsolidated_messages_after_inflight_task(
         self, tmp_path: Path
     ) -> None:
-        """/new should archive only messages not yet consolidated by prior task."""
+        """/new should archive only the tail left unconsolidated by a prior background task."""
         from nanobot.agent.loop import AgentLoop
         from nanobot.bus.events import InboundMessage
         from nanobot.bus.queue import MessageBus
@@ -840,16 +856,19 @@ class TestConsolidationDeduplicationGuard:
 
         async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
             nonlocal archived_count
-            if archive_all:
-                archived_count = len(sess.messages)
-                return True
 
             started.set()
             await release.wait()
             sess.last_consolidated = len(sess.messages) - 3
             return True
 
+        async def _fake_archive(sess) -> bool:
+            nonlocal archived_count
+            archived_count = len(sess.messages[sess.last_consolidated:])
+            return True
+
         loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+        loop._archive_session_tail = _fake_archive  # type: ignore[method-assign]
 
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="hello")
         await loop._dispatch(msg)
@@ -858,13 +877,14 @@ class TestConsolidationDeduplicationGuard:
         new_msg = InboundMessage(channel="cli", sender_id="user", chat_id="test", content="/new")
         pending_new = asyncio.create_task(loop._process_message(new_msg))
         await asyncio.sleep(0.02)
-        assert not pending_new.done()
+        assert pending_new.done()
 
-        release.set()
         response = await pending_new
 
         assert response is not None
         assert "new session started" in response.content.lower()
+        release.set()
+        await loop.close_mcp()
         assert archived_count == 3, (
             f"Expected only unconsolidated tail to archive, got {archived_count}"
         )

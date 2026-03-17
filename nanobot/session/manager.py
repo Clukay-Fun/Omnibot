@@ -43,8 +43,32 @@ class Session:
         self.messages.append(msg)
         self.updated_at = datetime.now()
 
+    @staticmethod
+    def _find_legal_start(messages: list[dict[str, Any]]) -> int:
+        """Find the first index whose suffix does not orphan tool results."""
+        declared: set[str] = set()
+        start = 0
+        for i, msg in enumerate(messages):
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        declared.add(str(tc["id"]))
+            elif role == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                if tool_call_id and str(tool_call_id) not in declared:
+                    start = i + 1
+                    declared.clear()
+                    for prev in messages[start:i + 1]:
+                        if prev.get("role") != "assistant":
+                            continue
+                        for tc in prev.get("tool_calls") or []:
+                            if isinstance(tc, dict) and tc.get("id"):
+                                declared.add(str(tc["id"]))
+        return start
+
     def get_history(self, max_messages: int = 500) -> list[dict[str, Any]]:
-        """Return unconsolidated messages for LLM input, aligned to a user turn."""
+        """Return unconsolidated messages for LLM input on a legal tool-call boundary."""
         from nanobot.agent.context import ContextBuilder
 
         unconsolidated = self.messages[self.last_consolidated:]
@@ -55,6 +79,10 @@ class Session:
             if m.get("role") == "user":
                 sliced = sliced[i:]
                 break
+
+        start = self._find_legal_start(sliced)
+        if start:
+            sliced = sliced[start:]
 
         out: list[dict[str, Any]] = []
         for m in sliced:

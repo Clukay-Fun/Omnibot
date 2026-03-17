@@ -109,9 +109,12 @@ class AgentLoop:
         self._consolidating: set[str] = set()  # Session keys with consolidation in progress
         self._pending_consolidations: set[str] = set()  # Session keys queued to consolidate after reply
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
+        self._archive_tasks: set[asyncio.Task] = set()  # Strong refs to /new archival tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._session_generations: dict[str, int] = {}
+        self._memory_stores: dict[Path, MemoryStore] = {}
         self._background_memory_lock = asyncio.Lock()
         self._register_default_tools()
 
@@ -332,8 +335,28 @@ class AgentLoop:
             self._session_locks[session_key] = lock
         return lock
 
+    def _get_memory_store(self, memory_root: Path) -> MemoryStore:
+        """Reuse MemoryStore instances so raw-archive fallback can span retries."""
+        root = memory_root.resolve()
+        store = self._memory_stores.get(root)
+        if store is None:
+            store = MemoryStore(root)
+            self._memory_stores[root] = store
+        return store
+
+    def _get_session_generation(self, session_key: str) -> int:
+        return self._session_generations.get(session_key, 0)
+
+    def _bump_session_generation(self, session_key: str) -> int:
+        generation = self._get_session_generation(session_key) + 1
+        self._session_generations[session_key] = generation
+        return generation
+
     async def close_mcp(self) -> None:
-        """Close MCP connections."""
+        """Drain background work, then close MCP connections."""
+        pending_tasks = list(self._consolidation_tasks | self._archive_tasks)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         if self._mcp_stack:
             try:
                 await self._mcp_stack.aclose()
@@ -392,33 +415,16 @@ class AgentLoop:
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
-            lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
             self._pending_consolidations.discard(session.key)
-            self._consolidating.add(session.key)
-            try:
-                async with lock:
-                    snapshot = session.messages[session.last_consolidated:]
-                    if snapshot:
-                        temp = Session(key=session.key)
-                        temp.messages = list(snapshot)
-                        temp.metadata = dict(session.metadata)
-                        if not await self._consolidate_memory(temp, archive_all=True):
-                            return OutboundMessage(
-                                channel=msg.channel, chat_id=msg.chat_id,
-                                content="Memory archival failed, session not cleared. Please try again.",
-                            )
-            except Exception:
-                logger.exception("/new archival failed for {}", session.key)
-                return OutboundMessage(
-                    channel=msg.channel, chat_id=msg.chat_id,
-                    content="Memory archival failed, session not cleared. Please try again.",
-                )
-            finally:
-                self._consolidating.discard(session.key)
+            archival_session = session
+            expected_generation = self._get_session_generation(session.key)
+            self._bump_session_generation(session.key)
 
-            session.clear()
-            self.sessions.save(session)
-            self.sessions.invalidate(session.key)
+            replacement = Session(key=session.key)
+            replacement.metadata = dict(session.metadata)
+            self.sessions.save(replacement)
+
+            self._schedule_background_archive(archival_session, expected_generation)
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="New session started.")
         if cmd == "/help":
@@ -522,9 +528,30 @@ class AgentLoop:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
         overlay_context = OverlayContext.from_metadata(session.metadata)
         memory_root = overlay_context.root_path or self.workspace
-        return await MemoryStore(memory_root).consolidate(
+        return await self._get_memory_store(memory_root).consolidate(
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
+            temperature=self.temperature, max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
+            purpose="memory_consolidation",
+        )
+
+    async def _archive_session_tail(self, session: Session) -> bool:
+        """Archive the unconsolidated tail of a pre-reset session."""
+        start = max(0, min(session.last_consolidated, len(session.messages)))
+        messages = session.messages[start:]
+        if not messages:
+            return True
+
+        overlay_context = OverlayContext.from_metadata(session.metadata)
+        memory_root = overlay_context.root_path or self.workspace
+        return await self._get_memory_store(memory_root).archive_messages(
+            messages,
+            self.provider,
+            self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            reasoning_effort=self.reasoning_effort,
             purpose="memory_consolidation",
         )
 
@@ -539,17 +566,21 @@ class AgentLoop:
         self._pending_consolidations.discard(session_key)
         self._consolidating.add(session_key)
         session_lock = self._consolidation_locks.setdefault(session_key, asyncio.Lock())
+        generation = self._get_session_generation(session_key)
 
         async def _run() -> None:
             try:
                 async with self._background_memory_lock:
                     async with session_lock:
+                        if self._get_session_generation(session_key) != generation:
+                            return
                         session = self.sessions.get_or_create(session_key)
                         unconsolidated = len(session.messages) - session.last_consolidated
                         if unconsolidated < self._consolidation_trigger_threshold:
                             return
-                        await self._consolidate_memory(session)
-                        self.sessions.save(session)
+                        if await self._consolidate_memory(session):
+                            if self._get_session_generation(session_key) == generation:
+                                self.sessions.save(session)
             finally:
                 self._consolidating.discard(session_key)
                 task = asyncio.current_task()
@@ -558,6 +589,30 @@ class AgentLoop:
 
         task = asyncio.create_task(_run())
         self._consolidation_tasks.add(task)
+
+    def _schedule_background_archive(self, session: Session, expected_generation: int) -> None:
+        """Archive a reset session in the background after any in-flight consolidation."""
+        if not session.messages:
+            return
+
+        session_lock = self._consolidation_locks.setdefault(session.key, asyncio.Lock())
+
+        async def _run() -> None:
+            try:
+                async with self._background_memory_lock:
+                    async with session_lock:
+                        if self._get_session_generation(session.key) < expected_generation + 1:
+                            return
+                        await self._archive_session_tail(session)
+            except Exception:
+                logger.exception("Background /new archival failed for {}", session.key)
+            finally:
+                task = asyncio.current_task()
+                if task is not None:
+                    self._archive_tasks.discard(task)
+
+        task = asyncio.create_task(_run())
+        self._archive_tasks.add(task)
 
     async def process_direct(
         self,

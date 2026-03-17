@@ -123,6 +123,31 @@ class LiteLLMProvider(LLMProvider):
         spec = find_by_model(model)
         return spec is not None and spec.supports_prompt_caching
 
+    def _supports_vision(self, model: str) -> bool:
+        """Return True when the provider supports image_url content blocks."""
+        if self._gateway is not None:
+            return self._gateway.supports_vision
+        spec = find_by_model(model)
+        return spec is None or spec.supports_vision
+
+    @staticmethod
+    def _filter_image_url(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Replace image_url blocks with neutral placeholders for non-vision models."""
+        filtered: list[dict[str, Any]] = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                filtered.append(msg)
+                continue
+            new_content: list[dict[str, Any] | str] = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image_url":
+                    new_content.append({"type": "text", "text": "[image]"})
+                else:
+                    new_content.append(block)
+            filtered.append({**msg, "content": new_content})
+        return filtered
+
     def _apply_cache_control(
         self,
         messages: list[dict[str, Any]],
@@ -214,6 +239,7 @@ class LiteLLMProvider(LLMProvider):
         max_tokens: int = 4096,
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
+        tool_choice: Any | None = None,
         purpose: str | None = None,
         progress_callback: Any | None = None,
     ) -> LLMResponse:
@@ -233,6 +259,9 @@ class LiteLLMProvider(LLMProvider):
         original_model = model or self.default_model
         model = self._resolve_model(original_model)
         extra_msg_keys = self._extra_msg_keys(original_model, model)
+
+        if not self._supports_vision(original_model):
+            messages = self._filter_image_url(messages)
 
         if self._supports_cache_control(original_model):
             messages, tools = self._apply_cache_control(messages, tools)
@@ -269,7 +298,7 @@ class LiteLLMProvider(LLMProvider):
 
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
         try:
             response = await acompletion(**kwargs)

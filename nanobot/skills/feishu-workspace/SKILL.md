@@ -12,7 +12,7 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 
 ## 触发条件
 
-- 用户明确要查看或修改飞书多维表格、日历、文档、知识库、云空间文件。
+- 用户明确要查看或修改飞书多维表格、日历、文档、知识库、云空间文件或云文档权限。
 - 用户问的是当前状态，例如“现在有哪些表”“当前有哪些事件”“这份文档现在写了什么”。
 - 用户要求执行当前 wrapper 已支持的实体级创建、更新、删除。
 
@@ -32,6 +32,7 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 可以执行受支持的 bitable `record` / `field` 实体级操作。
 - 可以读取 calendar、event 当前状态，并执行 event 的受支持实体级操作。
 - 可以读取 doc 文本、wiki 节点、drive 文件当前状态，并执行 doc、wiki node、drive file 的受支持实体级操作。
+- 可以读取和修改受支持的云文档协作者、公开分享设置、公开密码等权限能力。
 - 对任何当前状态类问题，都重新运行 `check`、`list`、`get`、`read` 或其他对应 wrapper 命令，不要直接复用历史回答。
 
 ## 不要尝试的操作清单
@@ -41,7 +42,7 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 不要做容器级删除，例如删除整个 bitable app/table、calendar、wiki space 或文件夹。
 - 不要做 doc 富文本 block 编辑、整文替换、图片/表格/嵌入块写入。
 - 不要手写 API 请求；直接使用 `{baseDir}/scripts/*.sh` wrapper。
-- 不要把不支持的 URL、资源类型、权限管理能力说成已经可用。
+- 不要把当前 wrapper 未接入的 URL、资源类型或权限能力说成已经可用。
 
 ## 失败处理规则
 

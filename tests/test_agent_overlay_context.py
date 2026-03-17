@@ -39,11 +39,24 @@ async def test_consolidate_memory_uses_overlay_root_from_session_metadata(tmp_pa
     captured = {}
 
     async def _fake_consolidate(
-        self, _session, _provider, _model, *, archive_all=False, memory_window=50, purpose=None
+        self,
+        _session,
+        _provider,
+        _model,
+        *,
+        archive_all=False,
+        memory_window=50,
+        temperature=0.1,
+        max_tokens=4096,
+        reasoning_effort=None,
+        purpose=None,
     ):
         captured["memory_dir"] = self.memory_dir
         captured["archive_all"] = archive_all
         captured["memory_window"] = memory_window
+        captured["temperature"] = temperature
+        captured["max_tokens"] = max_tokens
+        captured["reasoning_effort"] = reasoning_effort
         captured["purpose"] = purpose
         return True
 
@@ -52,6 +65,9 @@ async def test_consolidate_memory_uses_overlay_root_from_session_metadata(tmp_pa
 
     assert result is True
     assert captured["memory_dir"] == overlay_root / "memory"
+    assert captured["temperature"] == loop.temperature
+    assert captured["max_tokens"] == loop.max_tokens
+    assert captured["reasoning_effort"] == loop.reasoning_effort
     assert captured["purpose"] == "memory_consolidation"
 
 
