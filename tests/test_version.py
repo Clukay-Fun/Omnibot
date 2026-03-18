@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 from nanobot import __version__
 from nanobot.version import format_version, get_git_revision

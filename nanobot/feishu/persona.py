@@ -6,7 +6,10 @@ import json
 from datetime import datetime
 from importlib.resources import files as pkg_files
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nanobot.heartbeat.service import HeartbeatTarget
 
 from nanobot.agent.overlay import OverlayContext
 from nanobot.utils.helpers import ensure_dir, safe_filename
@@ -72,7 +75,7 @@ class FeishuUserWorkspaceManager:
         user_file = overlay_root / "USER.md"
         return self._is_placeholder_user_text(user_file.read_text(encoding="utf-8")) if user_file.exists() else True
 
-    def list_heartbeat_targets(self) -> list["HeartbeatTarget"]:
+    def list_heartbeat_targets(self) -> list[HeartbeatTarget]:
         """Enumerate Feishu DM heartbeat targets from per-user workspaces."""
         from nanobot.heartbeat.service import HeartbeatTarget
 

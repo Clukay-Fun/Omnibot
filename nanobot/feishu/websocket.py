@@ -72,6 +72,7 @@ class FeishuWebSocketBridge:
 
         def run_ws() -> None:
             import time
+
             import lark_oapi.ws.client as lark_ws_client
 
             ws_loop = asyncio.new_event_loop()
