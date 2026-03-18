@@ -335,6 +335,7 @@ Active: active (running)
 - 默认服务名：`nanobot-gateway`
 - 检测到本地脏工作区时直接停止，不自动 stash
 - 更新前打印旧 commit 和回滚命令
+- 自动继承当前 shell 的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 给 `fetch`、`pull` 和 `submodule`
 
 无代理环境：
 

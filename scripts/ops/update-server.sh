@@ -41,22 +41,34 @@ run_as_service_user() {
   sudo -u "$SERVICE_USER" -H "$@"
 }
 
+run_git_as_service_user() {
+  if [[ -n "${HTTP_PROXY:-}" || -n "${HTTPS_PROXY:-}" || -n "${ALL_PROXY:-}" ]]; then
+    sudo -u "$SERVICE_USER" -H env \
+      HTTP_PROXY="${HTTP_PROXY:-}" \
+      HTTPS_PROXY="${HTTPS_PROXY:-}" \
+      ALL_PROXY="${ALL_PROXY:-}" \
+      git -c http.version=HTTP/1.1 -C "$APP_DIR" "$@"
+  else
+    sudo -u "$SERVICE_USER" -H git -C "$APP_DIR" "$@"
+  fi
+}
+
 repo_dirty=0
 if ! run_as_service_user bash -lc "cd '$APP_DIR' && git diff --quiet --ignore-submodules=all && git diff --cached --quiet --ignore-submodules=all"; then
   repo_dirty=1
 fi
 
-untracked="$(run_as_service_user git -C "$APP_DIR" ls-files --others --exclude-standard)"
+untracked="$(run_git_as_service_user ls-files --others --exclude-standard)"
 if [[ $repo_dirty -ne 0 || -n "$untracked" ]]; then
   echo "ERROR: git working tree is not clean; refusing to update." >&2
   echo >&2
-  run_as_service_user git -C "$APP_DIR" status --short >&2
+  run_git_as_service_user status --short >&2
   echo >&2
   echo "HINT: clean or stash local changes first, then rerun." >&2
   exit 1
 fi
 
-old_commit="$(run_as_service_user git -C "$APP_DIR" rev-parse --short HEAD)"
+old_commit="$(run_git_as_service_user rev-parse --short HEAD)"
 
 echo "== Nanobot server update =="
 echo "APP_DIR=$APP_DIR"
@@ -68,13 +80,13 @@ echo "Rollback if needed: sudo -u $SERVICE_USER -H git -C $APP_DIR checkout $old
 echo
 
 echo "[1/6] Fetching latest refs..."
-run_as_service_user git -C "$APP_DIR" fetch --all --tags
+run_git_as_service_user fetch --all --tags
 
 echo "[2/6] Checking out branch $BRANCH..."
-run_as_service_user git -C "$APP_DIR" checkout "$BRANCH"
+run_git_as_service_user checkout "$BRANCH"
 
 echo "[3/6] Pulling latest commit..."
-if ! run_as_service_user git -C "$APP_DIR" pull --ff-only; then
+if ! run_git_as_service_user pull --ff-only; then
   echo >&2
   echo "ERROR: fast-forward update failed. Local branch has diverged from origin/$BRANCH." >&2
   echo "HINT: inspect 'git status' and 'git log --oneline --decorate --graph --all -20' before retrying." >&2
@@ -82,12 +94,7 @@ if ! run_as_service_user git -C "$APP_DIR" pull --ff-only; then
 fi
 
 echo "[4/6] Updating submodules..."
-submodule_cmd=(git -c http.version=HTTP/1.1 -C "$APP_DIR" submodule update --init --recursive --depth 1)
-if [[ -n "${HTTP_PROXY:-}" ]]; then
-  run_as_service_user env HTTP_PROXY="${HTTP_PROXY}" HTTPS_PROXY="${HTTPS_PROXY:-${HTTP_PROXY}}" ALL_PROXY="${ALL_PROXY:-}" "${submodule_cmd[@]}"
-else
-  run_as_service_user "${submodule_cmd[@]}"
-fi
+run_git_as_service_user submodule update --init --recursive --depth 1
 
 echo "[5/6] Reinstalling application..."
 run_as_service_user bash -lc "cd '$APP_DIR' && '$APP_DIR/.venv/bin/pip' install -e ."
@@ -103,7 +110,7 @@ if [[ "$(systemctl is-active "$SERVICE_NAME")" != "active" ]]; then
   exit 1
 fi
 
-new_commit="$(run_as_service_user git -C "$APP_DIR" rev-parse --short HEAD)"
+new_commit="$(run_git_as_service_user rev-parse --short HEAD)"
 
 echo
 echo "Update succeeded."
@@ -112,7 +119,7 @@ echo "NEW_COMMIT=$new_commit"
 echo "Rollback command: sudo -u $SERVICE_USER -H git -C $APP_DIR checkout $old_commit && sudo systemctl restart $SERVICE_NAME"
 echo
 echo "Submodules:"
-run_as_service_user git -C "$APP_DIR" submodule status
+run_git_as_service_user submodule status
 echo
 echo "Service status:"
 systemctl status "$SERVICE_NAME" --no-pager | sed -n '1,12p'
