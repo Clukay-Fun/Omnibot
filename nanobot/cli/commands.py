@@ -30,13 +30,13 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__
-from nanobot.version import format_version
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.feishu.broadcast import FeishuBroadcastService
 from nanobot.feishu.client import FeishuClient
 from nanobot.feishu.outbound import FeishuOutboundMessenger
 from nanobot.utils.helpers import sync_workspace_templates
+from nanobot.version import format_version
 
 app = typer.Typer(
     name="nanobot",
@@ -419,16 +419,16 @@ def gateway(
         return "cli", "direct"
 
     # Create heartbeat service
-    async def on_heartbeat_execute(target: HeartbeatTarget, tasks: str) -> str:
+    async def on_heartbeat_execute(target: HeartbeatTarget, tasks: str):
         """Phase 2: execute heartbeat tasks through the full agent loop."""
         async def _silent(*_args, **_kwargs):
             pass
 
-        return await agent.process_direct(
+        return await agent.process_heartbeat_direct(
             tasks,
-            session_key=target.session_key,
             channel=target.channel,
             chat_id=target.chat_id,
+            workspace_root=target.workspace_root,
             on_progress=_silent,
             overlay_context=target.overlay_context,
         )

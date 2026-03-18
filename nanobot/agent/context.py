@@ -207,7 +207,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         chat_id: str | None = None,
         runtime_metadata: dict[str, Any] | None = None,
         extra_context: str | list[str] | None = None,
-        conversation_summary: str | None = None,
+        extra_system_messages: list[str] | None = None,
         system_overlay_root: str | None = None,
         system_overlay_bootstrap: bool | None = None,
     ) -> list[dict[str, Any]]:
@@ -242,13 +242,10 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 ),
             },
         ]
-        if conversation_summary and conversation_summary.strip():
-            messages.append(
-                {
-                    "role": "system",
-                    "content": conversation_summary.strip(),
-                }
-            )
+        for item in extra_system_messages or []:
+            text = item.strip()
+            if text:
+                messages.append({"role": "system", "content": text})
         messages.extend(history)
         messages.append(
             {

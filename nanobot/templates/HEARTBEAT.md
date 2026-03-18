@@ -14,3 +14,10 @@
 ## 已完成 / Completed
 
 <!-- 任务不需要周期执行后，移动到这里，或者直接用写文件指令删除。 -->
+
+<!-- HEARTBEAT_STATE:BEGIN -->
+## Last Heartbeat Run
+- At: (not run yet)
+- Decision: skip
+- Summary: No heartbeat run has been recorded yet.
+<!-- HEARTBEAT_STATE:END -->

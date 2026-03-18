@@ -523,20 +523,6 @@ class TestConsolidationDeduplicationGuard:
         assert loop._consolidation_trigger_threshold("cli:at") == 50
         assert "cli:at" in loop._pending_consolidations
 
-    def test_heartbeat_sessions_use_a_smaller_consolidation_threshold(self, tmp_path: Path) -> None:
-        from nanobot.agent.loop import AgentLoop
-        from nanobot.bus.queue import MessageBus
-
-        bus = MessageBus()
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        loop = AgentLoop(
-            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=100
-        )
-
-        assert loop._consolidation_trigger_threshold("cli:direct") == 50
-        assert loop._consolidation_trigger_threshold("feishu:dm:ou_123:heartbeat") == 12
-
     @pytest.mark.asyncio
     async def test_process_message_only_registers_background_consolidation(
         self, tmp_path: Path
@@ -734,43 +720,6 @@ class TestConsolidationDeduplicationGuard:
         assert len(loop._consolidation_tasks) == 0, (
             "Task reference must be removed after completion"
         )
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_consolidation_prunes_archived_messages_and_keeps_summary(
-        self, tmp_path: Path
-    ) -> None:
-        from nanobot.agent.loop import AgentLoop
-        from nanobot.bus.queue import MessageBus
-
-        bus = MessageBus()
-        provider = MagicMock()
-        provider.get_default_model.return_value = "test-model"
-        loop = AgentLoop(
-            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
-        )
-
-        session = loop.sessions.get_or_create("feishu:dm:ou_123:heartbeat")
-        for i in range(12):
-            session.add_message("user", f"msg{i}")
-        loop.sessions.save(session)
-        loop._pending_consolidations.add(session.key)
-
-        async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
-            sess.record_heartbeat_summary("[2026-03-18 14:10] Permission request still pending.")
-            sess.last_consolidated = 10
-            return True
-
-        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
-
-        loop._schedule_pending_consolidation(session.key)
-        await asyncio.sleep(0.05)
-
-        reloaded = loop.sessions.get_or_create(session.key)
-        assert [message["content"] for message in reloaded.messages] == ["msg10", "msg11"]
-        assert reloaded.last_consolidated == 0
-        summary_message = reloaded.get_prompt_summary_message()
-        assert summary_message is not None
-        assert "Permission request still pending." in summary_message
 
     @pytest.mark.asyncio
     async def test_new_returns_immediately_and_clears_session_while_archival_waits(
@@ -974,3 +923,66 @@ class TestConsolidationDeduplicationGuard:
         assert response is not None
         assert "new session started" in response.content.lower()
         assert loop.sessions.get_or_create("cli:test").messages == []
+
+
+class TestHeartbeatFreshDirect:
+    @pytest.mark.asyncio
+    async def test_process_heartbeat_direct_uses_fresh_ephemeral_session(self, tmp_path: Path) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+        from nanobot.heartbeat.types import HeartbeatExecutionResult
+        from nanobot.providers.base import LLMResponse
+
+        (tmp_path / "HEARTBEAT.md").write_text("- [ ] Follow up on onboarding\n", encoding="utf-8")
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="done", tool_calls=[]))
+
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        result = await loop.process_heartbeat_direct(
+            "check open tasks",
+            channel="feishu",
+            chat_id="ou_user_1",
+            workspace_root=tmp_path,
+        )
+
+        assert isinstance(result, HeartbeatExecutionResult)
+        assert result.response_text == "done"
+        assert [message["role"] for message in result.transcript_messages] == ["user", "assistant"]
+        assert list((tmp_path / "sessions").glob("*.jsonl")) == []
+        assert loop._pending_consolidations == set()
+
+        messages = provider.chat_with_retry.await_args.kwargs["messages"]
+        assert messages[1]["role"] == "system"
+        assert "You are executing a heartbeat run." in messages[1]["content"]
+        assert "## HEARTBEAT.md" in messages[1]["content"]
+        assert "Follow up on onboarding" in messages[1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_process_direct_still_persists_normal_sessions(self, tmp_path: Path) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        response = await loop.process_direct("hello", session_key="cli:test", channel="cli", chat_id="test")
+
+        assert response == "ok"
+        session_files = list((tmp_path / "sessions").glob("*.jsonl"))
+        assert len(session_files) == 1
+        saved = session_files[0].read_text(encoding="utf-8")
+        assert '"content": "hello"' in saved
+        assert '"content": "ok"' in saved

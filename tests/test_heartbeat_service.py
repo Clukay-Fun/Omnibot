@@ -1,8 +1,10 @@
 import asyncio
+import json
 
 import pytest
 
 from nanobot.heartbeat.service import HeartbeatService, HeartbeatTarget
+from nanobot.heartbeat.types import HeartbeatExecutionError, HeartbeatExecutionResult
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
 
@@ -22,6 +24,10 @@ class DummyProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "test-model"
+
+
+def _log_files(root):
+    return sorted((root / "memory" / "heartbeat-logs").glob("*.jsonl"))
 
 
 @pytest.mark.asyncio
@@ -55,14 +61,15 @@ async def test_decide_returns_skip_when_no_tool_call(tmp_path) -> None:
         model="openai/gpt-4o-mini",
     )
 
-    action, tasks = await service._decide("heartbeat content")
+    action, tasks, summary = await service._decide("heartbeat content")
     assert action == "skip"
     assert tasks == ""
+    assert summary
 
 
 @pytest.mark.asyncio
 async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
-    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing\n", encoding="utf-8")
 
     provider = DummyProvider([
         LLMResponse(
@@ -71,7 +78,11 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
                 ToolCallRequest(
                     id="hb_1",
                     name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
+                    arguments={
+                        "action": "run",
+                        "tasks": "check open tasks",
+                        "summary": "Found an active follow-up to execute.",
+                    },
                 )
             ],
         )
@@ -79,9 +90,16 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
 
     called_with: list[tuple[str, str]] = []
 
-    async def _on_execute(target: HeartbeatTarget, tasks: str) -> str:
+    async def _on_execute(target: HeartbeatTarget, tasks: str) -> HeartbeatExecutionResult:
         called_with.append((target.session_key, tasks))
-        return "done"
+        return HeartbeatExecutionResult(
+            response_text="done",
+            state_summary="Checked open tasks and notified the user.",
+            transcript_messages=[
+                {"role": "user", "content": "check open tasks", "timestamp": "2026-03-18T10:00:00"},
+                {"role": "assistant", "content": "done", "timestamp": "2026-03-18T10:00:01"},
+            ],
+        )
 
     service = HeartbeatService(
         workspace=tmp_path,
@@ -91,13 +109,21 @@ async def test_trigger_now_executes_when_decision_is_run(tmp_path) -> None:
     )
 
     result = await service.trigger_now()
+
     assert result == "done"
     assert called_with == [("heartbeat", "check open tasks")]
+    heartbeat_text = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "Decision: run" in heartbeat_text
+    assert "Checked open tasks and notified the user." in heartbeat_text
+    logs = _log_files(tmp_path)
+    assert len(logs) == 1
+    metadata = json.loads(logs[0].read_text(encoding="utf-8").splitlines()[0])
+    assert metadata["metadata"]["heartbeat"]["decision"] == "run"
 
 
 @pytest.mark.asyncio
-async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
-    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing", encoding="utf-8")
+async def test_trigger_now_returns_none_when_decision_is_skip_and_updates_state(tmp_path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing\n", encoding="utf-8")
 
     provider = DummyProvider([
         LLMResponse(
@@ -106,23 +132,23 @@ async def test_trigger_now_returns_none_when_decision_is_skip(tmp_path) -> None:
                 ToolCallRequest(
                     id="hb_1",
                     name="heartbeat",
-                    arguments={"action": "skip"},
+                    arguments={"action": "skip", "summary": "No active follow-up remains."},
                 )
             ],
         )
     ])
 
-    async def _on_execute(_target: HeartbeatTarget, tasks: str) -> str:
-        return tasks
-
     service = HeartbeatService(
         workspace=tmp_path,
         provider=provider,
         model="openai/gpt-4o-mini",
-        on_execute=_on_execute,
     )
 
     assert await service.trigger_now() is None
+    heartbeat_text = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "Decision: skip" in heartbeat_text
+    assert "No active follow-up remains." in heartbeat_text
+    assert _log_files(tmp_path) == []
 
 
 @pytest.mark.asyncio
@@ -135,7 +161,11 @@ async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatc
                 ToolCallRequest(
                     id="hb_1",
                     name="heartbeat",
-                    arguments={"action": "run", "tasks": "check open tasks"},
+                    arguments={
+                        "action": "run",
+                        "tasks": "check open tasks",
+                        "summary": "A follow-up task still needs work.",
+                    },
                 )
             ],
         ),
@@ -154,16 +184,17 @@ async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatc
         model="openai/gpt-4o-mini",
     )
 
-    action, tasks = await service._decide("heartbeat content")
+    action, tasks, summary = await service._decide("heartbeat content")
 
     assert action == "run"
     assert tasks == "check open tasks"
+    assert summary == "A follow-up task still needs work."
     assert provider.calls == 2
     assert delays == [1]
 
 
 @pytest.mark.asyncio
-async def test_decision_context_includes_user_memory_and_history(tmp_path) -> None:
+async def test_decision_context_includes_user_memory_but_not_history(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] review follow-up items", encoding="utf-8")
     (tmp_path / "USER.md").write_text("- **昵称**：康哥\n", encoding="utf-8")
     (tmp_path / "memory").mkdir()
@@ -173,7 +204,13 @@ async def test_decision_context_includes_user_memory_and_history(tmp_path) -> No
     provider = DummyProvider([
         LLMResponse(
             content="",
-            tool_calls=[ToolCallRequest(id="hb_1", name="heartbeat", arguments={"action": "skip"})],
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "skip", "summary": "Nothing to do right now."},
+                )
+            ],
         )
     ])
     service = HeartbeatService(workspace=tmp_path, provider=provider, model="openai/gpt-4o-mini")
@@ -186,8 +223,106 @@ async def test_decision_context_includes_user_memory_and_history(tmp_path) -> No
     assert "康哥" in prompt
     assert "## memory/MEMORY.md" in prompt
     assert "Known preference: concise" in prompt
-    assert "## memory/HISTORY.md (recent tail)" in prompt
-    assert "promised a follow-up" in prompt
+    assert "memory/HISTORY.md" not in prompt
+    assert "promised a follow-up" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_failed_execution_updates_state_and_writes_audit_log(tmp_path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text("- [ ] do thing\n", encoding="utf-8")
+    provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={
+                        "action": "run",
+                        "tasks": "check open tasks",
+                        "summary": "A follow-up task still needs work.",
+                    },
+                )
+            ],
+        )
+    ])
+
+    async def _on_execute(_target: HeartbeatTarget, _tasks: str) -> HeartbeatExecutionResult:
+        raise HeartbeatExecutionError(
+            "Execution failed: missing auth.",
+            transcript_messages=[
+                {"role": "user", "content": "check open tasks", "timestamp": "2026-03-18T10:00:00"},
+            ],
+        )
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+    )
+
+    assert await service.trigger_now() is None
+    heartbeat_text = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "Decision: failed" in heartbeat_text
+    assert "Execution failed: missing auth." in heartbeat_text
+    logs = _log_files(tmp_path)
+    assert len(logs) == 1
+    metadata = json.loads(logs[0].read_text(encoding="utf-8").splitlines()[0])
+    assert metadata["metadata"]["heartbeat"]["decision"] == "failed"
+
+
+def test_upsert_state_block_preserves_tasks_and_repairs_malformed_markers(tmp_path) -> None:
+    heartbeat_file = tmp_path / "HEARTBEAT.md"
+    heartbeat_file.write_text(
+        "- [ ] keep this task\n"
+        "<!-- HEARTBEAT_STATE:BEGIN -->\n"
+        "## Last Heartbeat Run\n"
+        "- At: old\n"
+        "- Decision: skip\n"
+        "- Summary: stale\n"
+        "<!-- HEARTBEAT_STATE:BEGIN -->\n"
+        "- [ ] another task\n",
+        encoding="utf-8",
+    )
+    service = HeartbeatService(workspace=tmp_path, provider=DummyProvider([]), model="test-model")
+    target = HeartbeatTarget(
+        workspace_root=tmp_path,
+        channel="cli",
+        chat_id="direct",
+        session_key="heartbeat",
+    )
+
+    service._upsert_state_block(target, "skip", "Fresh summary.")
+
+    updated = heartbeat_file.read_text(encoding="utf-8")
+    assert "- [ ] keep this task" in updated
+    assert "- [ ] another task" in updated
+    assert updated.count("<!-- HEARTBEAT_STATE:BEGIN -->") == 1
+    assert updated.count("<!-- HEARTBEAT_STATE:END -->") == 1
+    assert "Fresh summary." in updated
+
+
+def test_audit_log_retention_prunes_older_files(tmp_path) -> None:
+    (tmp_path / "memory" / "heartbeat-logs").mkdir(parents=True)
+    service = HeartbeatService(workspace=tmp_path, provider=DummyProvider([]), model="test-model")
+    target = HeartbeatTarget(
+        workspace_root=tmp_path,
+        channel="cli",
+        chat_id="direct",
+        session_key="heartbeat",
+    )
+
+    for i in range(35):
+        service._write_audit_log(
+            target,
+            decision="run",
+            summary=f"summary {i}",
+            transcript_messages=[{"role": "assistant", "content": f"log {i}"}],
+        )
+
+    logs = _log_files(tmp_path)
+    assert len(logs) == 30
 
 
 @pytest.mark.asyncio
@@ -200,17 +335,39 @@ async def test_tick_continues_when_one_target_fails(tmp_path) -> None:
     (workspace_b / "HEARTBEAT.md").write_text("- [ ] do b", encoding="utf-8")
 
     provider = DummyProvider([
-        LLMResponse(content="", tool_calls=[ToolCallRequest(id="hb_1", name="heartbeat", arguments={"action": "run", "tasks": "task-a"})]),
-        LLMResponse(content="", tool_calls=[ToolCallRequest(id="hb_2", name="heartbeat", arguments={"action": "run", "tasks": "task-b"})]),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "task-a", "summary": "run a"},
+                )
+            ],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_2",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "task-b", "summary": "run b"},
+                )
+            ],
+        ),
     ])
 
     executed: list[str] = []
 
-    async def _on_execute(target: HeartbeatTarget, tasks: str) -> str:
+    async def _on_execute(target: HeartbeatTarget, tasks: str) -> HeartbeatExecutionResult:
         executed.append(f"{target.chat_id}:{tasks}")
         if target.chat_id == "chat-a":
-            raise RuntimeError("boom")
-        return "done-b"
+            raise HeartbeatExecutionError("boom")
+        return HeartbeatExecutionResult(
+            response_text="done-b",
+            state_summary="Completed task-b",
+            transcript_messages=[{"role": "assistant", "content": "done-b"}],
+        )
 
     service = HeartbeatService(
         workspace=tmp_path,

@@ -110,31 +110,6 @@ def test_empty_session_history() -> None:
     assert history == []
 
 
-def test_heartbeat_summary_exposed_as_prompt_summary_message() -> None:
-    session = Session(key="feishu:dm:ou_123:heartbeat")
-    session.record_heartbeat_summary("[2026-03-18 14:00] User confirmed the account is correct.")
-    session.record_heartbeat_summary("[2026-03-18 14:05] Permission issue remains unresolved.")
-
-    summary_message = session.get_prompt_summary_message()
-
-    assert summary_message is not None
-    assert summary_message.startswith("The following is a rolling summary")
-    assert "account is correct" in summary_message
-    assert "remains unresolved" in summary_message
-
-
-def test_prune_consolidated_messages_only_trims_persisted_prefix() -> None:
-    session = Session(key="feishu:dm:ou_123:heartbeat")
-    for i in range(6):
-        session.add_message("user", f"msg{i}")
-    session.last_consolidated = 4
-
-    session.prune_consolidated_messages()
-
-    assert [message["content"] for message in session.messages] == ["msg4", "msg5"]
-    assert session.last_consolidated == 0
-
-
 def test_window_cuts_mid_tool_group() -> None:
     session = Session(key="test:mid-cut")
     session.messages.append({"role": "user", "content": "setup"})

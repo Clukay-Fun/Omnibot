@@ -186,7 +186,7 @@ def test_extra_context_is_merged_into_user_message(tmp_path) -> None:
     assert "Answer briefly" in user_content
 
 
-def test_conversation_summary_is_inserted_as_separate_system_message(tmp_path) -> None:
+def test_extra_system_messages_are_inserted_after_primary_system_prompt(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
 
@@ -195,12 +195,13 @@ def test_conversation_summary_is_inserted_as_separate_system_message(tmp_path) -
         current_message="Answer briefly",
         channel="feishu",
         chat_id="oc_chat_1",
-        conversation_summary="Earlier summary goes here.",
+        extra_system_messages=["Earlier summary goes here.", "Heartbeat execution note."],
     )
 
     assert messages[0]["role"] == "system"
     assert messages[1] == {"role": "system", "content": "Earlier summary goes here."}
-    assert messages[2] == {"role": "assistant", "content": "recent raw turn"}
+    assert messages[2] == {"role": "system", "content": "Heartbeat execution note."}
+    assert messages[3] == {"role": "assistant", "content": "recent raw turn"}
     assert messages[-1]["role"] == "user"
 
 
