@@ -1,5 +1,8 @@
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
 
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.filesystem import ListDirTool
@@ -129,6 +132,82 @@ def test_high_risk_tool_definitions_include_positive_and_negative_usage_boundari
 
     assert "another chat, another user, or a separate destination" in definitions["message"]
     assert "Do not use this for the assistant's normal reply in the current conversation turn." in definitions["message"]
+    assert "structured `feishu_card`" in definitions["message"]
+
+
+def test_message_tool_validates_feishu_card_notification_payload() -> None:
+    tool = MessageTool()
+
+    errors = tool.validate_params(
+        {
+            "channel": "feishu",
+            "chat_id": "ou_123",
+            "feishu_card": {
+                "template": "notification",
+                "title": "提醒",
+                "summary": "请处理待办",
+                "items": ["事项 1", "事项 2"],
+                "timestamp": "今天 18:00 前",
+            },
+        }
+    )
+
+    assert errors == []
+
+
+def test_message_tool_rejects_invalid_feishu_card_template() -> None:
+    tool = MessageTool()
+
+    errors = tool.validate_params(
+        {
+            "channel": "feishu",
+            "chat_id": "ou_123",
+            "feishu_card": {
+                "template": "freeform",
+                "title": "提醒",
+                "summary": "请处理待办",
+            },
+        }
+    )
+
+    assert any("feishu_card.template must be one of" in error for error in errors)
+
+
+def test_message_tool_requires_confirm_prompt_for_confirm_card() -> None:
+    tool = MessageTool()
+
+    errors = tool.validate_params(
+        {
+            "channel": "feishu",
+            "chat_id": "ou_123",
+            "feishu_card": {
+                "template": "confirm",
+                "title": "确认",
+                "summary": "是否继续？",
+                "items": ["选项 A"],
+            },
+        }
+    )
+
+    assert "missing required feishu_card.confirm_prompt" in errors
+
+
+@pytest.mark.asyncio
+async def test_message_tool_rejects_feishu_card_for_non_feishu_channels() -> None:
+    tool = MessageTool(send_callback=AsyncMock())
+    tool.set_context("email", "user@example.com")
+
+    result = await tool.execute(
+        channel="email",
+        chat_id="user@example.com",
+        feishu_card={
+            "template": "notification",
+            "title": "提醒",
+            "summary": "请查看",
+        },
+    )
+
+    assert result == "Error: feishu_card is only supported for the feishu channel"
 
 
 def test_exec_extract_absolute_paths_keeps_full_windows_path() -> None:

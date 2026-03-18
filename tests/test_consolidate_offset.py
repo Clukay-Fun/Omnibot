@@ -962,6 +962,8 @@ class TestHeartbeatFreshDirect:
         assert "You are executing a heartbeat run." in messages[1]["content"]
         assert "## HEARTBEAT.md" in messages[1]["content"]
         assert "Follow up on onboarding" in messages[1]["content"]
+        assert messages[2]["role"] == "system"
+        assert "Feishu delivery rule" in messages[2]["content"]
 
     @pytest.mark.asyncio
     async def test_process_direct_still_persists_normal_sessions(self, tmp_path: Path) -> None:
@@ -986,3 +988,30 @@ class TestHeartbeatFreshDirect:
         saved = session_files[0].read_text(encoding="utf-8")
         assert '"content": "hello"' in saved
         assert '"content": "ok"' in saved
+
+    @pytest.mark.asyncio
+    async def test_process_direct_adds_feishu_channel_delivery_hint(self, tmp_path: Path) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        response = await loop.process_direct(
+            "hello",
+            session_key="feishu:test",
+            channel="feishu",
+            chat_id="ou_user_1",
+        )
+
+        assert response == "ok"
+        messages = provider.chat_with_retry.await_args.kwargs["messages"]
+        assert messages[1]["role"] == "system"
+        assert "Feishu delivery rule" in messages[1]["content"]

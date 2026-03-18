@@ -473,6 +473,8 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
+        system_messages = list(extra_system_messages or [])
+        system_messages.extend(self._channel_system_messages(channel))
         history = session.get_history(max_messages=self.memory_window)
         initial_messages = self.context.build_messages(
             history=history,
@@ -482,7 +484,7 @@ class AgentLoop:
             chat_id=chat_id,
             runtime_metadata=metadata,
             extra_context=metadata.get("extra_context"),
-            extra_system_messages=extra_system_messages,
+            extra_system_messages=system_messages or None,
             system_overlay_root=str(overlay_context.root_path) if overlay_context.root_path else None,
             system_overlay_bootstrap=overlay_context.system_overlay_bootstrap,
         )
@@ -760,3 +762,19 @@ class AgentLoop:
         if len(normalized) <= 280:
             return normalized
         return normalized[:277].rstrip() + "..."
+
+    @staticmethod
+    def _channel_system_messages(channel: str) -> list[str]:
+        """Return channel-scoped delivery hints without polluting other transports."""
+        if channel != "feishu":
+            return []
+        return [
+            (
+                "Feishu delivery rule: for proactive reminders, summaries, or follow-up notifications sent "
+                "with the `message` tool on Feishu, prefer the structured `feishu_card` templates "
+                "`notification` or `confirm`. Use `notification` for one-way updates and `confirm` only "
+                "when you need the user to answer in chat. Do not use `message` or `feishu_card` for the "
+                "assistant's normal reply in the current conversation turn; normal Feishu replies stay on "
+                "the standard text/post path."
+            )
+        ]
