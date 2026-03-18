@@ -14,7 +14,7 @@ from nanobot.providers.registry import find_by_model
 runner = CliRunner()
 
 
-class _StopGateway(RuntimeError):
+class _StopGatewayError(RuntimeError):
     pass
 
 
@@ -85,7 +85,7 @@ def mock_paths():
     """Mock config/workspace paths for test isolation."""
     with patch("nanobot.config.loader.get_config_path") as mock_cp, \
          patch("nanobot.config.loader.save_config") as mock_sc, \
-         patch("nanobot.config.loader.load_config") as mock_lc, \
+         patch("nanobot.config.loader.load_config"), \
          patch("nanobot.cli.commands.get_workspace_path") as mock_ws:
 
         base_dir = Path("./test_onboard_data")
@@ -349,12 +349,12 @@ def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Pa
     )
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config: (_ for _ in ()).throw(_StopGatewayError("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
 
-    assert isinstance(result.exception, _StopGateway)
+    assert isinstance(result.exception, _StopGatewayError)
     assert seen["config_path"] == config_file.resolve()
     assert seen["workspace"] == Path(config.agents.defaults.workspace)
 
@@ -377,7 +377,7 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     )
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config: (_ for _ in ()).throw(_StopGatewayError("stop")),
     )
 
     result = runner.invoke(
@@ -385,7 +385,7 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
         ["gateway", "--config", str(config_file), "--workspace", str(override)],
     )
 
-    assert isinstance(result.exception, _StopGateway)
+    assert isinstance(result.exception, _StopGatewayError)
     assert seen["workspace"] == override
     assert config.workspace_path == override
 
@@ -409,13 +409,13 @@ def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Pat
     class _StopCron:
         def __init__(self, store_path: Path) -> None:
             seen["cron_store"] = store_path
-            raise _StopGateway("stop")
+            raise _StopGatewayError("stop")
 
     monkeypatch.setattr("nanobot.cron.service.CronService", _StopCron)
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
 
-    assert isinstance(result.exception, _StopGateway)
+    assert isinstance(result.exception, _StopGatewayError)
     assert seen["cron_store"] == config_file.parent / "cron" / "jobs.json"
 
 
@@ -432,12 +432,12 @@ def test_gateway_uses_configured_port_when_cli_flag_is_missing(monkeypatch, tmp_
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config: (_ for _ in ()).throw(_StopGatewayError("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
 
-    assert isinstance(result.exception, _StopGateway)
+    assert isinstance(result.exception, _StopGatewayError)
     assert "port 18791" in result.stdout
 
 
@@ -454,10 +454,10 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr(
         "nanobot.cli.commands._make_provider",
-        lambda _config: (_ for _ in ()).throw(_StopGateway("stop")),
+        lambda _config: (_ for _ in ()).throw(_StopGatewayError("stop")),
     )
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file), "--port", "18792"])
 
-    assert isinstance(result.exception, _StopGateway)
+    assert isinstance(result.exception, _StopGatewayError)
     assert "port 18792" in result.stdout

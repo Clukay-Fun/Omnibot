@@ -10,9 +10,9 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.feishu.archive import FeishuAsyncArchiveService
 from nanobot.feishu.commands import FeishuCommandHandler
 from nanobot.feishu.memory import FeishuUserMemoryStore
+from nanobot.feishu.types import TranslatedFeishuMessage
 from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.session.manager import SessionManager
-from nanobot.feishu.types import TranslatedFeishuMessage
 
 
 def _translated(command: str) -> TranslatedFeishuMessage:

@@ -17,7 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from nanobot.security.network import validate_resolved_url, validate_url_target
+from nanobot.security.network import validate_resolved_url, validate_url_target  # noqa: E402
 
 DEFAULT_MAX_CHARS = 20000
 DEFAULT_TIMEOUT = 30.0

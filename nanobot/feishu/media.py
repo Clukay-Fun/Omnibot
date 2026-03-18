@@ -10,7 +10,6 @@ from typing import Any
 from loguru import logger
 
 from nanobot.config.paths import get_media_dir
-from nanobot.feishu.client import FeishuClient
 from nanobot.feishu.types import TranslatedFeishuMessage
 
 
