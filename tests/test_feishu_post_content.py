@@ -1,4 +1,5 @@
 from nanobot.channels.feishu import _extract_post_content
+from nanobot.feishu.parser import _extract_interactive_content
 from nanobot.feishu.websocket import register_optional_event
 
 
@@ -64,3 +65,27 @@ def test_register_optional_event_calls_supported_method() -> None:
 
     assert same is builder
     assert called == [handler]
+
+
+def test_extract_interactive_content_supports_card_v2_body_elements() -> None:
+    payload = {
+        "schema": "2.0",
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "待办提醒",
+            }
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": "请尽快处理事项。"},
+                {"tag": "markdown", "content": "- 步骤 1\n- 步骤 2"},
+            ]
+        },
+    }
+
+    parts = _extract_interactive_content(payload)
+
+    assert "title: 待办提醒" in parts
+    assert "请尽快处理事项。" in parts
+    assert "- 步骤 1\n- 步骤 2" in parts

@@ -59,6 +59,11 @@ def _extract_interactive_content(content: dict) -> list[str]:
         for element in elements:
             parts.extend(_extract_element_content(element))
 
+    body = content.get("body", {})
+    if isinstance(body, dict):
+        for element in body.get("elements", []) if isinstance(body.get("elements"), list) else []:
+            parts.extend(_extract_element_content(element))
+
     card = content.get("card", {})
     if card:
         parts.extend(_extract_interactive_content(card))

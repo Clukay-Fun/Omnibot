@@ -6,6 +6,7 @@ from typing import cast
 import pytest
 
 from nanobot.bus.events import OutboundMessage
+from nanobot.feishu.cards import FeishuCardPayload
 from nanobot.feishu.outbound import FeishuOutboundMessenger
 
 
@@ -15,6 +16,7 @@ class _FakeClient:
         self.uploaded_images: list[str] = []
         self.uploaded_files: list[str] = []
         self.fail_send = False
+        self.fail_interactive_sends = 0
 
     @staticmethod
     def resolve_receive_id_type(receive_id: str) -> str:
@@ -37,6 +39,9 @@ class _FakeClient:
         reply_to: str | None = None,
     ) -> bool:
         self.sent.append((receive_id_type, receive_id, msg_type, json.loads(content), reply_to))
+        if msg_type == "interactive" and self.fail_interactive_sends > 0:
+            self.fail_interactive_sends -= 1
+            return False
         return not self.fail_send
 
 
@@ -156,6 +161,94 @@ async def test_outbound_messenger_preserves_existing_interactive_behavior_when_n
 
     assert ok is True
     assert client.sent[0][2] == "interactive"
+
+
+@pytest.mark.asyncio
+async def test_outbound_messenger_sends_notification_card_v2_when_present() -> None:
+    client = _FakeClient()
+    messenger = FeishuOutboundMessenger(lambda: cast(object, client))
+
+    ok = await messenger.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_123",
+            content="fallback should be ignored",
+            feishu_card=FeishuCardPayload(
+                template="notification",
+                title="待办提醒",
+                summary="你有一个待处理事项。",
+                items=["补交材料", "确认时间"],
+                timestamp="今天 18:00 前",
+            ),
+        )
+    )
+
+    assert ok is True
+    assert len(client.sent) == 1
+    assert client.sent[0][2] == "interactive"
+    payload = client.sent[0][3]
+    assert payload["schema"] == "2.0"
+    assert payload["header"]["title"]["content"] == "待办提醒"
+    assert payload["body"]["direction"] == "vertical"
+    assert any(element["tag"] == "markdown" for element in payload["body"]["elements"])
+
+
+@pytest.mark.asyncio
+async def test_outbound_messenger_sends_confirm_card_v2_without_actions() -> None:
+    client = _FakeClient()
+    messenger = FeishuOutboundMessenger(lambda: cast(object, client))
+
+    ok = await messenger.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_123",
+            content="",
+            feishu_card=FeishuCardPayload(
+                template="confirm",
+                title="需要你确认",
+                summary="这个事项是否继续跟进？",
+                items=["保留待办", "暂不处理"],
+                confirm_prompt="回复 保留 或 暂停",
+                suggested_replies=["保留", "暂停"],
+            ),
+        )
+    )
+
+    assert ok is True
+    assert len(client.sent) == 1
+    assert client.sent[0][2] == "interactive"
+    payload = client.sent[0][3]
+    assert payload["schema"] == "2.0"
+    assert payload["header"]["template"] == "orange"
+    assert all(element.get("tag") != "action" for element in payload["body"]["elements"])
+    assert all(element.get("tag") != "action_list" for element in payload["body"]["elements"])
+    assert "Reply In Chat" in payload["body"]["elements"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_outbound_messenger_falls_back_to_post_when_card_send_fails() -> None:
+    client = _FakeClient()
+    client.fail_interactive_sends = 1
+    messenger = FeishuOutboundMessenger(lambda: cast(object, client))
+
+    ok = await messenger.send(
+        OutboundMessage(
+            channel="feishu",
+            chat_id="ou_123",
+            content="",
+            feishu_card=FeishuCardPayload(
+                template="notification",
+                title="待办提醒",
+                summary="请尽快处理。",
+                items=["步骤 1", "步骤 2"],
+            ),
+        )
+    )
+
+    assert ok is True
+    assert len(client.sent) == 2
+    assert client.sent[0][2] == "interactive"
+    assert client.sent[1][2] in {"post", "text"}
 
 
 @pytest.mark.asyncio

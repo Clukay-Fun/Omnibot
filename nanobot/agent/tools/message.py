@@ -4,6 +4,7 @@ from typing import Any, Awaitable, Callable
 
 from nanobot.agent.tools.base import Tool
 from nanobot.bus.events import OutboundMessage
+from nanobot.feishu.cards import FeishuCardPayload, validate_feishu_card_data
 
 
 class MessageTool(Tool):
@@ -45,7 +46,9 @@ class MessageTool(Tool):
         return (
             "Send an additional message to another chat, another user, or a separate destination, "
             "such as notifying a different conversation or sending an extra follow-up. "
-            "Do not use this for the assistant's normal reply in the current conversation turn."
+            "Do not use this for the assistant's normal reply in the current conversation turn. "
+            "For proactive Feishu notifications, you can optionally send a structured `feishu_card` "
+            "using one of the built-in templates instead of plain text."
         )
 
     @property
@@ -55,7 +58,7 @@ class MessageTool(Tool):
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The message content to send"
+                    "description": "The message content to send. Optional when `feishu_card` is provided."
                 },
                 "channel": {
                     "type": "string",
@@ -69,18 +72,75 @@ class MessageTool(Tool):
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional: list of file paths to attach (images, audio, documents)"
+                },
+                "feishu_card": {
+                    "type": "object",
+                    "description": "Optional Feishu Card 2.0 payload for proactive Feishu notifications. Use structured fields, not raw JSON.",
+                    "properties": {
+                        "template": {
+                            "type": "string",
+                            "enum": ["notification", "confirm"],
+                            "description": "notification = one-way update, confirm = static confirmation card that expects a chat reply"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Short card title shown in the header"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Concise summary of the situation"
+                        },
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional short bullet items. Max 4 for notification, max 3 for confirm."
+                        },
+                        "timestamp": {
+                            "type": "string",
+                            "description": "Optional notification timestamp or time range"
+                        },
+                        "note": {
+                            "type": "string",
+                            "description": "Optional short notification note"
+                        },
+                        "confirm_prompt": {
+                            "type": "string",
+                            "description": "Required for confirm cards: a short prompt that the user can answer in chat"
+                        },
+                        "suggested_replies": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional confirm reply suggestions shown as text. Max 3."
+                        },
+                    },
+                    "required": ["template", "title", "summary"],
                 }
             },
-            "required": ["content"]
+            "required": []
         }
+
+    def validate_params(self, params: dict[str, Any]) -> list[str]:
+        errors = super().validate_params(params)
+
+        content = params.get("content")
+        feishu_card = params.get("feishu_card")
+        has_content = isinstance(content, str) and bool(content.strip())
+        if not has_content and feishu_card is None:
+            errors.append("missing required content or feishu_card")
+
+        if feishu_card is not None:
+            errors.extend(validate_feishu_card_data(feishu_card))
+
+        return errors
 
     async def execute(
         self,
-        content: str,
+        content: str | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
         message_id: str | None = None,
         media: list[str] | None = None,
+        feishu_card: dict[str, Any] | None = None,
         **kwargs: Any
     ) -> str:
         channel = channel or self._default_channel
@@ -93,14 +153,24 @@ class MessageTool(Tool):
         if not self._send_callback:
             return "Error: Message sending not configured"
 
+        card_payload: FeishuCardPayload | None = None
+        if feishu_card is not None:
+            if channel != "feishu":
+                return "Error: feishu_card is only supported for the feishu channel"
+            try:
+                card_payload = FeishuCardPayload.from_dict(feishu_card)
+            except ValueError as exc:
+                return f"Error: Invalid feishu_card payload: {exc}"
+
         msg = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=content,
+            content=content or "",
             media=media or [],
             metadata={
                 "message_id": message_id,
             },
+            feishu_card=card_payload,
         )
 
         try:
@@ -108,6 +178,11 @@ class MessageTool(Tool):
             if channel == self._default_channel and chat_id == self._default_chat_id:
                 self._sent_in_turn = True
             media_info = f" with {len(media)} attachments" if media else ""
-            return f"Message sent to {channel}:{chat_id}{media_info}"
+            card_info = (
+                f" using Feishu card template '{card_payload.template}'"
+                if card_payload is not None
+                else ""
+            )
+            return f"Message sent to {channel}:{chat_id}{card_info}{media_info}"
         except Exception as e:
             return f"Error sending message: {str(e)}"

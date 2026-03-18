@@ -111,6 +111,7 @@ class FeishuChannel(BaseChannel):
                 reply_to=msg.reply_to,
                 media=list(msg.media),
                 metadata=local_metadata,
+                feishu_card=None,
             )
             if await self._outbound.send(delivery_msg):
                 await self._streaming.complete_turn(turn_id)

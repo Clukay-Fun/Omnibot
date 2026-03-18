@@ -6,6 +6,7 @@ import pytest
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.channels.feishu import FeishuChannel
+from nanobot.feishu.cards import FeishuCardPayload
 
 
 def _build_channel() -> FeishuChannel:
@@ -49,6 +50,11 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
         channel="feishu",
         chat_id="ou_123",
         content="Final answer",
+        feishu_card=FeishuCardPayload(
+            template="notification",
+            title="不该发送的卡片",
+            summary="普通回复不应走 Card 2.0",
+        ),
         metadata={"turn_id": "turn-2", "message_id": "om_source_2"},
     )
 
@@ -59,6 +65,7 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
     assert delivered is not msg
     assert delivered.metadata["feishu_delivery"] == "reply_post"
     assert delivered.metadata["turn_id"] == "turn-2"
+    assert delivered.feishu_card is None
     channel._streaming.complete_turn.assert_awaited_once_with("turn-2")
     channel._archive_service.kick_worker.assert_called_once_with()
 
@@ -85,7 +92,16 @@ async def test_feishu_channel_keeps_placeholder_when_final_send_fails() -> None:
 async def test_feishu_channel_passes_non_turn_messages_through_unchanged() -> None:
     channel = _build_channel()
     channel._outbound.send = AsyncMock(return_value=True)
-    msg = OutboundMessage(channel="feishu", chat_id="ou_123", content="Heartbeat")
+    msg = OutboundMessage(
+        channel="feishu",
+        chat_id="ou_123",
+        content="Heartbeat",
+        feishu_card=FeishuCardPayload(
+            template="notification",
+            title="Heartbeat",
+            summary="有新的跟进事项",
+        ),
+    )
 
     await FeishuChannel.send(channel, msg)
 

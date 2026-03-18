@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.bus.events import OutboundMessage
+from nanobot.feishu.cards import FeishuCardPayload, build_feishu_card, render_feishu_card_fallback
 from nanobot.feishu.client import FeishuClient
 from nanobot.feishu.renderer import FeishuRenderer
 from nanobot.utils.emoji import emojize_text
@@ -48,7 +49,18 @@ class FeishuOutboundMessenger:
                 sent_any = sent_any or media_ok
                 success = success and media_ok
 
-            if msg.content and msg.content.strip():
+            if msg.feishu_card is not None:
+                card_ok = await self._send_feishu_card(
+                    loop,
+                    client,
+                    receive_id_type,
+                    msg.chat_id,
+                    msg.feishu_card,
+                    reply_to=reply_to,
+                )
+                sent_any = sent_any or card_ok
+                success = success and card_ok
+            elif msg.content and msg.content.strip():
                 content_ok = await self._send_content(
                     loop,
                     client,
@@ -64,6 +76,72 @@ class FeishuOutboundMessenger:
         except Exception as exc:
             logger.error("Error sending Feishu message: {}", exc)
             return False
+
+    async def _send_feishu_card(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        client: FeishuClient,
+        receive_id_type: str,
+        chat_id: str,
+        card: FeishuCardPayload,
+        *,
+        reply_to: str | None = None,
+    ) -> bool:
+        try:
+            payload = build_feishu_card(card)
+        except Exception as exc:
+            logger.warning("Failed to build Feishu Card 2.0 payload: {}", exc)
+            return await self._send_feishu_card_fallback(
+                loop, client, receive_id_type, chat_id, card, reply_to=reply_to
+            )
+
+        try:
+            ok = await loop.run_in_executor(
+                None,
+                client.send_message_sync,
+                receive_id_type,
+                chat_id,
+                "interactive",
+                json.dumps(payload, ensure_ascii=False),
+                reply_to,
+            )
+        except Exception as exc:
+            logger.warning("Feishu Card 2.0 send failed: {}", exc)
+            ok = False
+
+        if ok:
+            return True
+
+        logger.warning(
+            "Feishu Card 2.0 delivery failed for template '{}' to {}, falling back to post/text",
+            card.template,
+            chat_id,
+        )
+        return await self._send_feishu_card_fallback(
+            loop, client, receive_id_type, chat_id, card, reply_to=reply_to
+        )
+
+    async def _send_feishu_card_fallback(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        client: FeishuClient,
+        receive_id_type: str,
+        chat_id: str,
+        card: FeishuCardPayload,
+        *,
+        reply_to: str | None = None,
+    ) -> bool:
+        fallback_content = render_feishu_card_fallback(card)
+        msg_type, payload = FeishuRenderer.render_reply_post(fallback_content)
+        return bool(await loop.run_in_executor(
+            None,
+            client.send_message_sync,
+            receive_id_type,
+            chat_id,
+            msg_type,
+            payload,
+            reply_to,
+        ))
 
     @staticmethod
     def _reply_target(msg: OutboundMessage) -> str | None:
