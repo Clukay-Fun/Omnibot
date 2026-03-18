@@ -520,8 +520,22 @@ class TestConsolidationDeduplicationGuard:
         msg_at = InboundMessage(channel="cli", sender_id="user", chat_id="at", content="hello")
         await loop._process_message(msg_at)
 
-        assert loop._consolidation_trigger_threshold == 50
+        assert loop._consolidation_trigger_threshold("cli:at") == 50
         assert "cli:at" in loop._pending_consolidations
+
+    def test_heartbeat_sessions_use_a_smaller_consolidation_threshold(self, tmp_path: Path) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=100
+        )
+
+        assert loop._consolidation_trigger_threshold("cli:direct") == 50
+        assert loop._consolidation_trigger_threshold("feishu:dm:ou_123:heartbeat") == 12
 
     @pytest.mark.asyncio
     async def test_process_message_only_registers_background_consolidation(
@@ -720,6 +734,43 @@ class TestConsolidationDeduplicationGuard:
         assert len(loop._consolidation_tasks) == 0, (
             "Task reference must be removed after completion"
         )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_consolidation_prunes_archived_messages_and_keeps_summary(
+        self, tmp_path: Path
+    ) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        session = loop.sessions.get_or_create("feishu:dm:ou_123:heartbeat")
+        for i in range(12):
+            session.add_message("user", f"msg{i}")
+        loop.sessions.save(session)
+        loop._pending_consolidations.add(session.key)
+
+        async def _fake_consolidate(sess, archive_all: bool = False) -> bool:
+            sess.record_heartbeat_summary("[2026-03-18 14:10] Permission request still pending.")
+            sess.last_consolidated = 10
+            return True
+
+        loop._consolidate_memory = _fake_consolidate  # type: ignore[method-assign]
+
+        loop._schedule_pending_consolidation(session.key)
+        await asyncio.sleep(0.05)
+
+        reloaded = loop.sessions.get_or_create(session.key)
+        assert [message["content"] for message in reloaded.messages] == ["msg10", "msg11"]
+        assert reloaded.last_consolidated == 0
+        summary_message = reloaded.get_prompt_summary_message()
+        assert summary_message is not None
+        assert "Permission request still pending." in summary_message
 
     @pytest.mark.asyncio
     async def test_new_returns_immediately_and_clears_session_while_archival_waits(

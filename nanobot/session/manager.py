@@ -31,6 +31,9 @@ class Session:
     updated_at: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
     last_consolidated: int = 0  # Number of messages already consolidated to files
+    _HEARTBEAT_SUMMARY_KEY = "_heartbeat_summary"
+    _HEARTBEAT_SUMMARY_ENTRIES_KEY = "_heartbeat_summary_entries"
+    _HEARTBEAT_SUMMARY_MAX_ENTRIES = 3
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the session."""
@@ -101,6 +104,52 @@ class Session:
     def clear(self) -> None:
         """Clear all messages and reset session to initial state."""
         self.messages = []
+        self.last_consolidated = 0
+        self.updated_at = datetime.now()
+
+    def is_heartbeat_session(self) -> bool:
+        """Return True for dedicated heartbeat follow-up sessions."""
+        return self.key == "heartbeat" or self.key.endswith(":heartbeat")
+
+    def get_prompt_summary_message(self) -> str | None:
+        """Return a synthetic summary message for compacted heartbeat history."""
+        if not self.is_heartbeat_session():
+            return None
+        summary = str(self.metadata.get(self._HEARTBEAT_SUMMARY_KEY) or "").strip()
+        if not summary:
+            return None
+        return (
+            "The following is a rolling summary of earlier heartbeat follow-up conversation. "
+            "Treat it as summarized background context, and prefer the newer raw turns below if they conflict.\n\n"
+            f"{summary}"
+        )
+
+    def record_heartbeat_summary(self, history_entry: str) -> None:
+        """Track a short rolling summary for heartbeat sessions after consolidation."""
+        if not self.is_heartbeat_session():
+            return
+
+        text = history_entry.strip()
+        if not text:
+            return
+
+        entries = self.metadata.get(self._HEARTBEAT_SUMMARY_ENTRIES_KEY)
+        if not isinstance(entries, list):
+            entries = []
+        normalized = [str(item).strip() for item in entries if str(item).strip()]
+        normalized.append(text)
+        normalized = normalized[-self._HEARTBEAT_SUMMARY_MAX_ENTRIES:]
+
+        self.metadata[self._HEARTBEAT_SUMMARY_ENTRIES_KEY] = normalized
+        self.metadata[self._HEARTBEAT_SUMMARY_KEY] = "\n".join(normalized)
+        self.updated_at = datetime.now()
+
+    def prune_consolidated_messages(self) -> None:
+        """Drop already-consolidated history to keep heartbeat session files small."""
+        prune_count = max(0, min(self.last_consolidated, len(self.messages)))
+        if prune_count <= 0:
+            return
+        self.messages = self.messages[prune_count:]
         self.last_consolidated = 0
         self.updated_at = datetime.now()
 

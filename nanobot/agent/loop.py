@@ -397,6 +397,7 @@ class AgentLoop:
                 chat_id=chat_id,
                 runtime_metadata=metadata,
                 extra_context=metadata.get("extra_context"),
+                conversation_summary=session.get_prompt_summary_message(),
                 system_overlay_root=str(overlay_context.root_path) if overlay_context.root_path else None,
                 system_overlay_bootstrap=overlay_context.system_overlay_bootstrap,
             )
@@ -434,7 +435,7 @@ class AgentLoop:
 
         unconsolidated = len(session.messages) - session.last_consolidated
         if (
-            unconsolidated >= self._consolidation_trigger_threshold
+            unconsolidated >= self._consolidation_trigger_threshold(session.key)
             and session.key not in self._consolidating
             and session.key not in self._pending_consolidations
         ):
@@ -454,6 +455,7 @@ class AgentLoop:
             chat_id=msg.chat_id,
             runtime_metadata=metadata,
             extra_context=metadata.get("extra_context"),
+            conversation_summary=session.get_prompt_summary_message(),
             system_overlay_root=str(overlay_context.root_path) if overlay_context.root_path else None,
             system_overlay_bootstrap=overlay_context.system_overlay_bootstrap,
         )
@@ -530,12 +532,16 @@ class AgentLoop:
         """Delegate to MemoryStore.consolidate(). Returns True on success."""
         overlay_context = OverlayContext.from_metadata(session.metadata)
         memory_root = overlay_context.root_path or self.workspace
+        def _remember(result) -> None:
+            session.record_heartbeat_summary(result.history_entry)
+
         return await self._get_memory_store(memory_root).consolidate(
             session, self.provider, self.model,
             archive_all=archive_all, memory_window=self.memory_window,
             temperature=self.temperature, max_tokens=self.max_tokens,
             reasoning_effort=self.reasoning_effort,
             purpose="memory_consolidation",
+            on_consolidated=_remember,
         )
 
     async def _archive_session_tail(self, session: Session) -> bool:
@@ -557,8 +563,9 @@ class AgentLoop:
             purpose="memory_consolidation",
         )
 
-    @property
-    def _consolidation_trigger_threshold(self) -> int:
+    def _consolidation_trigger_threshold(self, session_key: str | None = None) -> int:
+        if session_key == "heartbeat" or (session_key and session_key.endswith(":heartbeat")):
+            return max(10, min(12, self.memory_window))
         return max(20, self.memory_window // 2)
 
     def _schedule_pending_consolidation(self, session_key: str) -> None:
@@ -578,9 +585,13 @@ class AgentLoop:
                             return
                         session = self.sessions.get_or_create(session_key)
                         unconsolidated = len(session.messages) - session.last_consolidated
-                        if unconsolidated < self._consolidation_trigger_threshold:
+                        if unconsolidated < self._consolidation_trigger_threshold(session_key):
                             return
                         if await self._consolidate_memory(session):
+                            if self._get_session_generation(session_key) == generation:
+                                self.sessions.save(session)
+                            if session.is_heartbeat_session():
+                                session.prune_consolidated_messages()
                             if self._get_session_generation(session_key) == generation:
                                 self.sessions.save(session)
             finally:

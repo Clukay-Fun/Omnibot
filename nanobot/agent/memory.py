@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
@@ -63,6 +64,15 @@ _TOOL_CHOICE_ERROR_MARKERS = (
     "does not support",
     'should be ["none", "auto"]',
 )
+
+
+@dataclass(slots=True)
+class MemoryConsolidationResult:
+    """Normalized consolidation payload emitted after a successful archive."""
+
+    history_entry: str
+    memory_update: str
+    raw_archive: bool = False
 
 
 def _is_tool_choice_unsupported(content: str | None) -> bool:
@@ -152,6 +162,7 @@ class MemoryStore:
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
         purpose: str | None = None,
+        on_consolidated: Callable[[MemoryConsolidationResult], None] | None = None,
     ) -> bool:
         """Consolidate old messages into MEMORY.md + HISTORY.md via LLM tool call.
 
@@ -174,6 +185,7 @@ class MemoryStore:
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
             purpose=purpose,
+            on_consolidated=on_consolidated,
         )
         if not success:
             return False
@@ -196,6 +208,7 @@ class MemoryStore:
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
         purpose: str | None = None,
+        on_consolidated: Callable[[MemoryConsolidationResult], None] | None = None,
     ) -> bool:
         """Consolidate an explicit message chunk into MEMORY.md + HISTORY.md."""
         if not messages:
@@ -250,40 +263,42 @@ class MemoryStore:
                     len(response.content or ""),
                     (response.content or "")[:200],
                 )
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             args = _normalize_save_memory_args(response.tool_calls[0].arguments)
             if args is None:
                 logger.warning("Memory consolidation: unexpected save_memory arguments")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             if "history_entry" not in args or "memory_update" not in args:
                 logger.warning("Memory consolidation: save_memory payload missing required fields")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             entry = args["history_entry"]
             update = args["memory_update"]
 
             if entry is None or update is None:
                 logger.warning("Memory consolidation: save_memory payload contains null required fields")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             entry = _ensure_text(entry).strip()
             if not entry:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
-                return self._fail_or_raw_archive(messages)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             self.append_history(entry)
             update = _ensure_text(update)
             if update != current_memory:
                 self.write_long_term(update)
+            if on_consolidated is not None:
+                on_consolidated(MemoryConsolidationResult(history_entry=entry, memory_update=update))
 
             self._consecutive_failures = 0
             logger.info("Memory consolidation done for {} messages", len(messages))
             return True
         except Exception:
             logger.exception("Memory consolidation failed")
-            return self._fail_or_raw_archive(messages)
+            return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
     async def archive_messages(
         self,
@@ -295,6 +310,7 @@ class MemoryStore:
         max_tokens: int = 4096,
         reasoning_effort: str | None = None,
         purpose: str | None = None,
+        on_consolidated: Callable[[MemoryConsolidationResult], None] | None = None,
     ) -> bool:
         """Archive messages with guaranteed persistence semantics."""
         if not messages:
@@ -309,23 +325,35 @@ class MemoryStore:
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
                 purpose=purpose,
+                on_consolidated=on_consolidated,
             ):
                 return True
         return True
 
-    def _fail_or_raw_archive(self, messages: list[dict[str, Any]]) -> bool:
+    def _fail_or_raw_archive(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        on_consolidated: Callable[[MemoryConsolidationResult], None] | None = None,
+    ) -> bool:
         """Increment failure count; after threshold, raw-archive messages and return True."""
         self._consecutive_failures += 1
         if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
             return False
-        self._raw_archive(messages)
+        self._raw_archive(messages, on_consolidated=on_consolidated)
         self._consecutive_failures = 0
         return True
 
-    def _raw_archive(self, messages: list[dict[str, Any]]) -> None:
+    def _raw_archive(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        on_consolidated: Callable[[MemoryConsolidationResult], None] | None = None,
+    ) -> None:
         """Fallback: dump raw messages to HISTORY.md without LLM summarization."""
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self.append_history(
-            f"[{ts}] [RAW] {len(messages)} messages\n{self._format_messages(messages)}"
-        )
+        entry = f"[{ts}] [RAW] {len(messages)} messages\n{self._format_messages(messages)}"
+        self.append_history(entry)
+        if on_consolidated is not None:
+            on_consolidated(MemoryConsolidationResult(history_entry=entry, memory_update=self.read_long_term(), raw_archive=True))
         logger.warning("Memory consolidation degraded: raw-archived {} messages", len(messages))

@@ -186,6 +186,24 @@ def test_extra_context_is_merged_into_user_message(tmp_path) -> None:
     assert "Answer briefly" in user_content
 
 
+def test_conversation_summary_is_inserted_as_separate_system_message(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    messages = builder.build_messages(
+        history=[{"role": "assistant", "content": "recent raw turn"}],
+        current_message="Answer briefly",
+        channel="feishu",
+        chat_id="oc_chat_1",
+        conversation_summary="Earlier summary goes here.",
+    )
+
+    assert messages[0]["role"] == "system"
+    assert messages[1] == {"role": "system", "content": "Earlier summary goes here."}
+    assert messages[2] == {"role": "assistant", "content": "recent raw turn"}
+    assert messages[-1]["role"] == "user"
+
+
 def test_system_prompt_uses_overlay_files_for_dm_persona(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     (workspace / "AGENTS.md").write_text("global agents", encoding="utf-8")

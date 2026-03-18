@@ -207,6 +207,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
         chat_id: str | None = None,
         runtime_metadata: dict[str, Any] | None = None,
         extra_context: str | list[str] | None = None,
+        conversation_summary: str | None = None,
         system_overlay_root: str | None = None,
         system_overlay_bootstrap: bool | None = None,
     ) -> list[dict[str, Any]]:
@@ -231,7 +232,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                 merged.append({"type": "text", "text": extra_ctx})
             merged.extend(user_content)
 
-        return [
+        messages = [
             {
                 "role": "system",
                 "content": self.build_system_prompt(
@@ -240,13 +241,23 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
                     system_overlay_bootstrap=system_overlay_bootstrap,
                 ),
             },
-            *history,
+        ]
+        if conversation_summary and conversation_summary.strip():
+            messages.append(
+                {
+                    "role": "system",
+                    "content": conversation_summary.strip(),
+                }
+            )
+        messages.extend(history)
+        messages.append(
             {
                 "role": "user",
                 "content": merged,
                 self._SESSION_USER_CONTENT_KEY: session_user_content,
             },
-        ]
+        )
+        return messages
 
     def _build_extra_context(self, extra_context: str | list[str] | None) -> str | None:
         """Build optional extra context block injected before user content."""
