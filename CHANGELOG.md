@@ -1,11 +1,33 @@
-# Changelog
+# 更新日志
 
-All notable changes to this project should be recorded here.
+此文件用于记录项目中所有值得关注的变更。
 
-## 0.1.5 - Unreleased
+## 0.2.0 - 2026-03-19
 
-### Changed
+### 新增
 
-- Unified the package version to a single source in `nanobot/version.py`.
-- Updated `nanobot --version` to include the short Git revision when available, for example `nanobot v0.1.5 (f7ab86f)`.
-- Established this changelog as the place to keep release-facing version notes going forward.
+- 新增完整的 Feishu 集成能力，包括消息接入、媒体处理、路由、记忆、流式回复、交互式思维卡片与广播能力。
+- 新增 Feishu Workspace 技能，支持 Calendar、Bitable、Docs 等工作区操作。
+- 新增 Feishu OCR 技能，支持图片内容识别相关工作流。
+- 新增 `http-api` 技能，支持在技能中发起带认证的 HTTP 调用，并补充更灵活的 Feishu API 访问辅助能力。
+- 新增 Feishu 主动通知能力，并支持使用 Card 2.0 渲染外发消息。
+- 新增按用户维度的 overlay context、workspace 与引导模板能力，用于个性化记忆与初始化。
+- 新增 heartbeat 相关 CLI 控制命令，以及用于环境和配置检查的 `doctor` 命令。
+- 新增一键服务器更新脚本，并补充 Feishu 部署、配置、巡检与运维文档。
+
+### 变更
+
+- 将包版本统一收敛为 `nanobot/version.py` 中的单一来源。
+- 更新 `nanobot --version` 输出，在可用时附带短 Git 提交号，例如 `nanobot v0.2.0 (f7ab86f)`。
+- 明确后续面向发布的版本说明统一记录在本变更日志中。
+- 重写并聚焦 README 与部署文档，突出 Feishu 专属智能体与服务器部署路径。
+- 更新默认模板与初始化引导内容，补充 `BOOTSTRAP.md` 等预设模板。
+- 重构 heartbeat 执行方式，改为在全新的临时会话中运行，并压缩历史会话记录。
+- 优化 Feishu 回复卡片、进度反馈与思维卡片展示体验。
+- 清理仓库范围内的 Ruff 问题，并移除已被跟踪的 `.DS_Store` 文件。
+
+### 修复
+
+- 加强对 `~` 展开后工作区路径的执行保护。
+- 在 MCP 连接路径中捕获 `BaseException`，避免连接取消时导致 agent loop 崩溃。
+- 增强异常处理，避免 agent loop 因部分运行时异常直接退出。
