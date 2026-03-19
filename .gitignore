@@ -1,6 +1,8 @@
 .worktrees/
 .assets
 .env
+.DS_Store
+**/.DS_Store
 *.pyc
 dist/
 build/
