@@ -30,6 +30,7 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__
+from nanobot.cli.doctor import DoctorReport, resolve_config_path, run_doctor
 from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.feishu.broadcast import FeishuBroadcastService
@@ -46,6 +47,13 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+_DOCTOR_STATUS_LABELS = {
+    "ok": "[green]OK[/green]",
+    "warn": "[yellow]WARN[/yellow]",
+    "error": "[red]ERROR[/red]",
+    "fixed": "[cyan]FIXED[/cyan]",
+    "skipped": "[dim]SKIPPED[/dim]",
+}
 
 # ---------------------------------------------------------------------------
 # CLI input: prompt_toolkit for editing, paste, history, and display
@@ -288,6 +296,47 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
     return loaded
 
 
+def _load_persisted_config(config: str | None = None) -> tuple[Path, Config]:
+    """Load the exact config file targeted by an operator command."""
+    from nanobot.config.loader import load_config, set_config_path
+
+    path = resolve_config_path(config)
+    if config:
+        set_config_path(path)
+    if not path.exists():
+        console.print(f"[red]Error: Config file not found: {path}[/red]")
+        raise typer.Exit(1)
+    return path, load_config(path)
+
+
+def _print_restart_note() -> None:
+    console.print("[yellow]Restart required to apply config changes.[/yellow]")
+
+
+def _print_doctor_report(report: DoctorReport) -> None:
+    console.print(f"{__logo__} nanobot Doctor\n")
+    console.print(Text(f"Config: {report.config_path}", no_wrap=True, overflow="ignore"))
+    if report.workspace_path is not None:
+        console.print(Text(f"Workspace: {report.workspace_path}", no_wrap=True, overflow="ignore"))
+    console.print()
+
+    table = Table(title="Doctor Findings")
+    table.add_column("Status", style="cyan", no_wrap=True)
+    table.add_column("Check", style="magenta", no_wrap=True)
+    table.add_column("Summary", style="white")
+
+    for finding in report.findings:
+        summary = finding.summary
+        if finding.detail:
+            summary = f"{summary} [{finding.detail}]"
+        table.add_row(_DOCTOR_STATUS_LABELS[finding.status], finding.key, summary)
+
+    console.print(table)
+    if report.restart_required:
+        console.print()
+        _print_restart_note()
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -498,6 +547,90 @@ def gateway(
     asyncio.run(run())
 
 
+# ============================================================================
+# Heartbeat Commands
+# ============================================================================
+
+
+heartbeat_app = typer.Typer(help="Manage heartbeat configuration")
+app.add_typer(heartbeat_app, name="heartbeat")
+
+
+@heartbeat_app.command("status")
+def heartbeat_status(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Show the configured heartbeat state."""
+    path, runtime_config = _load_persisted_config(config)
+    heartbeat = runtime_config.gateway.heartbeat
+
+    console.print(f"{__logo__} Heartbeat Status\n")
+    console.print(Text(f"Config: {path}", no_wrap=True, overflow="ignore"))
+    console.print(f"Enabled: {'yes' if heartbeat.enabled else 'no'}")
+    console.print(f"Interval: {heartbeat.interval_s}s")
+
+
+@heartbeat_app.command("on")
+def heartbeat_on(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Persistently enable heartbeat in config."""
+    from nanobot.config.loader import save_config
+
+    path, runtime_config = _load_persisted_config(config)
+    changed = not runtime_config.gateway.heartbeat.enabled
+    runtime_config.gateway.heartbeat.enabled = True
+    if changed:
+        save_config(runtime_config, path)
+        console.print(f"[green]✓[/green] Enabled heartbeat in {path}")
+        _print_restart_note()
+        return
+
+    console.print(f"[green]Heartbeat is already enabled.[/green] Config: {path}")
+
+
+@heartbeat_app.command("off")
+def heartbeat_off(
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Persistently disable heartbeat in config."""
+    from nanobot.config.loader import save_config
+
+    path, runtime_config = _load_persisted_config(config)
+    changed = runtime_config.gateway.heartbeat.enabled
+    runtime_config.gateway.heartbeat.enabled = False
+    if changed:
+        save_config(runtime_config, path)
+        console.print(f"[green]✓[/green] Disabled heartbeat in {path}")
+        _print_restart_note()
+        return
+
+    console.print(f"[green]Heartbeat is already disabled.[/green] Config: {path}")
+
+
+@heartbeat_app.command("set-interval")
+def heartbeat_set_interval(
+    seconds: int = typer.Argument(..., help="Heartbeat interval in seconds"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Persistently set the heartbeat interval in seconds."""
+    from nanobot.config.loader import save_config
+
+    if seconds <= 0:
+        console.print("[red]Heartbeat interval must be a positive integer.[/red]")
+        raise typer.Exit(1)
+
+    path, runtime_config = _load_persisted_config(config)
+    previous = runtime_config.gateway.heartbeat.interval_s
+    runtime_config.gateway.heartbeat.interval_s = seconds
+    if previous != seconds:
+        save_config(runtime_config, path)
+        console.print(f"[green]✓[/green] Updated heartbeat interval: {previous}s -> {seconds}s")
+        console.print(f"Config: {path}")
+        _print_restart_note()
+        return
+
+    console.print(f"[green]Heartbeat interval is already {seconds}s.[/green] Config: {path}")
 
 
 # ============================================================================
@@ -999,6 +1132,18 @@ def status():
             else:
                 has_key = bool(p.api_key)
                 console.print(f"{spec.label}: {'[green]✓[/green]' if has_key else '[dim]not set[/dim]'}")
+
+
+@app.command()
+def doctor(
+    fix: bool = typer.Option(False, "--fix", help="Apply safe local fixes"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+):
+    """Inspect core nanobot health and optionally apply safe local fixes."""
+    report = run_doctor(config, fix=fix)
+    _print_doctor_report(report)
+    if report.has_remaining_issues:
+        raise typer.Exit(1)
 
 
 # ============================================================================

@@ -1,3 +1,4 @@
+import json
 import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,10 +7,12 @@ import pytest
 from typer.testing import CliRunner
 
 from nanobot.cli.commands import app
+from nanobot.config.loader import save_config
 from nanobot.config.schema import Config
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
+from nanobot.utils.helpers import sync_workspace_templates
 
 runner = CliRunner()
 
@@ -461,3 +464,120 @@ def test_gateway_cli_port_overrides_configured_port(monkeypatch, tmp_path: Path)
 
     assert isinstance(result.exception, _StopGatewayError)
     assert "port 18792" in result.stdout
+
+
+def _write_cli_config(config_path: Path, *, workspace: Path | None = None) -> Config:
+    config = Config()
+    config.providers.anthropic.api_key = "test-key"
+    if workspace is not None:
+        config.agents.defaults.workspace = str(workspace)
+    save_config(config, config_path)
+    return config
+
+
+def test_heartbeat_status_reads_target_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    config = _write_cli_config(config_path, workspace=workspace)
+    config.gateway.heartbeat.enabled = False
+    config.gateway.heartbeat.interval_s = 7200
+    save_config(config, config_path)
+
+    result = runner.invoke(app, ["heartbeat", "status", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert str(config_path.resolve()) in result.stdout.replace("\n", "")
+    assert "Enabled: no" in result.stdout
+    assert "Interval: 7200s" in result.stdout
+
+
+def test_heartbeat_off_preserves_unrelated_fields(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    config = _write_cli_config(config_path, workspace=workspace)
+    config.agents.defaults.model = "anthropic/claude-3-7-sonnet"
+    config.gateway.heartbeat.enabled = True
+    save_config(config, config_path)
+
+    result = runner.invoke(app, ["heartbeat", "off", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["agents"]["defaults"]["model"] == "anthropic/claude-3-7-sonnet"
+    assert saved["gateway"]["heartbeat"]["enabled"] is False
+    assert "Restart required" in result.stdout
+
+
+def test_heartbeat_on_updates_target_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    config = _write_cli_config(config_path, workspace=workspace)
+    config.gateway.heartbeat.enabled = False
+    save_config(config, config_path)
+
+    result = runner.invoke(app, ["heartbeat", "on", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["gateway"]["heartbeat"]["enabled"] is True
+    assert "Enabled heartbeat" in result.stdout
+
+
+def test_heartbeat_set_interval_rejects_invalid_values(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+
+    result = runner.invoke(app, ["heartbeat", "set-interval", "0", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "positive integer" in result.stdout
+
+
+def test_doctor_reports_clean_state_on_valid_setup(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    sync_workspace_templates(workspace, silent=True)
+
+    result = runner.invoke(app, ["doctor", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Doctor Findings" in result.stdout
+    assert "workspace.templates" in result.stdout
+    assert "heartbeat.legacy_sessions" in result.stdout
+
+
+def test_doctor_fix_repairs_fixable_issues(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    raw = Config().model_dump(by_alias=True)
+    raw["agents"]["defaults"]["workspace"] = str(workspace)
+    raw["providers"]["anthropic"]["apiKey"] = "test-key"
+    raw["gateway"]["heartbeat"]["enabled"] = "yes"
+    raw["gateway"]["heartbeat"]["intervalS"] = 0
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    (workspace / "sessions").mkdir(parents=True, exist_ok=True)
+    (workspace / "sessions" / "legacy-heartbeat.jsonl").write_text("{}", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--fix", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    repaired = json.loads(config_path.read_text(encoding="utf-8"))
+    assert repaired["gateway"]["heartbeat"]["enabled"] is True
+    assert repaired["gateway"]["heartbeat"]["intervalS"] == 1800
+    assert (workspace / "AGENTS.md").exists()
+    assert not (workspace / "sessions" / "legacy-heartbeat.jsonl").exists()
+    assert "FIXED" in result.stdout
+    assert "Restart required" in result.stdout
+
+
+def test_doctor_returns_nonzero_when_unfixable_issues_remain(tmp_path: Path) -> None:
+    config_path = tmp_path / "broken.json"
+    config_path.write_text("{not-json", encoding="utf-8")
+
+    result = runner.invoke(app, ["doctor", "--fix", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "not valid JSON" in result.stdout
