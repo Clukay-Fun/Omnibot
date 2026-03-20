@@ -35,6 +35,7 @@ def test_run_doctor_reports_clean_workspace(tmp_path: Path) -> None:
     assert report.workspace_path == workspace
     assert report.has_remaining_issues is False
     assert {finding.key: finding.status for finding in report.findings}["workspace.templates"] == "ok"
+    assert (workspace / "WORKLOG.md").exists()
 
 
 def test_run_doctor_fix_repairs_heartbeat_and_cleans_legacy_files(tmp_path: Path) -> None:

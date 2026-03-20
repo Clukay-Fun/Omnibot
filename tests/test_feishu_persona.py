@@ -23,6 +23,7 @@ def test_workspace_manager_creates_dm_workspace_from_per_user_templates(tmp_path
     assert (overlay / "USER.md").exists()
     assert (overlay / "BOOTSTRAP.md").exists()
     assert (overlay / "HEARTBEAT.md").exists()
+    assert (overlay / "WORKLOG.md").exists()
     assert (overlay / "memory" / "MEMORY.md").exists()
     assert (overlay / "memory" / "HISTORY.md").exists()
     assert "(待了解)" in (overlay / "USER.md").read_text(encoding="utf-8")
@@ -73,6 +74,10 @@ def test_workspace_manager_migrates_meaningful_global_state_once_and_resets_root
     (workspace / "USER.md").write_text("- **昵称**：康哥\n", encoding="utf-8")
     (workspace / "BOOTSTRAP.md").write_text("legacy bootstrap", encoding="utf-8")
     (workspace / "HEARTBEAT.md").write_text("- [ ] Follow up with 康哥\n", encoding="utf-8")
+    (workspace / "WORKLOG.md").write_text(
+        "## 进行中\n\n### 整理飞书 bot 方案\n- 优先级：高\n- 状态/下一步：补 per-user worklog\n",
+        encoding="utf-8",
+    )
     (workspace / "memory" / "MEMORY.md").write_text("Known preference: concise", encoding="utf-8")
     (workspace / "memory" / "HISTORY.md").write_text("[2026-03-11 10:00] promised a follow-up", encoding="utf-8")
 
@@ -82,6 +87,7 @@ def test_workspace_manager_migrates_meaningful_global_state_once_and_resets_root
     assert (overlay / "USER.md").read_text(encoding="utf-8") == "- **昵称**：康哥\n"
     assert (overlay / "BOOTSTRAP.md").read_text(encoding="utf-8") == "legacy bootstrap"
     assert (overlay / "HEARTBEAT.md").read_text(encoding="utf-8") == "- [ ] Follow up with 康哥\n"
+    assert "整理飞书 bot 方案" in (overlay / "WORKLOG.md").read_text(encoding="utf-8")
     assert (overlay / "memory" / "MEMORY.md").read_text(encoding="utf-8") == "Known preference: concise"
     assert (overlay / "memory" / "HISTORY.md").read_text(encoding="utf-8") == "[2026-03-11 10:00] promised a follow-up"
 
@@ -94,6 +100,7 @@ def test_workspace_manager_migrates_meaningful_global_state_once_and_resets_root
     assert "(你的名字)" in (workspace / "USER.md").read_text(encoding="utf-8")
     assert "Hello, World" in (workspace / "BOOTSTRAP.md").read_text(encoding="utf-8")
     assert "活动检查任务" in (workspace / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert "当前工作面板" in (workspace / "WORKLOG.md").read_text(encoding="utf-8")
     assert "# Long-term Memory" in (workspace / "memory" / "MEMORY.md").read_text(encoding="utf-8")
     assert (workspace / "memory" / "HISTORY.md").read_text(encoding="utf-8") == ""
 

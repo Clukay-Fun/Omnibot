@@ -4,7 +4,10 @@ import difflib
 from pathlib import Path
 from typing import Any
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
+from nanobot.agent.worklog import WorklogStore
 
 
 def _resolve_path(
@@ -21,6 +24,10 @@ def _resolve_path(
         except ValueError:
             raise PermissionError(f"Path {path} is outside allowed directory {allowed_dir}")
     return resolved
+
+
+def _is_worklog_path(path: Path) -> bool:
+    return path.name == "WORKLOG.md"
 
 
 class ReadFileTool(Tool):
@@ -102,8 +109,17 @@ class WriteFileTool(Tool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
+            if _is_worklog_path(file_path):
+                content = WorklogStore.normalize_content(content)
+            previous = file_path.read_text(encoding="utf-8") if file_path.exists() else None
+            if previous == content:
+                if _is_worklog_path(file_path):
+                    logger.info("WORKLOG unchanged via write_file: {}", file_path)
+                return f"No changes written to {file_path}"
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
+            if _is_worklog_path(file_path):
+                logger.info("WORKLOG updated via write_file: {}", file_path)
             return f"Successfully wrote {len(content)} bytes to {file_path}"
         except PermissionError as e:
             return f"Error: {e}"
@@ -155,7 +171,15 @@ class EditFileTool(Tool):
                 return f"Warning: old_text appears {count} times. Please provide more context to make it unique."
 
             new_content = content.replace(old_text, new_text, 1)
+            if _is_worklog_path(file_path):
+                new_content = WorklogStore.normalize_content(new_content)
+            if new_content == content:
+                if _is_worklog_path(file_path):
+                    logger.info("WORKLOG unchanged via edit_file: {}", file_path)
+                return f"No changes written to {file_path}"
             file_path.write_text(new_content, encoding="utf-8")
+            if _is_worklog_path(file_path):
+                logger.info("WORKLOG updated via edit_file: {}", file_path)
 
             return f"Successfully edited {file_path}"
         except PermissionError as e:

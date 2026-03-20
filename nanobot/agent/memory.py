@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
+from nanobot.agent.worklog import WorklogStore
 from nanobot.utils.helpers import ensure_dir
 
 if TYPE_CHECKING:
@@ -215,10 +216,21 @@ class MemoryStore:
             return True
 
         current_memory = self.read_long_term()
+        current_worklog = WorklogStore(self.memory_dir.parent).read_full()
         prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+
+Rules:
+- MEMORY.md stores long-term facts, stable preferences, and long-lived work background.
+- WORKLOG.md stores active, executable work items with a next step.
+- Do not copy tasks, blockers, priorities, or next steps into MEMORY.md.
+- Example for MEMORY.md: "The user is building a Feishu bot."
+- Example for WORKLOG.md instead: "Add per-user worklog support" or "Control prompt bloat from WORKLOG snapshots."
 
 ## Current Long-term Memory
 {current_memory or "(empty)"}
+
+## Current WORKLOG.md
+{current_worklog or "(empty)"}
 
 ## Conversation to Process
 {self._format_messages(messages)}"""

@@ -327,3 +327,25 @@ class TestMemoryConsolidationTypeHandling:
         assert provider.chat_with_retry.await_count == store._MAX_FAILURES_BEFORE_RAW_ARCHIVE
         history = store.history_file.read_text(encoding="utf-8")
         assert "[RAW]" in history
+
+    @pytest.mark.asyncio
+    async def test_consolidation_prompt_mentions_worklog_boundary(self, tmp_path: Path) -> None:
+        store = MemoryStore(tmp_path)
+        (tmp_path / "WORKLOG.md").write_text(
+            "## 进行中\n\n### 补 per-user worklog\n- 优先级：高\n- 状态/下一步：更新 prompt\n",
+            encoding="utf-8",
+        )
+        provider = AsyncMock()
+        provider.chat_with_retry = AsyncMock(
+            return_value=_make_tool_response(
+                history_entry="[2026-01-01] User discussed work tracking.",
+                memory_update="# Memory\nUser is building a Feishu bot.",
+            )
+        )
+
+        await store.consolidate(_make_session(message_count=60), provider, "test-model", memory_window=50)
+
+        prompt = provider.chat_with_retry.await_args.kwargs["messages"][1]["content"]
+        assert "## Current WORKLOG.md" in prompt
+        assert "The user is building a Feishu bot" in prompt
+        assert "Add per-user worklog support" in prompt

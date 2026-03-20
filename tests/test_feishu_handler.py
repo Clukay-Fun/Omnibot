@@ -6,6 +6,7 @@ import pytest
 
 from nanobot.agent.overlay import OverlayContext
 from nanobot.feishu.handler import FeishuEventHandler
+from nanobot.feishu.memory import FeishuUserMemoryStore
 from nanobot.feishu.router import FeishuEnvelope
 from nanobot.feishu.types import TranslatedFeishuMessage
 
@@ -137,3 +138,46 @@ async def test_handler_skips_placeholder_when_command_is_handled() -> None:
 
     prepare_placeholder.assert_not_awaited()
     publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handler_omits_summary_from_dm_extra_context_when_overlay_exists(tmp_path) -> None:
+    publish = AsyncMock()
+    adapter = AsyncMock()
+    adapter.translate_message = AsyncMock(
+        return_value=TranslatedFeishuMessage(
+            sender_id="ou_user_1",
+            chat_id="ou_user_1",
+            content="hello",
+            media=[],
+            metadata={
+                "message_id": "om_1",
+                "chat_type": "p2p",
+                "tenant_key": "tenant-1",
+                "user_open_id": "ou_user_1",
+            },
+            session_key="feishu:dm:ou_user_1",
+        )
+    )
+    store = FeishuUserMemoryStore(tmp_path / "feishu-memory.sqlite3")
+    store.upsert("tenant-1", "ou_user_1", profile="likes coffee", summary="asked about billing")
+
+    class _PersonaManager:
+        def overlay_root_for_chat(self, chat_type, tenant_key, user_open_id):
+            assert chat_type == "p2p"
+            return tmp_path / "users" / "feishu" / tenant_key / user_open_id
+
+        def should_include_bootstrap(self, _overlay_root):
+            return True
+
+    handler = FeishuEventHandler(
+        adapter=adapter,
+        publish=publish,
+        memory_store=store,
+        persona_manager=_PersonaManager(),
+    )
+
+    envelope = FeishuEnvelope(source="webhook", payload={"header": {"event_id": "evt_1"}, "event": {}})
+    await handler.handle_message(envelope)
+
+    assert publish.await_args.kwargs["metadata"]["extra_context"] == ["Profile: likes coffee"]

@@ -62,8 +62,14 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
     assert "Use tools when the user is asking you to obtain current, external, or workspace-specific information, or to perform an action that requires tools." in prompt
     assert "If the user's intent is to get up-to-date facts, such as today's weather, latest news, or current prices, proactively use relevant tools." in prompt
     assert "Do not use tools just because topics like weather, news, or prices are mentioned in casual conversation." in prompt
-    assert "The system information above already includes user profile, long-term memory, and any available Feishu integration context." in prompt
-    assert "Only read USER.md, BOOTSTRAP.md, MEMORY.md, or HISTORY.md when the user explicitly asks to inspect or modify those files." in prompt
+    assert "The system information above already includes user profile, long-term memory, any available worklog snapshot, and any available Feishu integration context." in prompt
+    assert "WORKLOG.md is the source of truth for current work items." in prompt
+    assert "When updating WORKLOG.md, follow the format defined in the file exactly." in prompt
+    assert "Do not add extra fields to WORKLOG.md such as `阻塞`, `进展`, `截止日期`, `负责人`, `标签`, or numbered list prefixes." in prompt
+    assert "If WORKLOG.md is currently in a legacy or malformed format, rewrite it into the canonical three-field schema while updating it." in prompt
+    assert "If the user says a previously recorded next step is now complete, update the parent item's `状态/下一步` or move the parent item to `已完成` when the whole item is done." in prompt
+    assert "Do not update WORKLOG.md for casual chat, one-off Q&A, or replies that do not change ongoing work state." in prompt
+    assert "Only read USER.md, BOOTSTRAP.md, MEMORY.md, HISTORY.md, or WORKLOG.md when the user explicitly asks to inspect or modify those files" in prompt
     assert "For mutable workspace or external state, such as Feishu tables, records, calendars, documents, files, or other resources that may have changed since earlier turns, do not answer from memory or prior tool results." in prompt
     assert "On emoji-capable chat platforms" not in prompt
     assert "materially help answer the user's request" not in prompt
@@ -230,6 +236,7 @@ def test_system_prompt_uses_overlay_files_for_dm_persona(tmp_path) -> None:
     assert "global bootstrap" not in prompt
     assert f"Common prompt files: {workspace}/AGENTS.md, {workspace}/SOUL.md, {workspace}/TOOLS.md" in prompt
     assert f"User-scoped prompt files: {overlay}/USER.md, {overlay}/BOOTSTRAP.md" in prompt
+    assert f"User-scoped worklog: {overlay}/WORKLOG.md" in prompt
     assert f"User-scoped long-term memory: {overlay}/memory/MEMORY.md" in prompt
 
 
@@ -252,3 +259,25 @@ def test_system_prompt_skips_bootstrap_when_overlay_is_initialized(tmp_path) -> 
     assert "overlay user" in prompt
     assert "overlay bootstrap" not in prompt
     assert "global bootstrap" not in prompt
+
+
+def test_system_prompt_includes_worklog_snapshot_without_completed_items(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "WORKLOG.md").write_text(
+        "# WORKLOG.md - 当前工作面板\n\n"
+        "## 进行中\n\n"
+        "### 补 per-user worklog\n- 优先级：高\n- 状态/下一步：更新 prompt\n\n"
+        "## 待处理\n\n"
+        "### 清理飞书 summary 注入\n- 优先级：中\n- 状态/下一步：加 handler 测试\n\n"
+        "## 已完成\n\n"
+        "### 画出 v0 边界\n- 优先级：高\n- 状态/下一步：已完成\n",
+        encoding="utf-8",
+    )
+
+    builder = ContextBuilder(workspace)
+    prompt = builder.build_system_prompt()
+
+    assert "# Worklog Snapshot" in prompt
+    assert "补 per-user worklog" in prompt
+    assert "清理飞书 summary 注入" in prompt
+    assert "画出 v0 边界" not in prompt

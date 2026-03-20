@@ -16,6 +16,7 @@ DoctorStatus = Literal["ok", "warn", "error", "fixed", "skipped"]
 _REQUIRED_WORKSPACE_FILES = (
     "AGENTS.md",
     "HEARTBEAT.md",
+    "WORKLOG.md",
     "memory/MEMORY.md",
     "memory/HISTORY.md",
 )

@@ -29,6 +29,7 @@ class FeishuUserWorkspaceManager:
         "USER.md",
         "BOOTSTRAP.md",
         "HEARTBEAT.md",
+        "WORKLOG.md",
         "memory/MEMORY.md",
         "memory/HISTORY.md",
     )
@@ -36,6 +37,7 @@ class FeishuUserWorkspaceManager:
         "USER.md",
         "BOOTSTRAP.md",
         "HEARTBEAT.md",
+        "WORKLOG.md",
         "memory/MEMORY.md",
         "memory/HISTORY.md",
     )
@@ -156,6 +158,13 @@ class FeishuUserWorkspaceManager:
         if memory_path.exists() and not self._texts_equivalent(
             memory_path.read_text(encoding="utf-8"),
             self._read_template_text("memory/MEMORY.md"),
+        ):
+            return True
+
+        worklog_path = self.workspace / "WORKLOG.md"
+        if worklog_path.exists() and not self._texts_equivalent(
+            worklog_path.read_text(encoding="utf-8"),
+            self._read_template_text("WORKLOG.md"),
         ):
             return True
 

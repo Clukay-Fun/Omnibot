@@ -10,9 +10,9 @@ This file stores important information that should persist across sessions.
 
 (User preferences learned over time)
 
-## Project Context
+## Long-term Work Context
 
-(Information about ongoing projects)
+(Stable background about the user's work, responsibilities, or enduring projects)
 
 ## Important Notes
 

@@ -196,6 +196,10 @@ async def test_decide_retries_transient_error_then_succeeds(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_decision_context_includes_user_memory_but_not_history(tmp_path) -> None:
     (tmp_path / "HEARTBEAT.md").write_text("- [ ] review follow-up items", encoding="utf-8")
+    (tmp_path / "WORKLOG.md").write_text(
+        "## 进行中\n\n### 补 worklog snapshot\n- 优先级：高\n- 状态/下一步：更新 context builder\n",
+        encoding="utf-8",
+    )
     (tmp_path / "USER.md").write_text("- **昵称**：康哥\n", encoding="utf-8")
     (tmp_path / "memory").mkdir()
     (tmp_path / "memory" / "MEMORY.md").write_text("Known preference: concise", encoding="utf-8")
@@ -223,6 +227,8 @@ async def test_decision_context_includes_user_memory_but_not_history(tmp_path) -
     assert "康哥" in prompt
     assert "## memory/MEMORY.md" in prompt
     assert "Known preference: concise" in prompt
+    assert "## WORKLOG.md" in prompt
+    assert "补 worklog snapshot" in prompt
     assert "memory/HISTORY.md" not in prompt
     assert "promised a follow-up" not in prompt
 

@@ -8,6 +8,7 @@ always: true
 
 ## Structure
 
+- `WORKLOG.md` — Current work state. Use it for active, executable items with a next step.
 - `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
 - `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep-style tools or in-memory filters. Each entry starts with [YYYY-MM-DD HH:MM].
 
@@ -27,10 +28,12 @@ Prefer targeted command-line search for large history files.
 
 ## When to Update MEMORY.md
 
-Write important facts immediately using `edit_file` or `write_file`:
+Write important long-term facts immediately using `edit_file` or `write_file`:
 - User preferences ("I prefer dark mode")
-- Project context ("The API uses OAuth2")
+- Long-term work background ("The user is building a Feishu bot")
 - Relationships ("Alice is the project lead")
+
+Do not put executable tasks, blockers, priorities, or next steps into `memory/MEMORY.md`; those belong in `WORKLOG.md`.
 
 ## Auto-consolidation
 

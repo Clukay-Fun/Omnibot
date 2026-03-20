@@ -24,6 +24,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
+from nanobot.agent.worklog import WorklogStore
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.heartbeat.types import HeartbeatExecutionError, HeartbeatExecutionResult
@@ -727,12 +728,14 @@ class AgentLoop:
         """Construct the heartbeat-only execution prompt block."""
         heartbeat_path = workspace_root / "HEARTBEAT.md"
         heartbeat_text = heartbeat_path.read_text(encoding="utf-8") if heartbeat_path.exists() else "(missing)"
+        worklog_text = WorklogStore(workspace_root).read_full().strip() or "(missing)"
         return (
             "You are executing a heartbeat run. This is a fresh ephemeral run with no prior heartbeat transcript. "
-            "Use the full HEARTBEAT.md below as the source of truth for recurring follow-up work. "
-            "If task state changed, update the task body in HEARTBEAT.md using file tools, but do not overwrite "
-            "the framework-managed HEARTBEAT_STATE block.\n\n"
+            "Use HEARTBEAT.md for low-disturbance reminder rules and WORKLOG.md for current work state. "
+            "If recurring reminder rules changed, update HEARTBEAT.md using file tools, but do not overwrite "
+            "the framework-managed HEARTBEAT_STATE block. If work state changed, update WORKLOG.md in the same run.\n\n"
             f"## HEARTBEAT.md\n{heartbeat_text.strip()}"
+            f"\n\n## WORKLOG.md\n{worklog_text}"
         )
 
     def _build_heartbeat_state_summary(

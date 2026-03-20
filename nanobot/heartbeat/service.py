@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine
 from loguru import logger
 
 from nanobot.agent.overlay import OverlayContext
+from nanobot.agent.worklog import WorklogStore
 from nanobot.heartbeat.types import HeartbeatExecutionError, HeartbeatExecutionResult
 
 if TYPE_CHECKING:
@@ -148,6 +149,10 @@ class HeartbeatService:
         memory_file = target.workspace_root / "memory" / "MEMORY.md"
         if memory_text := self._read_text(memory_file):
             sections.append(f"## memory/MEMORY.md\n{memory_text.strip()}")
+
+        worklog_text = WorklogStore(target.workspace_root).read_full()
+        if worklog_text.strip():
+            sections.append(f"## WORKLOG.md\n{worklog_text.strip()}")
 
         return "\n\n".join(sections)
 

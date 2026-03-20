@@ -47,6 +47,7 @@ class FeishuEventHandler:
                 prepared = self.prepare_placeholder(translated)
                 if inspect.isawaitable(prepared):
                     await prepared
+            active_overlay: OverlayContext | None = None
             if self.persona_manager is not None:
                 overlay_root = self.persona_manager.overlay_root_for_chat(
                     str(translated.metadata.get("chat_type") or ""),
@@ -54,13 +55,15 @@ class FeishuEventHandler:
                     str(translated.metadata.get("user_open_id") or ""),
                 )
                 if overlay_root is not None:
-                    overlay_context = OverlayContext(
+                    active_overlay = OverlayContext(
                         system_overlay_root=str(overlay_root),
                         system_overlay_bootstrap=self.persona_manager.should_include_bootstrap(overlay_root),
                     )
-                    translated.metadata = overlay_context.to_metadata(translated.metadata)
+                    translated.metadata = active_overlay.to_metadata(translated.metadata)
             if self.memory_store is not None:
                 extra_context = self.memory_store.safe_build_extra_context(translated.metadata)
+                if active_overlay is not None and str(translated.metadata.get("chat_type") or "") != "group":
+                    extra_context = [item for item in extra_context if not item.startswith("Summary:")]
                 if extra_context:
                     translated.metadata = dict(translated.metadata)
                     translated.metadata["extra_context"] = extra_context

@@ -10,6 +10,10 @@ This file stores persistent, user-scoped facts for the current private chat user
 
 (Learned communication or workflow preferences)
 
-## Ongoing Threads
+## Long-term Work Context
 
-(Follow-up items, commitments, or recurring tasks tied to this user)
+(Stable work background that remains useful across sessions)
+
+## Important Notes
+
+(Long-lived facts worth remembering)
