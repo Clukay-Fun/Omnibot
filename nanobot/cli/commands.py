@@ -4,6 +4,7 @@ import asyncio
 import os
 import select
 import signal
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,7 @@ from rich.text import Text
 
 from nanobot import __logo__
 from nanobot.cli.doctor import DoctorReport, resolve_config_path, run_doctor
-from nanobot.config.paths import get_workspace_path
+from nanobot.config.paths import get_cli_history_path, get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.feishu.broadcast import FeishuBroadcastService
 from nanobot.feishu.client import FeishuClient
@@ -42,7 +43,7 @@ from nanobot.version import format_version
 
 app = typer.Typer(
     name="nanobot",
-    help=f"{__logo__} nanobot - Personal AI Assistant",
+    help=f"{__logo__} nanobot - 个人 AI 助手",
     no_args_is_help=True,
 )
 
@@ -200,7 +201,7 @@ def main(
         None, "--version", "-v", callback=version_callback, is_eager=True
     ),
 ):
-    """nanobot - Personal AI Assistant."""
+    """nanobot - 个人 AI 助手。"""
     pass
 
 
@@ -211,7 +212,7 @@ def main(
 
 @app.command()
 def onboard():
-    """Initialize nanobot configuration and workspace."""
+    """初始化 nanobot 配置和工作区。"""
     from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
 
@@ -366,6 +367,26 @@ def _print_doctor_report(report: DoctorReport) -> None:
         _print_restart_note()
 
 
+def _guard_reset_target(path: Path, *, label: str) -> Path:
+    resolved = path.expanduser().resolve()
+    forbidden = {
+        Path("/").resolve(),
+        Path.home().resolve(),
+        (Path.home() / ".nanobot").resolve(),
+    }
+    if resolved in forbidden:
+        console.print(f"[red]Refusing to reset unsafe {label} path: {resolved}[/red]")
+        raise typer.Exit(1)
+    return resolved
+
+
+def _recreate_workspace(workspace: Path) -> None:
+    if workspace.exists():
+        shutil.rmtree(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    sync_workspace_templates(workspace)
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -378,7 +399,7 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config_path: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Start the nanobot gateway."""
+    """启动 nanobot 网关。"""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
@@ -580,7 +601,7 @@ def gateway(
 # Heartbeat Commands
 # ============================================================================
 
-upstream_app = typer.Typer(help="Inspect upstream git commits")
+upstream_app = typer.Typer(help="查看上游 Git 提交")
 app.add_typer(upstream_app, name="upstream")
 
 
@@ -588,7 +609,7 @@ app.add_typer(upstream_app, name="upstream")
 def upstream_status(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Git workspace to inspect"),
 ):
-    """Show upstream-only commits and a git-based import risk hint."""
+    """显示仅存在于上游的提交，并给出基于 Git 的导入风险提示。"""
     repo = Path(workspace).expanduser().resolve() if workspace else Path.cwd().resolve()
 
     try:
@@ -635,7 +656,7 @@ def upstream_status(
         console.print(f"      git cherry-pick -x {short_sha}")
 
 
-heartbeat_app = typer.Typer(help="Manage heartbeat configuration")
+heartbeat_app = typer.Typer(help="管理 heartbeat 配置")
 app.add_typer(heartbeat_app, name="heartbeat")
 
 
@@ -643,7 +664,7 @@ app.add_typer(heartbeat_app, name="heartbeat")
 def heartbeat_status(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Show the configured heartbeat state."""
+    """显示当前 heartbeat 配置状态。"""
     path, runtime_config = _load_persisted_config(config)
     heartbeat = runtime_config.gateway.heartbeat
 
@@ -657,7 +678,7 @@ def heartbeat_status(
 def heartbeat_on(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Persistently enable heartbeat in config."""
+    """在配置中持续启用 heartbeat。"""
     from nanobot.config.loader import save_config
 
     path, runtime_config = _load_persisted_config(config)
@@ -676,7 +697,7 @@ def heartbeat_on(
 def heartbeat_off(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Persistently disable heartbeat in config."""
+    """在配置中持续禁用 heartbeat。"""
     from nanobot.config.loader import save_config
 
     path, runtime_config = _load_persisted_config(config)
@@ -696,7 +717,7 @@ def heartbeat_set_interval(
     seconds: int = typer.Argument(..., help="Heartbeat interval in seconds"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Persistently set the heartbeat interval in seconds."""
+    """在配置中持续设置 heartbeat 间隔秒数。"""
     from nanobot.config.loader import save_config
 
     if seconds <= 0:
@@ -730,7 +751,7 @@ def agent(
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
-    """Interact with the agent directly."""
+    """直接与 agent 交互。"""
     from loguru import logger
 
     from nanobot.agent.loop import AgentLoop
@@ -908,16 +929,16 @@ def agent(
 # ============================================================================
 
 
-channels_app = typer.Typer(help="Manage channels")
+channels_app = typer.Typer(help="管理渠道")
 app.add_typer(channels_app, name="channels")
 
-feishu_app = typer.Typer(help="Manage Feishu operations")
+feishu_app = typer.Typer(help="管理飞书相关操作")
 app.add_typer(feishu_app, name="feishu")
 
 
 @channels_app.command("status")
 def channels_status():
-    """Show channel status."""
+    """显示渠道状态。"""
     from nanobot.config.loader import load_config
 
     config = load_config()
@@ -1182,7 +1203,7 @@ def feishu_broadcast(
 
 @app.command()
 def status():
-    """Show nanobot status."""
+    """显示 nanobot 状态。"""
     from nanobot.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
@@ -1218,11 +1239,78 @@ def status():
 
 
 @app.command()
+def reset(
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory to reset"),
+    config: str | None = typer.Option(None, "--config-path", "-c", help="Path to config file"),
+    reset_config: bool = typer.Option(False, "--config", help="Also reset the config file to defaults"),
+    reset_history: bool = typer.Option(False, "--history", help="Also clear CLI history"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be reset without changing anything"),
+):
+    """重置 workspace 状态，并可选重置配置或历史记录。"""
+    from nanobot.config.loader import load_config, save_config, set_config_path
+
+    config_path = resolve_config_path(config)
+    if config:
+        set_config_path(config_path)
+    loaded = load_config(config_path)
+    target_workspace = Path(workspace).expanduser() if workspace else loaded.workspace_path
+    workspace_path = _guard_reset_target(target_workspace, label="workspace")
+    history_path = get_cli_history_path().expanduser().resolve()
+
+    console.print(f"{__logo__} nanobot Reset\n")
+    console.print(Text(f"Workspace: {workspace_path}", no_wrap=True, overflow="ignore"))
+    console.print(Text(f"Config: {config_path}", no_wrap=True, overflow="ignore"))
+    console.print(f"Reset config: {'yes' if reset_config else 'no'}")
+    console.print(f"Reset CLI history: {'yes' if reset_history else 'no'}")
+    console.print()
+
+    actions = [
+        f"Recreate workspace from templates: {workspace_path}",
+        "Clear workspace sessions, memory, per-user overlays, and other files under that workspace",
+    ]
+    if reset_config:
+        actions.append(f"Reset config file to defaults: {config_path}")
+    if reset_history:
+        actions.append(f"Delete CLI history: {history_path}")
+
+    console.print("[bold]Actions:[/bold]")
+    for action in actions:
+        console.print(f"- {action}")
+
+    if dry_run:
+        console.print("\n[cyan]Dry run only.[/cyan] No changes were made.")
+        raise typer.Exit(0)
+
+    if not yes and not typer.confirm("Proceed with reset?"):
+        console.print("[yellow]Reset cancelled.[/yellow]")
+        raise typer.Exit(0)
+
+    _recreate_workspace(workspace_path)
+    console.print(f"[green]✓[/green] Reset workspace at {workspace_path}")
+
+    if reset_config:
+        save_config(Config(), config_path)
+        console.print(f"[green]✓[/green] Reset config at {config_path}")
+
+    if reset_history:
+        if history_path.exists():
+            history_path.unlink()
+            console.print(f"[green]✓[/green] Cleared CLI history at {history_path}")
+        else:
+            console.print(f"[dim]CLI history already clean: {history_path}[/dim]")
+
+    console.print("\n[green]Reset complete.[/green]")
+    if reset_config:
+        _print_restart_note()
+
+
+@app.command()
 def doctor(
     fix: bool = typer.Option(False, "--fix", help="Apply safe local fixes"),
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
-    """Inspect core nanobot health and optionally apply safe local fixes."""
+    """检查 nanobot 核心健康状态，并可选应用安全本地修复。"""
     report = run_doctor(config, fix=fix)
     _print_doctor_report(report)
     if report.has_remaining_issues:
@@ -1233,7 +1321,7 @@ def doctor(
 # OAuth Login
 # ============================================================================
 
-provider_app = typer.Typer(help="Manage providers")
+provider_app = typer.Typer(help="管理 providers")
 app.add_typer(provider_app, name="provider")
 
 

@@ -639,3 +639,70 @@ def test_doctor_returns_nonzero_when_unfixable_issues_remain(tmp_path: Path) -> 
 
     assert result.exit_code == 1
     assert "not valid JSON" in result.stdout
+
+
+def test_reset_recreates_workspace_and_preserves_config_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    sync_workspace_templates(workspace, silent=True)
+    (workspace / "sessions").mkdir(parents=True, exist_ok=True)
+    (workspace / "sessions" / "cli_direct.jsonl").write_text("{}", encoding="utf-8")
+    (workspace / "notes.txt").write_text("temporary", encoding="utf-8")
+    before_config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    result = runner.invoke(app, ["reset", "--config-path", str(config_path), "--yes"])
+
+    assert result.exit_code == 0
+    assert "Reset workspace" in result.stdout
+    assert (workspace / "AGENTS.md").exists()
+    assert (workspace / "memory" / "MEMORY.md").exists()
+    assert not (workspace / "notes.txt").exists()
+    assert not (workspace / "sessions" / "cli_direct.jsonl").exists()
+    assert json.loads(config_path.read_text(encoding="utf-8")) == before_config
+
+
+def test_reset_can_reset_config_and_history(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    config = _write_cli_config(config_path, workspace=workspace)
+    config.agents.defaults.model = "anthropic/claude-3-7-sonnet"
+    save_config(config, config_path)
+    workspace.mkdir(parents=True, exist_ok=True)
+    sync_workspace_templates(workspace, silent=True)
+    history_path = tmp_path / "history" / "cli_history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text("old prompt\n", encoding="utf-8")
+    monkeypatch.setattr("nanobot.cli.commands.get_cli_history_path", lambda: history_path)
+
+    result = runner.invoke(
+        app,
+        ["reset", "--config-path", str(config_path), "--config", "--history", "--yes"],
+    )
+
+    assert result.exit_code == 0
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["agents"]["defaults"]["model"] == Config().agents.defaults.model
+    assert not history_path.exists()
+    assert "Reset config" in result.stdout
+    assert "Restart required" in result.stdout
+
+
+def test_reset_dry_run_and_cancel_leave_files_unchanged(tmp_path: Path) -> None:
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    sync_workspace_templates(workspace, silent=True)
+    marker = workspace / "notes.txt"
+    marker.write_text("keep me", encoding="utf-8")
+
+    dry_run = runner.invoke(app, ["reset", "--config-path", str(config_path), "--dry-run"])
+    cancelled = runner.invoke(app, ["reset", "--config-path", str(config_path)], input="n\n")
+
+    assert dry_run.exit_code == 0
+    assert "Dry run only" in dry_run.stdout
+    assert cancelled.exit_code == 0
+    assert "Reset cancelled" in cancelled.stdout
+    assert marker.read_text(encoding="utf-8") == "keep me"
