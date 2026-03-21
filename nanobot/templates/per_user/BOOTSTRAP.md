@@ -15,3 +15,10 @@
 2. 更新当前用户作用域下的 `WORKLOG.md`
 3. 在需要时把关键事实沉淀到当前用户的 `memory/MEMORY.md`
 4. 如果你确认 onboarding 已完成，可以删除当前用户目录下的 `BOOTSTRAP.md`
+
+字段映射提示：
+
+- “我是 X / 叫我 X” -> `USER.md` 的昵称 / 称呼方式
+- “简洁一点 / 详细点 / 结论先行” -> `USER.md` 的回复长度 / 表达风格偏好
+- “长期在做 X” -> `USER.md` 的长期工作背景，必要时同步到 `memory/MEMORY.md`
+- “上一个节点是 X / 本轮要交付 Y / 下一步做 Z” -> `WORKLOG.md`

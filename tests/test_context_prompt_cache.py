@@ -76,6 +76,7 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
     assert "如果本轮暴露了稳定偏好或长期背景，在同一轮更新 `USER.md` 或 `memory/MEMORY.md`。" in prompt
     assert "“记住”就意味着同一轮写入对应文件；不要只在回复里说“已记住”而不落盘。" in prompt
     assert "如果你说了“已记住”却没有更新 `USER.md` 或 `memory/MEMORY.md`" in prompt
+    assert "不要把“正在处理”“稍后给你结果”这类占位话术当作正式回复正文发给用户" in prompt
     assert "如果 `WORKLOG.md` 不存在、为空，或没有可用 snapshot，就直接跳过“当前工作层”" in prompt
     assert "When updating WORKLOG.md, follow the format defined in the file exactly." in prompt
     assert "Do not add extra fields to WORKLOG.md such as `阻塞`, `进展`, `截止日期`, `负责人`, `标签`, or numbered list prefixes." in prompt

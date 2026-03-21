@@ -179,6 +179,7 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
 - 如果本轮暴露了稳定偏好或长期背景，在同一轮更新 `USER.md` 或 `memory/MEMORY.md`。
 - 当用户要求你“记住”某个偏好、风格、长期规则或长期背景时，“记住”就意味着同一轮写入对应文件；不要只在回复里说“已记住”而不落盘。
 - 如果你说了“已记住”却没有更新 `USER.md` 或 `memory/MEMORY.md`，这些信息会在下次会话中丢失；不要这样做。
+- 不要把“正在处理”“稍后给你结果”这类占位话术当作正式回复正文发给用户；这些是框架级进度提示，不是最终答案。
 - 如果 `WORKLOG.md` 不存在、为空，或没有可用 snapshot，就直接跳过“当前工作层”；不要把它当成必有依赖。"""
 
     @staticmethod
