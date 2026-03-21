@@ -21,6 +21,16 @@ from nanobot.feishu.thinking_card import (
 )
 
 
+DELAYED_TEXT_CONTENT = "正在处理，稍后给你结果。"
+
+
+def is_framework_delayed_text(content: str | None) -> bool:
+    """Whether a reply matches the exact framework delayed-text copy."""
+    if not content:
+        return False
+    return " ".join(content.split()) == DELAYED_TEXT_CONTENT
+
+
 @dataclass
 class _StreamState:
     message_id: str
@@ -39,10 +49,12 @@ class _PreparedTurn:
     chat_id: str
     reply_to: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    started_at: float = field(default_factory=time.monotonic)
     pending_entries: list[tuple[str, bool]] = field(default_factory=list)
     card_task: asyncio.Task | None = None
     delayed_text_task: asyncio.Task | None = None
     delayed_text_sent: bool = False
+    delayed_text_elapsed_ms: int | None = None
 
 
 class FeishuCardStreamer:
@@ -52,7 +64,7 @@ class FeishuCardStreamer:
     _MAX_ENTRY_CHARS = 80
     _DEFAULT_DEBOUNCE_SECONDS = 0.8
     _DEFAULT_DELAYED_TEXT_SECONDS = 2.5
-    _DELAYED_TEXT = "正在处理，稍后给你结果。"
+    _DELAYED_TEXT = DELAYED_TEXT_CONTENT
 
     def __init__(
         self,
@@ -167,6 +179,12 @@ class FeishuCardStreamer:
         if prepared is not None:
             await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
+        self._log_delayed_text_resolution(
+            turn_id=turn_id,
+            prepared=prepared,
+            had_thinking_card=state is not None,
+            final_reply_sent=True,
+        )
         if state is None:
             return False
 
@@ -192,6 +210,12 @@ class FeishuCardStreamer:
         if prepared is not None:
             await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
+        self._log_delayed_text_resolution(
+            turn_id=turn_id,
+            prepared=prepared,
+            had_thinking_card=state is not None,
+            final_reply_sent=False,
+        )
         if state is None:
             return prepared is not None
         await self._cancel_flush(state)
@@ -439,6 +463,8 @@ class FeishuCardStreamer:
             return
         if self.delayed_text_seconds <= 0:
             return
+        if prepared.metadata.get("delay_hint_eligible") is False:
+            return
         if str(prepared.metadata.get("chat_type") or "") != "p2p":
             return
 
@@ -451,6 +477,13 @@ class FeishuCardStreamer:
                     return
                 if await self._send_delayed_text(current.chat_id, current.reply_to, self._DELAYED_TEXT):
                     current.delayed_text_sent = True
+                    current.delayed_text_elapsed_ms = int(max(0.0, time.monotonic() - current.started_at) * 1000)
+                    logger.bind(
+                        event="feishu_delayed_text_fired",
+                        turn_id=turn_id,
+                        chat_id=current.chat_id,
+                        elapsed_ms=current.delayed_text_elapsed_ms,
+                    ).info("Feishu delayed text sent")
             except asyncio.CancelledError:
                 raise
             finally:
@@ -607,6 +640,25 @@ class FeishuCardStreamer:
         if script_name:
             return self._clip_entry(f"正在执行 skill：{script_name}")
         return "正在执行飞书工作台 skill"
+
+    def _log_delayed_text_resolution(
+        self,
+        *,
+        turn_id: str,
+        prepared: _PreparedTurn | None,
+        had_thinking_card: bool,
+        final_reply_sent: bool,
+    ) -> None:
+        if prepared is None or not prepared.delayed_text_sent:
+            return
+        logger.bind(
+            event="feishu_delayed_text_resolution",
+            turn_id=turn_id,
+            chat_id=prepared.chat_id,
+            elapsed_ms=prepared.delayed_text_elapsed_ms,
+            had_thinking_card=had_thinking_card,
+            final_reply_sent=final_reply_sent,
+        ).info("Feishu delayed text resolved")
 
     @classmethod
     def _parse_tool_hint(cls, hint: str) -> tuple[str, str]:

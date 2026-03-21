@@ -99,3 +99,15 @@ async def test_adapter_triggers_overflow_archive_before_translation() -> None:
         keep_messages=100,
         start_worker=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_classify_delay_hint_from_text_content() -> None:
+    adapter = FeishuAdapter(FeishuConfig())
+
+    translated = await adapter.translate_message(
+        _message_payload(chat_type="p2p", text="请帮我总结这次改动的主要收益、风险和后续观察点，好吗？")
+    )
+
+    assert translated is not None
+    assert "delay_hint_eligible" not in translated.metadata

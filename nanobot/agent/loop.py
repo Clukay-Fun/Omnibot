@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import uuid
@@ -18,7 +19,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.overlay import OverlayContext
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
-from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool, _resolve_path
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -28,12 +29,79 @@ from nanobot.agent.worklog import WorklogStore
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.heartbeat.types import HeartbeatExecutionError, HeartbeatExecutionResult
+from nanobot.feishu.streaming import is_framework_delayed_text
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
 if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig
     from nanobot.cron.service import CronService
+
+
+class _RestrictedRepairPathMixin:
+    """Restrict file tools to a small fixed allowlist within one overlay root."""
+
+    def __init__(self, *, workspace_root: Path, allowed_relative_paths: tuple[str, ...]):
+        self._repair_workspace_root = workspace_root.resolve()
+        self._repair_allowed_paths = {
+            (self._repair_workspace_root / relative).resolve()
+            for relative in allowed_relative_paths
+        }
+        self._repair_allowed_display = ", ".join(allowed_relative_paths)
+
+    def _validate_repair_path(self, path: str) -> None:
+        resolved = _resolve_path(
+            path,
+            workspace=self._repair_workspace_root,
+            allowed_dir=self._repair_workspace_root,
+        )
+        if resolved not in self._repair_allowed_paths:
+            raise PermissionError(
+                "Path is outside the Feishu DM repair allowlist. "
+                f"Allowed files: {self._repair_allowed_display}"
+            )
+
+
+class _RestrictedRepairReadFileTool(_RestrictedRepairPathMixin, ReadFileTool):
+    def __init__(self, *, workspace_root: Path, allowed_relative_paths: tuple[str, ...]):
+        ReadFileTool.__init__(self, workspace=workspace_root, allowed_dir=workspace_root)
+        _RestrictedRepairPathMixin.__init__(
+            self,
+            workspace_root=workspace_root,
+            allowed_relative_paths=allowed_relative_paths,
+        )
+
+    async def execute(self, path: str, **kwargs):
+        self._validate_repair_path(path)
+        return await super().execute(path=path, **kwargs)
+
+
+class _RestrictedRepairWriteFileTool(_RestrictedRepairPathMixin, WriteFileTool):
+    def __init__(self, *, workspace_root: Path, allowed_relative_paths: tuple[str, ...]):
+        WriteFileTool.__init__(self, workspace=workspace_root, allowed_dir=workspace_root)
+        _RestrictedRepairPathMixin.__init__(
+            self,
+            workspace_root=workspace_root,
+            allowed_relative_paths=allowed_relative_paths,
+        )
+
+    async def execute(self, path: str, content: str, **kwargs):
+        self._validate_repair_path(path)
+        return await super().execute(path=path, content=content, **kwargs)
+
+
+class _RestrictedRepairEditFileTool(_RestrictedRepairPathMixin, EditFileTool):
+    def __init__(self, *, workspace_root: Path, allowed_relative_paths: tuple[str, ...]):
+        EditFileTool.__init__(self, workspace=workspace_root, allowed_dir=workspace_root)
+        _RestrictedRepairPathMixin.__init__(
+            self,
+            workspace_root=workspace_root,
+            allowed_relative_paths=allowed_relative_paths,
+        )
+
+    async def execute(self, path: str, old_text: str, new_text: str, **kwargs):
+        self._validate_repair_path(path)
+        return await super().execute(path=path, old_text=old_text, new_text=new_text, **kwargs)
 
 
 class AgentLoop:
@@ -49,6 +117,7 @@ class AgentLoop:
     """
 
     _TOOL_RESULT_MAX_CHARS = 500
+    _FEISHU_REPAIR_ALLOWED_FILES = ("USER.md", "WORKLOG.md", "memory/MEMORY.md")
 
     def __init__(
         self,
@@ -113,8 +182,10 @@ class AgentLoop:
         self._pending_consolidations: set[str] = set()  # Session keys queued to consolidate after reply
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._archive_tasks: set[asyncio.Task] = set()  # Strong refs to /new archival tasks
+        self._feishu_repair_tasks: set[asyncio.Task] = set()  # Strong refs to DM audit/repair tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._session_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._feishu_repair_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._session_generations: dict[str, int] = {}
         self._memory_stores: dict[Path, MemoryStore] = {}
@@ -201,6 +272,7 @@ class AgentLoop:
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         tool_registry: ToolRegistry | None = None,
+        purpose: str | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         active_tools = tool_registry or self.tools
@@ -219,6 +291,7 @@ class AgentLoop:
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,
+                purpose=purpose,
                 progress_callback=on_progress,
             )
 
@@ -369,7 +442,7 @@ class AgentLoop:
 
     async def close_mcp(self) -> None:
         """Drain background work, then close MCP connections."""
-        pending_tasks = list(self._consolidation_tasks | self._archive_tasks)
+        pending_tasks = list(self._consolidation_tasks | self._archive_tasks | self._feishu_repair_tasks)
         if pending_tasks:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
         if self._mcp_stack:
@@ -527,7 +600,26 @@ class AgentLoop:
         if persist_session:
             self.sessions.save(session)
 
-        if (mt := active_tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        sent_via_message_tool = bool(
+            (mt := active_tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn
+        )
+
+        self._maybe_log_feishu_placeholder_reply(
+            channel=channel,
+            chat_id=chat_id,
+            turn_id=str(metadata.get("turn_id") or ""),
+            content=final_content,
+        )
+        self._schedule_feishu_dm_turn_repair(
+            session_key=session.key,
+            msg=msg,
+            metadata=metadata,
+            overlay_context=overlay_context,
+            final_content=final_content,
+            turn_messages=all_msgs[turn_start_index:],
+        )
+
+        if sent_via_message_tool:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -764,6 +856,292 @@ class AgentLoop:
         registry.register(ReadFileTool(workspace=workspace_root, allowed_dir=allowed_dir))
         registry.register(MessageTool(send_callback=self.bus.publish_outbound))
         return registry
+
+    def _build_feishu_repair_tool_registry(self, workspace_root: Path) -> ToolRegistry:
+        """Build the restricted tool registry used only for Feishu DM repair."""
+        registry = ToolRegistry()
+        registry.register(
+            _RestrictedRepairReadFileTool(
+                workspace_root=workspace_root,
+                allowed_relative_paths=self._FEISHU_REPAIR_ALLOWED_FILES,
+            )
+        )
+        registry.register(
+            _RestrictedRepairWriteFileTool(
+                workspace_root=workspace_root,
+                allowed_relative_paths=self._FEISHU_REPAIR_ALLOWED_FILES,
+            )
+        )
+        registry.register(
+            _RestrictedRepairEditFileTool(
+                workspace_root=workspace_root,
+                allowed_relative_paths=self._FEISHU_REPAIR_ALLOWED_FILES,
+            )
+        )
+        return registry
+
+    @classmethod
+    def _should_schedule_feishu_dm_repair(
+        cls,
+        *,
+        channel: str,
+        metadata: dict,
+        overlay_context: OverlayContext,
+    ) -> bool:
+        if channel != "feishu":
+            return False
+        if overlay_context.root_path is None:
+            return False
+        if str(metadata.get("chat_type") or "") != "p2p":
+            return False
+        if metadata.get("_skip_post_turn_audit"):
+            return False
+        return True
+
+    def _schedule_feishu_dm_turn_repair(
+        self,
+        *,
+        session_key: str,
+        msg: InboundMessage,
+        metadata: dict,
+        overlay_context: OverlayContext,
+        final_content: str,
+        turn_messages: list[dict],
+    ) -> None:
+        if not self._should_schedule_feishu_dm_repair(
+            channel=msg.channel,
+            metadata=metadata,
+            overlay_context=overlay_context,
+        ):
+            return
+
+        overlay_root = overlay_context.root_path
+        if overlay_root is None:
+            return
+
+        session_lock = self._feishu_repair_locks.setdefault(session_key, asyncio.Lock())
+        captured_turn_messages = [copy.deepcopy(message) for message in turn_messages]
+        bootstrap_active = overlay_context.system_overlay_bootstrap is not False and (overlay_root / "BOOTSTRAP.md").exists()
+
+        async def _run() -> None:
+            try:
+                async with session_lock:
+                    await self._run_feishu_dm_turn_repair(
+                        overlay_root=overlay_root,
+                        session_key=session_key,
+                        chat_id=msg.chat_id,
+                        turn_id=str(metadata.get("turn_id") or ""),
+                        user_message=msg.content,
+                        final_content=final_content,
+                        turn_messages=captured_turn_messages,
+                        bootstrap_active=bootstrap_active,
+                    )
+            except Exception:
+                logger.exception("Feishu DM post-turn repair failed for {}", session_key)
+            finally:
+                task = asyncio.current_task()
+                if task is not None:
+                    self._feishu_repair_tasks.discard(task)
+
+        task = asyncio.create_task(_run())
+        self._feishu_repair_tasks.add(task)
+
+    async def _run_feishu_dm_turn_repair(
+        self,
+        *,
+        overlay_root: Path,
+        session_key: str,
+        chat_id: str,
+        turn_id: str,
+        user_message: str,
+        final_content: str,
+        turn_messages: list[dict],
+        bootstrap_active: bool,
+    ) -> None:
+        repair_tools = self._build_feishu_repair_tool_registry(overlay_root)
+        initial_messages = [
+            {
+                "role": "system",
+                "content": self._build_feishu_repair_system_message(),
+            },
+            {
+                "role": "user",
+                "content": self._build_feishu_repair_user_message(
+                    overlay_root=overlay_root,
+                    session_key=session_key,
+                    chat_id=chat_id,
+                    turn_id=turn_id,
+                    user_message=user_message,
+                    final_content=final_content,
+                    turn_messages=turn_messages,
+                    bootstrap_active=bootstrap_active,
+                ),
+            },
+        ]
+        final_result, tools_used, _messages = await self._run_agent_loop(
+            initial_messages,
+            tool_registry=repair_tools,
+            purpose="feishu_dm_post_turn_repair",
+        )
+        logger.bind(
+            event="feishu_dm_turn_repair",
+            session_key=session_key,
+            chat_id=chat_id,
+            turn_id=turn_id,
+            tools_used=tools_used,
+        ).info("Feishu DM post-turn repair completed with result={}", (final_result or "").strip() or "EMPTY")
+
+    def _build_feishu_repair_system_message(self) -> str:
+        return """You are running a Feishu DM post-turn audit and repair pass.
+
+This is not a user-facing conversation. Do not chat, do not send messages, and do not explain yourself.
+Your only job is to inspect the completed turn plus the current file state, then repair missing persistence if needed.
+
+Allowed tools:
+- read_file
+- write_file
+- edit_file
+
+Allowed write targets only:
+- USER.md
+- WORKLOG.md
+- memory/MEMORY.md
+
+Hard rules:
+- Never write any other file.
+- Never send a message.
+- Never touch BOOTSTRAP.md, HEARTBEAT.md, SOUL.md, or memory/HISTORY.md.
+- Prefer the smallest correct file change.
+- If the files already correctly capture the durable information from this turn, return exactly NO_OP and do not call any tool.
+- If you make one or more file edits, return exactly REPAIRED when finished.
+
+Persistence mapping:
+- USER.md: nickname, preferred form of address, stable communication style, reply length preference, stable collaboration preference.
+- memory/MEMORY.md: long-term work background, long-term project direction, durable facts that remain useful later.
+- WORKLOG.md: current active task, current goal, next step, or deliverable for work in progress.
+
+Decision guidance:
+- Treat casual acknowledgements like “是的”, “好的”, “收到” as NO_OP unless they also add durable information.
+- “我是 X / 叫我 X” usually belongs in USER.md.
+- “结论先行 / 少铺垫 / 简洁一点 / 详细点” usually belongs in USER.md.
+- “长期在做 X” usually belongs in memory/MEMORY.md.
+- “上一个节点是 X / 本轮要交付 Y / 下一步做 Z” usually belongs in WORKLOG.md.
+- Do not invent facts. Only persist explicit information or very high-confidence reformulations.
+- When updating WORKLOG.md, follow the file's exact three-field schema and do not add extra fields.
+"""
+
+    def _build_feishu_repair_user_message(
+        self,
+        *,
+        overlay_root: Path,
+        session_key: str,
+        chat_id: str,
+        turn_id: str,
+        user_message: str,
+        final_content: str,
+        turn_messages: list[dict],
+        bootstrap_active: bool,
+    ) -> str:
+        user_text = self._read_repair_file(overlay_root / "USER.md")
+        worklog_text = self._read_repair_file(overlay_root / "WORKLOG.md")
+        memory_text = self._read_repair_file(overlay_root / "memory" / "MEMORY.md")
+        transcript = self._format_turn_transcript(turn_messages)
+        bootstrap_status = "active" if bootstrap_active else "inactive"
+        return f"""Audit this completed Feishu DM turn and repair missing persistence only if needed.
+
+## Turn Metadata
+- Session key: {session_key}
+- Chat ID: {chat_id}
+- Turn ID: {turn_id or "(missing)"}
+- BOOTSTRAP.md: {bootstrap_status}
+
+## Current User Message
+{user_message.strip() or "(empty)"}
+
+## Final Assistant Reply
+{(final_content or "").strip() or "(empty)"}
+
+## Tool Transcript
+{transcript}
+
+## Current USER.md
+{user_text}
+
+## Current WORKLOG.md
+{worklog_text}
+
+## Current memory/MEMORY.md
+{memory_text}
+"""
+
+    @staticmethod
+    def _read_repair_file(path: Path) -> str:
+        if not path.exists():
+            return "(missing)"
+        content = path.read_text(encoding="utf-8").strip()
+        return content or "(empty)"
+
+    def _format_turn_transcript(self, turn_messages: list[dict]) -> str:
+        lines: list[str] = []
+        for message in turn_messages:
+            role = str(message.get("role") or "")
+            if role == "user":
+                text = self._serialize_message_content(message.get("content"))
+                if text:
+                    lines.append(f"USER: {text}")
+            elif role == "assistant":
+                if message.get("tool_calls"):
+                    for tool_call in message.get("tool_calls") or []:
+                        function = tool_call.get("function") or {}
+                        name = function.get("name") or "unknown_tool"
+                        arguments = function.get("arguments")
+                        lines.append(f"ASSISTANT_TOOL_CALL: {name}({arguments})")
+                text = self._serialize_message_content(message.get("content"))
+                if text:
+                    lines.append(f"ASSISTANT: {text}")
+            elif role == "tool":
+                name = message.get("name") or "tool"
+                text = self._serialize_message_content(message.get("content"))
+                if text:
+                    lines.append(f"TOOL_RESULT[{name}]: {text[: self._TOOL_RESULT_MAX_CHARS]}")
+        return "\n".join(lines) if lines else "(no tools used)"
+
+    @classmethod
+    def _serialize_message_content(cls, content) -> str:
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+            text = "\n".join(parts)
+        else:
+            return ""
+        if text.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+            parts = text.split("\n\n", 1)
+            text = parts[1] if len(parts) > 1 else ""
+        return " ".join(text.split()).strip()
+
+    def _maybe_log_feishu_placeholder_reply(
+        self,
+        *,
+        channel: str,
+        chat_id: str,
+        turn_id: str,
+        content: str,
+    ) -> None:
+        if channel != "feishu":
+            return
+        if not is_framework_delayed_text(content):
+            return
+        logger.bind(
+            event="feishu_model_placeholder_reply",
+            turn_id=turn_id,
+            chat_id=chat_id,
+        ).warning("Final Feishu reply contains placeholder wording: {}", content[:200])
 
     def _build_heartbeat_state_summary(
         self,
