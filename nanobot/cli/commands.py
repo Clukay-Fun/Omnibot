@@ -22,6 +22,7 @@ if sys.platform == "win32":
             pass
 
 import typer
+from typer.core import TyperGroup
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
@@ -41,8 +42,39 @@ from nanobot.feishu.outbound import FeishuOutboundMessenger
 from nanobot.utils.helpers import sync_workspace_templates
 from nanobot.version import format_version
 
+
+class LocalizedTyperGroup(TyperGroup):
+    """Typer group with localized built-in help text."""
+
+    @staticmethod
+    def _localize_builtin_option(param) -> None:
+        opts = set(getattr(param, "opts", []) or [])
+        if "--help" in opts:
+            param.help = "显示帮助并退出。"
+        elif "--install-completion" in opts:
+            param.help = "为当前 shell 安装补全。"
+        elif "--show-completion" in opts:
+            param.help = "显示当前 shell 的补全脚本，便于复制或自定义安装。"
+
+    def get_help_option(self, ctx):
+        option = super().get_help_option(ctx)
+        if option is not None:
+            self._localize_builtin_option(option)
+        return option
+
+    def format_options(self, ctx, formatter) -> None:
+        for param in self.get_params(ctx):
+            self._localize_builtin_option(param)
+        super().format_options(ctx, formatter)
+
+    def format_help(self, ctx, formatter) -> None:
+        for param in self.get_params(ctx):
+            self._localize_builtin_option(param)
+        super().format_help(ctx, formatter)
+
 app = typer.Typer(
     name="nanobot",
+    cls=LocalizedTyperGroup,
     help=f"{__logo__} nanobot - 个人 AI 助手",
     no_args_is_help=True,
 )
@@ -601,7 +633,7 @@ def gateway(
 # Heartbeat Commands
 # ============================================================================
 
-upstream_app = typer.Typer(help="查看上游 Git 提交")
+upstream_app = typer.Typer(cls=LocalizedTyperGroup, help="查看上游 Git 提交")
 app.add_typer(upstream_app, name="upstream")
 
 
@@ -656,7 +688,7 @@ def upstream_status(
         console.print(f"      git cherry-pick -x {short_sha}")
 
 
-heartbeat_app = typer.Typer(help="管理 heartbeat 配置")
+heartbeat_app = typer.Typer(cls=LocalizedTyperGroup, help="管理 heartbeat 配置")
 app.add_typer(heartbeat_app, name="heartbeat")
 
 
@@ -929,10 +961,10 @@ def agent(
 # ============================================================================
 
 
-channels_app = typer.Typer(help="管理渠道")
+channels_app = typer.Typer(cls=LocalizedTyperGroup, help="管理渠道")
 app.add_typer(channels_app, name="channels")
 
-feishu_app = typer.Typer(help="管理飞书相关操作")
+feishu_app = typer.Typer(cls=LocalizedTyperGroup, help="管理飞书相关操作")
 app.add_typer(feishu_app, name="feishu")
 
 
@@ -1321,7 +1353,7 @@ def doctor(
 # OAuth Login
 # ============================================================================
 
-provider_app = typer.Typer(help="管理 providers")
+provider_app = typer.Typer(cls=LocalizedTyperGroup, help="管理 providers")
 app.add_typer(provider_app, name="provider")
 
 
