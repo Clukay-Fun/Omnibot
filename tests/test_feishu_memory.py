@@ -22,6 +22,25 @@ def test_user_memory_store_round_trip(tmp_path: Path) -> None:
     assert record.summary == "asked about billing"
 
 
+def test_user_memory_store_clear_all_for_user_removes_snapshots(tmp_path: Path) -> None:
+    store = FeishuUserMemoryStore(tmp_path / "feishu-memory.sqlite3")
+    store.upsert("tenant-1", "ou_user_1", profile="likes coffee", summary="asked about billing")
+    store.enqueue_snapshot(
+        tenant_key="tenant-1",
+        user_open_id="ou_user_1",
+        session_key="feishu:dm:ou_user_1",
+        reason="test",
+        start_index=0,
+        end_index=1,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    store.clear_all_for_user("tenant-1", "ou_user_1")
+
+    assert store.get("tenant-1", "ou_user_1") is None
+    assert store.count_snapshots() == 0
+
+
 @pytest.mark.asyncio
 async def test_handler_injects_profile_and_summary_for_dm(tmp_path: Path) -> None:
     store = FeishuUserMemoryStore(tmp_path / "feishu-memory.sqlite3")

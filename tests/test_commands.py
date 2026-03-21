@@ -533,6 +533,100 @@ def _write_cli_config(config_path: Path, *, workspace: Path | None = None) -> Co
     return config
 
 
+def test_reset_user_id_clears_only_target_feishu_user_state(tmp_path: Path) -> None:
+    from nanobot.feishu.memory import FeishuUserMemoryStore
+    from nanobot.feishu.persona import FeishuUserWorkspaceManager
+    from nanobot.session.manager import SessionManager
+
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+    sync_workspace_templates(workspace, silent=True)
+
+    persona = FeishuUserWorkspaceManager(workspace)
+    target_overlay = persona.ensure_dm_workspace("tenant-1", "ou_user_1")
+    other_overlay = persona.ensure_dm_workspace("tenant-1", "ou_user_2")
+    (target_overlay / "USER.md").write_text("# target\n", encoding="utf-8")
+    (other_overlay / "USER.md").write_text("# other\n", encoding="utf-8")
+
+    sessions = SessionManager(workspace)
+    for key in ("feishu:dm:ou_user_1", "feishu:dm:ou_user_1:heartbeat", "feishu:dm:ou_user_2"):
+        session = sessions.get_or_create(key)
+        session.add_message("user", "hello")
+        sessions.save(session)
+
+    store = FeishuUserMemoryStore(workspace / ".feishu_memory.sqlite3")
+    store.upsert("tenant-1", "ou_user_1", profile="target", summary="target summary")
+    store.upsert("tenant-1", "ou_user_2", profile="other", summary="other summary")
+    store.enqueue_snapshot(
+        tenant_key="tenant-1",
+        user_open_id="ou_user_1",
+        session_key="feishu:dm:ou_user_1",
+        reason="test",
+        start_index=0,
+        end_index=1,
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--config-path",
+            str(config_path),
+            "--workspace",
+            str(workspace),
+            "--user-id",
+            "ou_user_1",
+            "--tenant-key",
+            "tenant-1",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Reset Feishu DM state for ou_user_1" in result.stdout
+    assert (target_overlay / "USER.md").exists()
+    assert "# target" not in (target_overlay / "USER.md").read_text(encoding="utf-8")
+    assert (other_overlay / "USER.md").read_text(encoding="utf-8") == "# other\n"
+    assert not (workspace / "sessions" / "feishu_dm_ou_user_1.jsonl").exists()
+    assert not (workspace / "sessions" / "feishu_dm_ou_user_1_heartbeat.jsonl").exists()
+    assert (workspace / "sessions" / "feishu_dm_ou_user_2.jsonl").exists()
+    assert store.get("tenant-1", "ou_user_1") is None
+    assert store.get("tenant-1", "ou_user_2") is not None
+    assert store.count_snapshots() == 0
+
+
+def test_reset_user_id_requires_tenant_key_when_overlay_is_ambiguous(tmp_path: Path) -> None:
+    from nanobot.feishu.persona import FeishuUserWorkspaceManager
+
+    config_path = tmp_path / "nanobot.json"
+    workspace = tmp_path / "workspace"
+    _write_cli_config(config_path, workspace=workspace)
+    sync_workspace_templates(workspace, silent=True)
+
+    persona = FeishuUserWorkspaceManager(workspace)
+    persona.ensure_dm_workspace("tenant-1", "ou_user_1")
+    persona.ensure_dm_workspace("tenant-2", "ou_user_1")
+
+    result = runner.invoke(
+        app,
+        [
+            "reset",
+            "--config-path",
+            str(config_path),
+            "--workspace",
+            str(workspace),
+            "--user-id",
+            "ou_user_1",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Please pass --tenant-key" in result.stdout
+
+
 def test_heartbeat_status_reads_target_config(tmp_path: Path) -> None:
     config_path = tmp_path / "nanobot.json"
     workspace = tmp_path / "workspace"

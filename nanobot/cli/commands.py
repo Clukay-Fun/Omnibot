@@ -419,6 +419,107 @@ def _recreate_workspace(workspace: Path) -> None:
     sync_workspace_templates(workspace)
 
 
+def _resolve_feishu_memory_db_path(config: Config, workspace: Path) -> Path:
+    memory_db_path = config.channels.feishu.memory_db_path
+    return Path(memory_db_path).expanduser() if memory_db_path else workspace / ".feishu_memory.sqlite3"
+
+
+def _resolve_feishu_reset_target(
+    workspace: Path,
+    *,
+    user_id: str,
+    tenant_key: str | None,
+    memory_store,
+) -> tuple[str, Path | None]:
+    from nanobot.utils.helpers import safe_filename
+
+    feishu_root = workspace / "users" / "feishu"
+    safe_user = safe_filename(user_id) or "user"
+
+    if tenant_key:
+        safe_tenant = safe_filename(tenant_key) or "tenant"
+        overlay_root = feishu_root / safe_tenant / safe_user
+        return tenant_key, overlay_root if overlay_root.exists() else None
+
+    overlay_matches = sorted(path for path in feishu_root.glob(f"*/{safe_user}") if path.is_dir())
+    overlay_tenants = [path.parent.name for path in overlay_matches]
+    memory_tenants = memory_store.list_tenant_keys(user_id)
+    if len(memory_tenants) == 1:
+        return memory_tenants[0], overlay_matches[0] if len(overlay_matches) == 1 else None
+
+    if len(overlay_matches) == 1:
+        resolved_tenant = overlay_tenants[0]
+        if memory_tenants:
+            raw_match = [tenant for tenant in memory_tenants if safe_filename(tenant) == resolved_tenant]
+            if len(raw_match) == 1:
+                resolved_tenant = raw_match[0]
+        return resolved_tenant, overlay_matches[0]
+
+    if len(overlay_matches) > 1 or len(memory_tenants) > 1:
+        console.print(f"[red]User {user_id} matches multiple tenants. Please pass --tenant-key.[/red]")
+        raise typer.Exit(1)
+
+    console.print(f"[red]No Feishu private-chat state found for user {user_id}.[/red]")
+    raise typer.Exit(1)
+
+
+def _delete_session_file(session_manager, key: str) -> bool:
+    session_manager._cache.pop(key, None)
+    path = session_manager._get_session_path(key)
+    removed = False
+    if path.exists():
+        path.unlink()
+        removed = True
+    legacy_path = session_manager._get_legacy_session_path(key)
+    if legacy_path.exists():
+        legacy_path.unlink()
+        removed = True
+    return removed
+
+
+def _reset_feishu_user_state(
+    workspace: Path,
+    *,
+    config: Config,
+    user_id: str,
+    tenant_key: str | None,
+) -> dict[str, str | int]:
+    from nanobot.feishu.memory import FeishuUserMemoryStore
+    from nanobot.feishu.persona import FeishuUserWorkspaceManager
+    from nanobot.session.manager import SessionManager
+
+    memory_store = FeishuUserMemoryStore(_resolve_feishu_memory_db_path(config, workspace))
+    resolved_tenant_key, overlay_root = _resolve_feishu_reset_target(
+        workspace,
+        user_id=user_id,
+        tenant_key=tenant_key,
+        memory_store=memory_store,
+    )
+
+    removed_overlay = False
+    if overlay_root is not None and overlay_root.exists():
+        shutil.rmtree(overlay_root)
+        removed_overlay = True
+
+    persona_manager = FeishuUserWorkspaceManager(workspace)
+    recreated_overlay = persona_manager.ensure_dm_workspace(resolved_tenant_key, user_id)
+
+    memory_store.clear_all_for_user(resolved_tenant_key, user_id)
+
+    session_manager = SessionManager(workspace)
+    removed_sessions = 0
+    for session_key in (f"feishu:dm:{user_id}", f"feishu:dm:{user_id}:heartbeat"):
+        if _delete_session_file(session_manager, session_key):
+            removed_sessions += 1
+
+    return {
+        "tenant_key": resolved_tenant_key,
+        "overlay_root": str(recreated_overlay),
+        "removed_overlay": int(removed_overlay),
+        "removed_sessions": removed_sessions,
+    }
+
+
 # ============================================================================
 # Gateway / Server
 # ============================================================================
@@ -1274,6 +1375,8 @@ def status():
 def reset(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory to reset"),
     config: str | None = typer.Option(None, "--config-path", "-c", help="Path to config file"),
+    user_id: str | None = typer.Option(None, "--user-id", help="Only reset the Feishu DM state for this user_open_id"),
+    tenant_key: str | None = typer.Option(None, "--tenant-key", help="Tenant key used with --user-id when a user exists in multiple tenants"),
     reset_config: bool = typer.Option(False, "--config", help="Also reset the config file to defaults"),
     reset_history: bool = typer.Option(False, "--history", help="Also clear CLI history"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
@@ -1295,12 +1398,22 @@ def reset(
     console.print(Text(f"Config: {config_path}", no_wrap=True, overflow="ignore"))
     console.print(f"Reset config: {'yes' if reset_config else 'no'}")
     console.print(f"Reset CLI history: {'yes' if reset_history else 'no'}")
+    if user_id:
+        console.print(f"Feishu user ID: {user_id}")
+        console.print(f"Tenant key: {tenant_key or '(auto)'}")
     console.print()
 
-    actions = [
-        f"Recreate workspace from templates: {workspace_path}",
-        "Clear workspace sessions, memory, per-user overlays, and other files under that workspace",
-    ]
+    if user_id:
+        actions = [
+            f"Reset Feishu DM state for user: {user_id}",
+            "Delete that user's per-user workspace, Feishu sessions, and Feishu SQLite memory/snapshots",
+            "Recreate the user's per-user workspace from templates",
+        ]
+    else:
+        actions = [
+            f"Recreate workspace from templates: {workspace_path}",
+            "Clear workspace sessions, memory, per-user overlays, and other files under that workspace",
+        ]
     if reset_config:
         actions.append(f"Reset config file to defaults: {config_path}")
     if reset_history:
@@ -1318,8 +1431,21 @@ def reset(
         console.print("[yellow]Reset cancelled.[/yellow]")
         raise typer.Exit(0)
 
-    _recreate_workspace(workspace_path)
-    console.print(f"[green]✓[/green] Reset workspace at {workspace_path}")
+    if user_id:
+        result = _reset_feishu_user_state(
+            workspace_path,
+            config=loaded,
+            user_id=user_id,
+            tenant_key=tenant_key,
+        )
+        console.print(
+            f"[green]✓[/green] Reset Feishu DM state for {user_id} "
+            f"(tenant: {result['tenant_key']}, sessions removed: {result['removed_sessions']})"
+        )
+        console.print(Text(f"Overlay: {result['overlay_root']}", no_wrap=True, overflow="ignore"))
+    else:
+        _recreate_workspace(workspace_path)
+        console.print(f"[green]✓[/green] Reset workspace at {workspace_path}")
 
     if reset_config:
         save_config(Config(), config_path)

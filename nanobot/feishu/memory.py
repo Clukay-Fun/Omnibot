@@ -108,6 +108,34 @@ class FeishuUserMemoryStore:
         )
         self._conn.commit()
 
+    def clear_all_for_user(self, tenant_key: str, user_open_id: str) -> None:
+        """Delete long-term memory and queued archive snapshots for one Feishu user."""
+        self._conn.execute(
+            "DELETE FROM feishu_user_memory WHERE tenant_key = ? AND user_open_id = ?",
+            (tenant_key, user_open_id),
+        )
+        self._conn.execute(
+            "DELETE FROM feishu_memory_snapshots WHERE tenant_key = ? AND user_open_id = ?",
+            (tenant_key, user_open_id),
+        )
+        self._conn.commit()
+
+    def list_tenant_keys(self, user_open_id: str) -> list[str]:
+        """Return distinct tenant keys known for this user."""
+        rows = self._conn.execute(
+            """
+            SELECT DISTINCT tenant_key
+            FROM (
+                SELECT tenant_key FROM feishu_user_memory WHERE user_open_id = ?
+                UNION
+                SELECT tenant_key FROM feishu_memory_snapshots WHERE user_open_id = ?
+            )
+            ORDER BY tenant_key ASC
+            """,
+            (user_open_id, user_open_id),
+        ).fetchall()
+        return [str(row[0]) for row in rows if row and row[0]]
+
     def enqueue_snapshot(
         self,
         *,
