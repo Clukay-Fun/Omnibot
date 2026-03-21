@@ -39,6 +39,10 @@ class _PreparedTurn:
     chat_id: str
     reply_to: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    pending_entries: list[tuple[str, bool]] = field(default_factory=list)
+    card_task: asyncio.Task | None = None
+    delayed_text_task: asyncio.Task | None = None
+    delayed_text_sent: bool = False
 
 
 class FeishuCardStreamer:
@@ -46,6 +50,9 @@ class FeishuCardStreamer:
 
     _INITIAL_ENTRY = "思考中…"
     _MAX_ENTRY_CHARS = 80
+    _DEFAULT_DEBOUNCE_SECONDS = 0.8
+    _DEFAULT_DELAYED_TEXT_SECONDS = 2.5
+    _DELAYED_TEXT = "正在处理，稍后给你结果。"
 
     def __init__(
         self,
@@ -53,11 +60,15 @@ class FeishuCardStreamer:
         client_getter: Callable[[], Any | None],
         scope: str = "dm",
         throttle_seconds: float = 0.5,
+        debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS,
+        delayed_text_seconds: float = _DEFAULT_DELAYED_TEXT_SECONDS,
         sleep: Callable[[float], Any] | None = None,
     ):
         self._client_getter = client_getter
         self.scope = scope
         self.throttle_seconds = throttle_seconds
+        self.debounce_seconds = debounce_seconds
+        self.delayed_text_seconds = delayed_text_seconds
         self._sleep = sleep or asyncio.sleep
         self._states: dict[str, _StreamState] = {}
         self._prepared_turns: dict[str, _PreparedTurn] = {}
@@ -83,6 +94,7 @@ class FeishuCardStreamer:
             reply_to=reply_to,
             metadata=dict(meta),
         )
+        await self._schedule_delayed_text(turn_id)
         return True
 
     async def handle(self, msg: OutboundMessage) -> bool:
@@ -107,13 +119,31 @@ class FeishuCardStreamer:
         if state is None:
             if not is_tool_progress:
                 return True
-            state = await self._ensure_state(
-                turn_id=turn_id,
-                chat_id=msg.chat_id,
-                metadata=metadata,
-                reply_to=self._reply_target(msg),
-            )
-            if state is None:
+            prepared = self._prepared_turns.get(turn_id)
+            if prepared is None:
+                state = await self._ensure_state(
+                    turn_id=turn_id,
+                    chat_id=msg.chat_id,
+                    metadata=metadata,
+                    reply_to=self._reply_target(msg),
+                )
+                if state is None:
+                    return True
+            else:
+                if prepared.delayed_text_sent:
+                    return True
+                rendered = self._render_entry(msg.content, tool_hint=bool(metadata.get("_tool_hint")))
+                if not rendered:
+                    return True
+                if prepared.pending_entries and prepared.pending_entries[-1] == (rendered, bool(metadata.get("_tool_hint"))):
+                    return True
+                prepared.pending_entries.append((rendered, bool(metadata.get("_tool_hint"))))
+                await self._schedule_card_creation(
+                    turn_id=turn_id,
+                    chat_id=msg.chat_id,
+                    metadata=metadata,
+                    reply_to=self._reply_target(msg),
+                )
                 return True
 
         updated = self._append_progress_entry(
@@ -133,7 +163,9 @@ class FeishuCardStreamer:
 
     async def complete_turn(self, turn_id: str) -> bool:
         self._disabled_turns.discard(turn_id)
-        self._prepared_turns.pop(turn_id, None)
+        prepared = self._prepared_turns.pop(turn_id, None)
+        if prepared is not None:
+            await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
         if state is None:
             return False
@@ -157,6 +189,8 @@ class FeishuCardStreamer:
         """Drop local turn state without marking completion."""
         self._disabled_turns.discard(turn_id)
         prepared = self._prepared_turns.pop(turn_id, None)
+        if prepared is not None:
+            await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
         if state is None:
             return prepared is not None
@@ -166,6 +200,11 @@ class FeishuCardStreamer:
     async def wait_for_idle(self) -> None:
         while True:
             tasks = [state.flush_task for state in self._states.values() if state.flush_task is not None]
+            for prepared in self._prepared_turns.values():
+                if prepared.card_task is not None:
+                    tasks.append(prepared.card_task)
+                if prepared.delayed_text_task is not None:
+                    tasks.append(prepared.delayed_text_task)
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -204,6 +243,7 @@ class FeishuCardStreamer:
             self._disabled_turns.add(turn_id)
             return None
 
+        await self._cancel_delayed_text(prepared)
         message_id = await self._create_card(client, prepared.chat_id, prepared.reply_to, build_initial())
         if not message_id:
             self._prepared_turns.pop(turn_id, None)
@@ -217,6 +257,10 @@ class FeishuCardStreamer:
         )
         self._states[turn_id] = state
         self._prepared_turns.pop(turn_id, None)
+        for entry, tool_hint in prepared.pending_entries:
+            self._append_rendered_entry(state, entry, tool_hint=tool_hint)
+        if state.entries:
+            await self._patch_state(turn_id, state)
         return state
 
     def _should_stream(self, metadata: dict[str, Any]) -> bool:
@@ -263,6 +307,24 @@ class FeishuCardStreamer:
                 message_id,
                 "interactive",
                 json.dumps(payload, ensure_ascii=False),
+            )
+        )
+
+    async def _send_delayed_text(self, chat_id: str, reply_to: str | None, content: str) -> bool:
+        client = self._client_getter()
+        if client is None:
+            return False
+        loop = asyncio.get_running_loop()
+        receive_id_type = FeishuClient.resolve_receive_id_type(chat_id)
+        return bool(
+            await loop.run_in_executor(
+                None,
+                client.send_message_sync,
+                receive_id_type,
+                chat_id,
+                "text",
+                json.dumps({"text": content}, ensure_ascii=False),
+                reply_to,
             )
         )
 
@@ -325,6 +387,104 @@ class FeishuCardStreamer:
             pass
         state.flush_task = None
 
+    async def _schedule_card_creation(
+        self,
+        *,
+        turn_id: str,
+        chat_id: str,
+        metadata: dict[str, Any],
+        reply_to: str | None,
+    ) -> None:
+        prepared = self._prepared_turns.get(turn_id)
+        if prepared is None:
+            return
+        if prepared.delayed_text_sent:
+            return
+        if self.debounce_seconds <= 0:
+            await self._ensure_state(
+                turn_id=turn_id,
+                chat_id=chat_id,
+                metadata=metadata,
+                reply_to=reply_to,
+            )
+            return
+        if prepared.card_task is not None and not prepared.card_task.done():
+            return
+
+        async def _create() -> None:
+            try:
+                if self.debounce_seconds > 0:
+                    await self._sleep(self.debounce_seconds)
+                current = self._prepared_turns.get(turn_id)
+                if current is None or current.delayed_text_sent or turn_id in self._states:
+                    return
+                await self._ensure_state(
+                    turn_id=turn_id,
+                    chat_id=chat_id,
+                    metadata=metadata,
+                    reply_to=reply_to,
+                )
+            except asyncio.CancelledError:
+                raise
+            finally:
+                current = self._prepared_turns.get(turn_id)
+                if current is not None:
+                    current.card_task = None
+
+        prepared.card_task = asyncio.create_task(_create())
+
+    async def _schedule_delayed_text(self, turn_id: str) -> None:
+        prepared = self._prepared_turns.get(turn_id)
+        if prepared is None or prepared.delayed_text_task is not None:
+            return
+        if self.delayed_text_seconds <= 0:
+            return
+        if str(prepared.metadata.get("chat_type") or "") != "p2p":
+            return
+
+        async def _notify() -> None:
+            try:
+                if self.delayed_text_seconds > 0:
+                    await self._sleep(self.delayed_text_seconds)
+                current = self._prepared_turns.get(turn_id)
+                if current is None or current.delayed_text_sent or turn_id in self._states:
+                    return
+                if await self._send_delayed_text(current.chat_id, current.reply_to, self._DELAYED_TEXT):
+                    current.delayed_text_sent = True
+            except asyncio.CancelledError:
+                raise
+            finally:
+                current = self._prepared_turns.get(turn_id)
+                if current is not None:
+                    current.delayed_text_task = None
+
+        prepared.delayed_text_task = asyncio.create_task(_notify())
+
+    async def _cancel_delayed_text(self, prepared: _PreparedTurn) -> None:
+        task = prepared.delayed_text_task
+        if task is None or task.done():
+            prepared.delayed_text_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        prepared.delayed_text_task = None
+
+    async def _cancel_prepared_tasks(self, prepared: _PreparedTurn) -> None:
+        await self._cancel_delayed_text(prepared)
+        task = prepared.card_task
+        if task is None or task.done():
+            prepared.card_task = None
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        prepared.card_task = None
+
     def _append_progress_entry(self, state: _StreamState, content: str, *, tool_hint: bool) -> bool:
         if not state.entries:
             state.entries.append(self._INITIAL_ENTRY)
@@ -332,6 +492,11 @@ class FeishuCardStreamer:
         rendered = self._render_entry(content, tool_hint=tool_hint)
         if not rendered:
             return False
+        return self._append_rendered_entry(state, rendered, tool_hint=tool_hint)
+
+    def _append_rendered_entry(self, state: _StreamState, rendered: str, *, tool_hint: bool) -> bool:
+        if not state.entries:
+            state.entries.append(self._INITIAL_ENTRY)
         if state.entries and state.entries[-1] == rendered:
             return False
 

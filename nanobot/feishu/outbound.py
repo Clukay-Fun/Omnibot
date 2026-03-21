@@ -201,6 +201,18 @@ class FeishuOutboundMessenger:
         reply_to: str | None = None,
         delivery_mode: str = "",
     ) -> bool:
+        if delivery_mode == "turn_final":
+            msg_type, payload = FeishuRenderer.render_final_reply(content)
+            return bool(await loop.run_in_executor(
+                None,
+                client.send_message_sync,
+                receive_id_type,
+                chat_id,
+                msg_type,
+                payload,
+                reply_to,
+            ))
+
         if delivery_mode == "reply_post":
             msg_type, payload = FeishuRenderer.render_reply_post(content)
             return bool(await loop.run_in_executor(

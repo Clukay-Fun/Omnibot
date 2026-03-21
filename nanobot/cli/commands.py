@@ -4,6 +4,7 @@ import asyncio
 import os
 import select
 import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
@@ -47,6 +48,7 @@ app = typer.Typer(
 
 console = Console()
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit", ":q"}
+_UPSTREAM_CORE_PATHS = ("nanobot/feishu", "nanobot/agent", "nanobot/config", "deploy", "docs")
 _DOCTOR_STATUS_LABELS = {
     "ok": "[green]OK[/green]",
     "warn": "[yellow]WARN[/yellow]",
@@ -129,6 +131,33 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     content = response or ""
     body = Markdown(content) if render_markdown else Text(content)
     console.print()
+
+
+def _git_capture(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run a git command and return the completed process with captured text output."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=check,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _top_level_paths(paths: list[str]) -> list[str]:
+    tops = {path.split("/", 1)[0] for path in paths if path}
+    return sorted(tops)
+
+
+def _classify_upstream_risk(commit_paths: list[str], local_paths: set[str]) -> str:
+    commit_top = set(_top_level_paths(commit_paths))
+    if commit_top & local_paths:
+        return "high"
+    if any(path.startswith(_UPSTREAM_CORE_PATHS) for path in commit_paths):
+        return "medium"
+    if commit_top & set(_UPSTREAM_CORE_PATHS):
+        return "medium"
+    return "low"
     console.print(f"[cyan]{__logo__} nanobot[/cyan]")
     console.print(body)
     console.print()
@@ -550,6 +579,60 @@ def gateway(
 # ============================================================================
 # Heartbeat Commands
 # ============================================================================
+
+upstream_app = typer.Typer(help="Inspect upstream git commits")
+app.add_typer(upstream_app, name="upstream")
+
+
+@upstream_app.command("status")
+def upstream_status(
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Git workspace to inspect"),
+):
+    """Show upstream-only commits and a git-based import risk hint."""
+    repo = Path(workspace).expanduser().resolve() if workspace else Path.cwd().resolve()
+
+    try:
+        _git_capture(["rev-parse", "--is-inside-work-tree"], repo)
+    except subprocess.CalledProcessError:
+        console.print(f"[red]Not a git repository:[/red] {repo}")
+        raise typer.Exit(1)
+
+    remotes = _git_capture(["remote"], repo).stdout.split()
+    if "upstream" not in remotes:
+        console.print("[red]Missing git remote 'upstream'.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        _git_capture(["fetch", "--no-tags", "upstream", "main"], repo)
+    except subprocess.CalledProcessError as exc:
+        console.print(f"[red]Failed to fetch upstream/main:[/red] {exc.stderr.strip() or exc.stdout.strip()}")
+        raise typer.Exit(1)
+
+    merge_base = _git_capture(["merge-base", "HEAD", "upstream/main"], repo).stdout.strip()
+    local_changed = _git_capture(["diff", "--name-only", f"{merge_base}..HEAD"], repo).stdout.splitlines()
+    local_top_paths = set(_top_level_paths(local_changed))
+    upstream_only = _git_capture(["rev-list", "--reverse", "HEAD..upstream/main"], repo).stdout.splitlines()
+
+    console.print(f"{__logo__} Upstream Status\n")
+    console.print(Text(f"Repo: {repo}", no_wrap=True, overflow="ignore"))
+    console.print("Base: upstream/main")
+    console.print(f"Upstream-only commits: {len(upstream_only)}")
+
+    if not upstream_only:
+        console.print("[green]Already up to date with upstream/main.[/green]")
+        return
+
+    for sha in upstream_only:
+        header = _git_capture(["show", "--quiet", "--date=short", "--format=%h%x09%ad%x09%s", sha], repo).stdout.strip()
+        changed_files = [line.strip() for line in _git_capture(["show", "--name-only", "--format=", sha], repo).stdout.splitlines() if line.strip()]
+        top_paths = _top_level_paths(changed_files)
+        risk = _classify_upstream_risk(changed_files, local_top_paths)
+
+        short_sha, date, subject = (header.split("\t", 2) + ["", "", ""])[:3]
+        console.print(f"\n[{risk.upper()}] {short_sha}  {date}  {subject}")
+        console.print(f"Paths: {', '.join(top_paths) if top_paths else '(none)'}")
+        console.print(f"Next: git show {short_sha}")
+        console.print(f"      git cherry-pick -x {short_sha}")
 
 
 heartbeat_app = typer.Typer(help="Manage heartbeat configuration")

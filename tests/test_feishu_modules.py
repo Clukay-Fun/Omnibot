@@ -21,6 +21,12 @@ def test_renderer_detects_text_and_interactive_content() -> None:
     assert FeishuRenderer.detect_msg_format("# Heading") == "interactive"
 
 
+def test_renderer_detects_final_reply_formats() -> None:
+    assert FeishuRenderer.detect_final_reply_format("hello") == "text"
+    assert FeishuRenderer.detect_final_reply_format("- a\n- b") == "post"
+    assert FeishuRenderer.detect_final_reply_format("# Heading") == "interactive"
+
+
 def test_renderer_reply_post_prefers_post_and_preserves_links() -> None:
     msg_type, payload = FeishuRenderer.render_reply_post("**加粗** [链接](https://example.com)")
 

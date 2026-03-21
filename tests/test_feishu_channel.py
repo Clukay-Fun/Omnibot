@@ -63,7 +63,7 @@ async def test_feishu_channel_marks_turn_final_as_reply_post_and_cleans_up_on_su
     channel._streaming.handle.assert_not_awaited()
     delivered = channel._outbound.send.await_args.args[0]
     assert delivered is not msg
-    assert delivered.metadata["feishu_delivery"] == "reply_post"
+    assert delivered.metadata["feishu_delivery"] == "turn_final"
     assert delivered.metadata["turn_id"] == "turn-2"
     assert delivered.feishu_card is None
     channel._streaming.complete_turn.assert_awaited_once_with("turn-2")

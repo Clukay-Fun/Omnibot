@@ -103,7 +103,7 @@ class FeishuChannel(BaseChannel):
         turn_id = str(metadata.get("turn_id") or "")
         if turn_id:
             local_metadata = dict(metadata)
-            local_metadata["feishu_delivery"] = "reply_post"
+            local_metadata["feishu_delivery"] = "turn_final"
             delivery_msg = OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,

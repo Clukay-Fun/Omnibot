@@ -48,6 +48,24 @@ class FeishuRenderer:
             return "text", json.dumps({"text": plain}, ensure_ascii=False)
         return "post", cls.markdown_to_post(content)
 
+    @classmethod
+    def render_final_reply(cls, content: str) -> tuple[str, str]:
+        """Render a final Feishu turn reply through the explicit converter pipeline."""
+        fmt = cls.detect_final_reply_format(content)
+        plain = emojize_text(cls.markdown_to_plain_text(content).strip())
+
+        if fmt == "text":
+            return "text", json.dumps({"text": plain}, ensure_ascii=False)
+        if fmt == "post":
+            return "post", cls.markdown_to_post(content)
+
+        elements = cls.build_card_elements(content)
+        card = {
+            "config": {"wide_screen_mode": True},
+            "elements": elements or [{"tag": "markdown", "content": content}],
+        }
+        return "interactive", json.dumps(card, ensure_ascii=False)
+
     @staticmethod
     def parse_md_table(table_text: str) -> dict | None:
         """Parse a markdown table into a Feishu table element."""
@@ -162,6 +180,27 @@ class FeishuRenderer:
         if cls._MD_LINK_RE.search(stripped):
             return "post"
         if len(stripped) <= cls._TEXT_MAX_LEN:
+            return "text"
+        return "post"
+
+    @classmethod
+    def detect_final_reply_format(cls, content: str) -> str:
+        """Determine the final-reply delivery mode for a turn-bound Feishu reply."""
+        stripped = content.strip()
+        if not stripped:
+            return "text"
+        if cls._COMPLEX_MD_RE.search(stripped):
+            return "interactive"
+        if len(stripped) > cls._POST_MAX_LEN:
+            return "interactive"
+        if cls._MD_LINK_RE.search(stripped):
+            return "post"
+        if cls._LIST_RE.search(stripped) or cls._OLIST_RE.search(stripped):
+            return "post"
+        if cls._SIMPLE_MD_RE.search(stripped):
+            return "post"
+        plain = emojize_text(cls.markdown_to_plain_text(content).strip())
+        if len(plain) <= cls._TEXT_MAX_LEN:
             return "text"
         return "post"
 

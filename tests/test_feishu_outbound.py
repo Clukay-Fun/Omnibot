@@ -57,7 +57,7 @@ async def test_outbound_messenger_sends_text_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outbound_messenger_sends_reply_post_for_user_turns() -> None:
+async def test_outbound_messenger_routes_turn_final_markdown_links_to_post() -> None:
     client = _FakeClient()
     messenger = FeishuOutboundMessenger(lambda: cast(object, client))
 
@@ -67,7 +67,7 @@ async def test_outbound_messenger_sends_reply_post_for_user_turns() -> None:
             chat_id="ou_123",
             content="**加粗** [链接](https://example.com)",
             reply_to="om_source_7",
-            metadata={"feishu_delivery": "reply_post"},
+            metadata={"feishu_delivery": "turn_final"},
         )
     )
 
@@ -80,7 +80,7 @@ async def test_outbound_messenger_sends_reply_post_for_user_turns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_outbound_messenger_emojizes_aliases_in_reply_post() -> None:
+async def test_outbound_messenger_routes_short_turn_final_text_to_text() -> None:
     client = _FakeClient()
     messenger = FeishuOutboundMessenger(lambda: cast(object, client))
 
@@ -90,23 +90,17 @@ async def test_outbound_messenger_emojizes_aliases_in_reply_post() -> None:
             chat_id="ou_123",
             content="你好 :wave: 欢迎回来 :sparkles:",
             reply_to="om_source_7b",
-            metadata={"feishu_delivery": "reply_post"},
+            metadata={"feishu_delivery": "turn_final"},
         )
     )
 
     assert ok is True
-    assert client.sent[0][2] == "post"
-    text = "".join(
-        element.get("text", "")
-        for paragraph in client.sent[0][3]["zh_cn"]["content"]
-        for element in paragraph
-    )
-    assert "👋" in text
-    assert "✨" in text
+    assert client.sent[0][2] == "text"
+    assert client.sent[0][3]["text"] == "你好 👋 欢迎回来 ✨️"
 
 
 @pytest.mark.asyncio
-async def test_outbound_messenger_downgrades_long_reply_post_to_text() -> None:
+async def test_outbound_messenger_routes_long_turn_final_markdown_to_interactive() -> None:
     client = _FakeClient()
     messenger = FeishuOutboundMessenger(lambda: cast(object, client))
     content = "# 标题\n\n" + ("内容 " * 1200)
@@ -117,13 +111,13 @@ async def test_outbound_messenger_downgrades_long_reply_post_to_text() -> None:
             chat_id="ou_123",
             content=content,
             reply_to="om_source_8",
-            metadata={"feishu_delivery": "reply_post"},
+            metadata={"feishu_delivery": "turn_final"},
         )
     )
 
     assert ok is True
-    assert client.sent[0][2] == "text"
-    assert client.sent[0][3]["text"].startswith("标题")
+    assert client.sent[0][2] == "interactive"
+    assert client.sent[0][3]["elements"]
 
 
 @pytest.mark.asyncio

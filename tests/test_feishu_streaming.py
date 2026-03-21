@@ -22,6 +22,7 @@ class _FakeClient:
         self.created: list[tuple[str, str, str, dict, str | None]] = []
         self.patched: list[tuple[str, str, dict]] = []
         self.deleted: list[str] = []
+        self.sent: list[tuple[str, str, str, dict, str | None]] = []
         self.fail_create = False
         self.fail_patch = False
         self.fail_delete = False
@@ -44,6 +45,17 @@ class _FakeClient:
     def patch_message_sync(self, message_id: str, msg_type: str, content: str) -> bool:
         self.patched.append((message_id, msg_type, json.loads(content)))
         return not self.fail_patch
+
+    def send_message_sync(
+        self,
+        receive_id_type: str,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        reply_to: str | None = None,
+    ) -> bool:
+        self.sent.append((receive_id_type, receive_id, msg_type, json.loads(content), reply_to))
+        return True
 
     def delete_message_sync(self, message_id: str) -> bool:
         self.deleted.append(message_id)
@@ -72,7 +84,7 @@ def _element_texts(payload: dict) -> list[str]:
 @pytest.mark.asyncio
 async def test_streamer_prepare_turn_only_registers_turn_without_creating_card() -> None:
     client = _FakeClient()
-    streamer = FeishuCardStreamer(client_getter=lambda: cast(object, client), scope="dm", throttle_seconds=0.5)
+    streamer = FeishuCardStreamer(client_getter=lambda: cast(object, client), scope="dm", throttle_seconds=0.5, debounce_seconds=0.0, delayed_text_seconds=0.0)
 
     prepared = await streamer.prepare_turn(
         turn_id="turn-1",
@@ -96,6 +108,8 @@ async def test_streamer_first_tool_progress_patches_immediately() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
         sleep=clock.sleep,
     )
     await streamer.prepare_turn(
@@ -142,6 +156,8 @@ async def test_streamer_accepts_legacy_tool_hint_without_is_tool_progress() -> N
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
     await streamer.prepare_turn(
         turn_id="turn-legacy-tool",
@@ -174,6 +190,8 @@ async def test_streamer_non_tool_progress_does_not_create_card() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     await streamer.prepare_turn(
@@ -200,6 +218,121 @@ async def test_streamer_non_tool_progress_does_not_create_card() -> None:
 
 
 @pytest.mark.asyncio
+async def test_streamer_tool_progress_within_debounce_does_not_create_card() -> None:
+    client = _FakeClient()
+    clock = _Clock()
+    streamer = FeishuCardStreamer(
+        client_getter=lambda: cast(object, client),
+        scope="dm",
+        throttle_seconds=0.5,
+        debounce_seconds=0.8,
+        delayed_text_seconds=0.0,
+        sleep=clock.sleep,
+    )
+
+    await streamer.prepare_turn(
+        turn_id="turn-debounce-short",
+        chat_id="ou_123",
+        metadata={"chat_type": "p2p"},
+        reply_to="om_source_debounce_short",
+    )
+    await streamer.handle(
+        _msg(
+            'web_search("测试查询")',
+            turn_id="turn-debounce-short",
+            chat_type="p2p",
+            message_id="om_source_debounce_short",
+            _progress=True,
+            _is_tool_progress=True,
+            _tool_hint=True,
+        )
+    )
+
+    completed = await streamer.complete_turn("turn-debounce-short")
+
+    assert completed is False
+    assert client.created == []
+    assert client.patched == []
+    assert clock.delays == []
+
+
+@pytest.mark.asyncio
+async def test_streamer_tool_progress_after_debounce_creates_card() -> None:
+    client = _FakeClient()
+    clock = _Clock()
+    streamer = FeishuCardStreamer(
+        client_getter=lambda: cast(object, client),
+        scope="dm",
+        throttle_seconds=0.5,
+        debounce_seconds=0.8,
+        delayed_text_seconds=0.0,
+        sleep=clock.sleep,
+    )
+
+    await streamer.prepare_turn(
+        turn_id="turn-debounce-long",
+        chat_id="ou_123",
+        metadata={"chat_type": "p2p"},
+        reply_to="om_source_debounce_long",
+    )
+    await streamer.handle(
+        _msg(
+            'web_search("测试查询")',
+            turn_id="turn-debounce-long",
+            chat_type="p2p",
+            message_id="om_source_debounce_long",
+            _progress=True,
+            _is_tool_progress=True,
+            _tool_hint=True,
+        )
+    )
+    await streamer.wait_for_idle()
+
+    assert client.created
+    assert client.patched
+    assert clock.delays[0] == pytest.approx(0.8, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_streamer_delayed_text_notice_suppresses_thinking_card() -> None:
+    client = _FakeClient()
+    clock = _Clock()
+    streamer = FeishuCardStreamer(
+        client_getter=lambda: cast(object, client),
+        scope="dm",
+        throttle_seconds=0.5,
+        debounce_seconds=0.8,
+        delayed_text_seconds=2.5,
+        sleep=clock.sleep,
+    )
+
+    await streamer.prepare_turn(
+        turn_id="turn-delayed-text",
+        chat_id="ou_123",
+        metadata={"chat_type": "p2p"},
+        reply_to="om_source_delayed_text",
+    )
+    await streamer.wait_for_idle()
+    await streamer.handle(
+        _msg(
+            'web_search("测试查询")',
+            turn_id="turn-delayed-text",
+            chat_type="p2p",
+            message_id="om_source_delayed_text",
+            _progress=True,
+            _is_tool_progress=True,
+            _tool_hint=True,
+        )
+    )
+
+    assert client.sent == [
+        ("open_id", "ou_123", "text", {"text": "正在处理，稍后给你结果。"}, "om_source_delayed_text")
+    ]
+    assert client.created == []
+    assert client.patched == []
+
+
+@pytest.mark.asyncio
 async def test_streamer_coalesces_follow_up_progress_with_throttle() -> None:
     client = _FakeClient()
     clock = _Clock()
@@ -207,6 +340,8 @@ async def test_streamer_coalesces_follow_up_progress_with_throttle() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
         sleep=clock.sleep,
     )
     await streamer.prepare_turn(
@@ -252,6 +387,8 @@ async def test_streamer_skips_duplicate_progress_entries() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
     await streamer.prepare_turn(
         turn_id="turn-4",
@@ -303,6 +440,8 @@ async def test_streamer_complete_turn_with_meaningful_entries_keeps_completed_ca
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
     await streamer.prepare_turn(
         turn_id="turn-5",
@@ -336,6 +475,8 @@ async def test_streamer_complete_turn_without_any_feedback_is_noop() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
     await streamer.prepare_turn(
         turn_id="turn-6",
@@ -359,6 +500,8 @@ async def test_streamer_tool_progress_creates_card_immediately() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
         sleep=throttle_clock.sleep,
     )
 
@@ -394,6 +537,8 @@ async def test_streamer_appends_tool_progress_into_existing_thinking_card() -> N
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
         sleep=clock.sleep,
     )
 
@@ -441,6 +586,8 @@ async def test_streamer_maps_feishu_workspace_skill_file_and_exec_to_human_text(
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
     await streamer.prepare_turn(
         turn_id="turn-skill",
@@ -486,6 +633,8 @@ async def test_streamer_skips_group_messages_when_scope_is_dm() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     handled = await streamer.handle(
@@ -511,6 +660,8 @@ async def test_streamer_falls_back_to_on_demand_creation_when_not_prepared(monke
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     monkeypatch.setattr(
@@ -545,6 +696,8 @@ async def test_streamer_create_failure_disables_turn() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     prepared = await streamer.prepare_turn(
@@ -579,6 +732,8 @@ async def test_streamer_can_prepare_new_turn_after_completion() -> None:
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     await streamer.prepare_turn(turn_id="turn-a", chat_id="ou_123", metadata={"chat_type": "p2p"}, reply_to="om_source_a")
@@ -598,6 +753,8 @@ async def test_streamer_keeps_turns_isolated_for_fast_consecutive_messages() -> 
         client_getter=lambda: cast(object, client),
         scope="dm",
         throttle_seconds=0.5,
+        debounce_seconds=0.0,
+        delayed_text_seconds=0.0,
     )
 
     await streamer.prepare_turn(turn_id="turn-x", chat_id="ou_123", metadata={"chat_type": "p2p"}, reply_to="om_source_x")

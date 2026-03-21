@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -330,6 +331,63 @@ def test_agent_workspace_override_wins_over_config_workspace(mock_agent_runtime,
     assert mock_agent_runtime["config"].agents.defaults.workspace == str(workspace_path)
     assert mock_agent_runtime["sync_templates"].call_args.args == (workspace_path,)
     assert mock_agent_runtime["agent_loop_cls"].call_args.kwargs["workspace"] == workspace_path
+
+
+def test_upstream_status_errors_without_upstream_remote(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _fake_git(args, cwd, check=True):
+        assert cwd == repo
+        if args == ["rev-parse", "--is-inside-work-tree"]:
+            return subprocess.CompletedProcess(["git", *args], 0, stdout="true\n", stderr="")
+        if args == ["remote"]:
+            return subprocess.CompletedProcess(["git", *args], 0, stdout="origin\n", stderr="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr("nanobot.cli.commands._git_capture", _fake_git)
+
+    result = runner.invoke(app, ["upstream", "status", "-w", str(repo)])
+
+    assert result.exit_code == 1
+    assert "Missing git remote 'upstream'" in result.stdout
+
+
+def test_upstream_status_lists_upstream_only_commits_and_risk(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def _fake_git(args, cwd, check=True):
+        assert cwd == repo
+        table = {
+            ("rev-parse", "--is-inside-work-tree"): subprocess.CompletedProcess(["git", *args], 0, stdout="true\n", stderr=""),
+            ("remote",): subprocess.CompletedProcess(["git", *args], 0, stdout="origin\nupstream\n", stderr=""),
+            ("fetch", "--no-tags", "upstream", "main"): subprocess.CompletedProcess(["git", *args], 0, stdout="", stderr=""),
+            ("merge-base", "HEAD", "upstream/main"): subprocess.CompletedProcess(["git", *args], 0, stdout="base123\n", stderr=""),
+            ("diff", "--name-only", "base123..HEAD"): subprocess.CompletedProcess(["git", *args], 0, stdout="nanobot/feishu/channel.py\nREADME.md\n", stderr=""),
+            ("rev-list", "--reverse", "HEAD..upstream/main"): subprocess.CompletedProcess(["git", *args], 0, stdout="aaa111\nbbb222\n", stderr=""),
+            ("show", "--quiet", "--date=short", "--format=%h%x09%ad%x09%s", "aaa111"): subprocess.CompletedProcess(["git", *args], 0, stdout="aaa111\t2026-03-20\tTouch Feishu flow\n", stderr=""),
+            ("show", "--name-only", "--format=", "aaa111"): subprocess.CompletedProcess(["git", *args], 0, stdout="nanobot/feishu/outbound.py\nnanobot/feishu/streaming.py\n", stderr=""),
+            ("show", "--quiet", "--date=short", "--format=%h%x09%ad%x09%s", "bbb222"): subprocess.CompletedProcess(["git", *args], 0, stdout="bbb222\t2026-03-21\tDocs cleanup\n", stderr=""),
+            ("show", "--name-only", "--format=", "bbb222"): subprocess.CompletedProcess(["git", *args], 0, stdout="docs/guide.md\n", stderr=""),
+        }
+        key = tuple(args)
+        if key not in table:
+            raise AssertionError(args)
+        return table[key]
+
+    monkeypatch.setattr("nanobot.cli.commands._git_capture", _fake_git)
+
+    result = runner.invoke(app, ["upstream", "status", "-w", str(repo)])
+
+    assert result.exit_code == 0
+    assert "Upstream-only commits: 2" in result.stdout
+    assert "[HIGH] aaa111" in result.stdout
+    assert "Paths: nanobot" in result.stdout
+    assert "[MEDIUM] bbb222" in result.stdout
+    assert "Paths: docs" in result.stdout
+    assert "git show aaa111" in result.stdout
+    assert "git cherry-pick -x bbb222" in result.stdout
 
 
 def test_gateway_uses_workspace_from_config_by_default(monkeypatch, tmp_path: Path) -> None:
