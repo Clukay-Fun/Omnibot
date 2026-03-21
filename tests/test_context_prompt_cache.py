@@ -58,12 +58,25 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
 
     prompt = builder.build_system_prompt()
 
+    assert "# 规则层（必须遵守）" in prompt
+    assert "## 运行契约" in prompt
+    assert "`规则层 > WORKLOG > MEMORY`" in prompt
+    assert "# 当前工作层（操作面板）" not in prompt
+    assert "# 参考记忆层（可引用但不是硬规则）" not in prompt
     assert "Reply directly when the user is making small talk, greeting you, acknowledging something, asking who you are, or making a conversational remark that does not ask for information or action." in prompt
     assert "Use tools when the user is asking you to obtain current, external, or workspace-specific information, or to perform an action that requires tools." in prompt
     assert "If the user's intent is to get up-to-date facts, such as today's weather, latest news, or current prices, proactively use relevant tools." in prompt
     assert "Do not use tools just because topics like weather, news, or prices are mentioned in casual conversation." in prompt
     assert "The system information above already includes user profile, long-term memory, any available worklog snapshot, and any available Feishu integration context." in prompt
     assert "WORKLOG.md is the source of truth for current work items." in prompt
+    assert "`memory/MEMORY.md` 可能过时" in prompt
+    assert "普通对话不要预加载 `memory/HISTORY.md` 或 `HEARTBEAT.md`" in prompt
+    assert "`memory/HISTORY.md` 只用于明确的历史回查" in prompt
+    assert "回复用户优先。不要为了维护文件而延迟正常答复。" in prompt
+    assert "如果本轮暴露了稳定偏好或长期背景，在同一轮更新 `USER.md` 或 `memory/MEMORY.md`。" in prompt
+    assert "“记住”就意味着同一轮写入对应文件；不要只在回复里说“已记住”而不落盘。" in prompt
+    assert "如果你说了“已记住”却没有更新 `USER.md` 或 `memory/MEMORY.md`" in prompt
+    assert "如果 `WORKLOG.md` 不存在、为空，或没有可用 snapshot，就直接跳过“当前工作层”" in prompt
     assert "When updating WORKLOG.md, follow the format defined in the file exactly." in prompt
     assert "Do not add extra fields to WORKLOG.md such as `阻塞`, `进展`, `截止日期`, `负责人`, `标签`, or numbered list prefixes." in prompt
     assert "If WORKLOG.md is currently in a legacy or malformed format, rewrite it into the canonical three-field schema while updating it." in prompt
@@ -238,6 +251,28 @@ def test_system_prompt_uses_overlay_files_for_dm_persona(tmp_path) -> None:
     assert f"User-scoped prompt files: {overlay}/USER.md, {overlay}/BOOTSTRAP.md" in prompt
     assert f"User-scoped worklog: {overlay}/WORKLOG.md" in prompt
     assert f"User-scoped long-term memory: {overlay}/memory/MEMORY.md" in prompt
+
+
+def test_system_prompt_includes_worklog_and_memory_in_explicit_layers(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    (workspace / "WORKLOG.md").write_text(
+        "## 进行中\n\n### 收紧运行契约\n- 优先级：高\n- 状态/下一步：调整 context\n",
+        encoding="utf-8",
+    )
+    (workspace / "memory").mkdir()
+    (workspace / "memory" / "MEMORY.md").write_text("长期背景：正在做 Feishu bot", encoding="utf-8")
+
+    builder = ContextBuilder(workspace)
+    prompt = builder.build_system_prompt()
+
+    assert "# 规则层（必须遵守）" in prompt
+    assert "# 当前工作层（操作面板）" in prompt
+    assert "## Worklog Snapshot" in prompt
+    assert "收紧运行契约" in prompt
+    assert "# 参考记忆层（可引用但不是硬规则）" in prompt
+    assert "长期背景：正在做 Feishu bot" in prompt
+    assert prompt.index("# 规则层（必须遵守）") < prompt.index("# 当前工作层（操作面板）")
+    assert prompt.index("# 当前工作层（操作面板）") < prompt.index("# 参考记忆层（可引用但不是硬规则）")
 
 
 def test_system_prompt_skips_bootstrap_when_overlay_is_initialized(tmp_path) -> None:

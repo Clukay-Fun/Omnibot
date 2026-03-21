@@ -1,8 +1,12 @@
 import asyncio
 import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nanobot.agent.loop import AgentLoop
+from nanobot.bus.queue import MessageBus
 from nanobot.heartbeat.service import HeartbeatService, HeartbeatTarget
 from nanobot.heartbeat.types import HeartbeatExecutionError, HeartbeatExecutionResult
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -389,3 +393,104 @@ async def test_tick_continues_when_one_target_fails(tmp_path) -> None:
     await service._tick()
 
     assert executed == ["chat-a:task-a", "chat-b:task-b"]
+
+
+def _strip_heartbeat_state(text: str) -> str:
+    lines = text.splitlines()
+    stripped: list[str] = []
+    in_state = False
+    for line in lines:
+        if line.strip() == "<!-- HEARTBEAT_STATE:BEGIN -->":
+            in_state = True
+            continue
+        if line.strip() == "<!-- HEARTBEAT_STATE:END -->":
+            in_state = False
+            continue
+        if not in_state:
+            stripped.append(line)
+    return "\n".join(stripped).strip()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_execution_leaves_user_files_unchanged_except_managed_state(tmp_path: Path) -> None:
+    (tmp_path / "HEARTBEAT.md").write_text(
+        "# rule\n\n- remind me about stale work\n\n<!-- HEARTBEAT_STATE:BEGIN -->\n"
+        "## Last Heartbeat Run\n- At: old\n- Decision: skip\n- Summary: old\n"
+        "<!-- HEARTBEAT_STATE:END -->\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "WORKLOG.md").write_text(
+        "## 进行中\n\n### 收紧运行契约\n- 优先级：高\n- 状态/下一步：补 heartbeat 边界\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "USER.md").write_text("- 风格：结论先行\n", encoding="utf-8")
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "MEMORY.md").write_text("长期背景：Feishu bot\n", encoding="utf-8")
+    (tmp_path / "memory" / "HISTORY.md").write_text("[2026-03-21 10:00] follow-up\n", encoding="utf-8")
+
+    before = {
+        "heartbeat": (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8"),
+        "worklog": (tmp_path / "WORKLOG.md").read_text(encoding="utf-8"),
+        "user": (tmp_path / "USER.md").read_text(encoding="utf-8"),
+        "memory": (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8"),
+        "history": (tmp_path / "memory" / "HISTORY.md").read_text(encoding="utf-8"),
+    }
+
+    decision_provider = DummyProvider([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="hb_1",
+                    name="heartbeat",
+                    arguments={"action": "run", "tasks": "check stale work", "summary": "Send a reminder."},
+                )
+            ],
+        )
+    ])
+
+    exec_provider = MagicMock()
+    exec_provider.get_default_model.return_value = "test-model"
+    exec_provider.chat_with_retry = AsyncMock(side_effect=[
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCallRequest(
+                id="msg_1",
+                name="message",
+                arguments={"content": "Reminder", "channel": "feishu", "chat_id": "ou_user_1"},
+            )],
+        ),
+        LLMResponse(content="suppressed", tool_calls=[]),
+    ])
+    loop = AgentLoop(
+        bus=MessageBus(),
+        provider=exec_provider,
+        workspace=tmp_path,
+        model="test-model",
+        memory_window=10,
+    )
+
+    async def _on_execute(target: HeartbeatTarget, tasks: str) -> HeartbeatExecutionResult:
+        return await loop.process_heartbeat_direct(
+            tasks,
+            channel=target.channel,
+            chat_id=target.chat_id,
+            workspace_root=target.workspace_root,
+        )
+
+    service = HeartbeatService(
+        workspace=tmp_path,
+        provider=decision_provider,
+        model="openai/gpt-4o-mini",
+        on_execute=_on_execute,
+    )
+
+    await service.trigger_now()
+
+    assert (tmp_path / "WORKLOG.md").read_text(encoding="utf-8") == before["worklog"]
+    assert (tmp_path / "USER.md").read_text(encoding="utf-8") == before["user"]
+    assert (tmp_path / "memory" / "MEMORY.md").read_text(encoding="utf-8") == before["memory"]
+    assert (tmp_path / "memory" / "HISTORY.md").read_text(encoding="utf-8") == before["history"]
+    after_heartbeat = (tmp_path / "HEARTBEAT.md").read_text(encoding="utf-8")
+    assert _strip_heartbeat_state(after_heartbeat) == _strip_heartbeat_state(before["heartbeat"])
+    assert after_heartbeat != before["heartbeat"]

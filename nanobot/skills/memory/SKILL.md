@@ -9,8 +9,13 @@ always: true
 ## Structure
 
 - `WORKLOG.md` — Current work state. Use it for active, executable items with a next step.
-- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
+- `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context as reference memory.
 - `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep-style tools or in-memory filters. Each entry starts with [YYYY-MM-DD HH:MM].
+
+Use this boundary consistently:
+- `WORKLOG.md` = current active items that can advance and finish
+- `memory/MEMORY.md` = stable preferences, long-term background, long-lived facts
+- `memory/HISTORY.md` = lookup-only event trail
 
 ## Search Past Events
 
@@ -34,6 +39,7 @@ Write important long-term facts immediately using `edit_file` or `write_file`:
 - Relationships ("Alice is the project lead")
 
 Do not put executable tasks, blockers, priorities, or next steps into `memory/MEMORY.md`; those belong in `WORKLOG.md`.
+If recent conversation clearly contradicts an older long-term fact, update `memory/MEMORY.md` to match the newer truth.
 
 ## Auto-consolidation
 

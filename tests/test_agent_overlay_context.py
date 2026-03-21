@@ -104,8 +104,9 @@ async def test_process_message_persists_overlay_context_before_failure(tmp_path)
 async def test_process_message_marks_tool_progress_in_outbound_metadata(tmp_path) -> None:
     loop = _make_loop(tmp_path)
 
-    async def _fake_run_agent_loop(_messages, on_progress=None):
+    async def _fake_run_agent_loop(_messages, on_progress=None, tool_registry=None):
         assert on_progress is not None
+        assert tool_registry is loop.tools
         await on_progress('web_search("测试查询")', tool_hint=True)
         return "done", [], []
 

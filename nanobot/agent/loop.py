@@ -163,8 +163,18 @@ class AgentLoop:
 
     def _set_tool_context(self, channel: str, chat_id: str, message_id: str | None = None) -> None:
         """Update context for all tools that need routing info."""
+        self._set_tool_context_for_registry(self.tools, channel, chat_id, message_id)
+
+    @staticmethod
+    def _set_tool_context_for_registry(
+        registry: ToolRegistry,
+        channel: str,
+        chat_id: str,
+        message_id: str | None = None,
+    ) -> None:
+        """Update context for all tools in the supplied registry that need routing info."""
         for name in ("message", "spawn", "cron"):
-            if tool := self.tools.get(name):
+            if tool := registry.get(name):
                 if hasattr(tool, "set_context"):
                     tool.set_context(channel, chat_id, *([message_id] if name == "message" else []))
 
@@ -190,8 +200,10 @@ class AgentLoop:
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
+        active_tools = tool_registry or self.tools
         messages = initial_messages
         iteration = 0
         final_content = None
@@ -202,7 +214,7 @@ class AgentLoop:
 
             response = await self.provider.chat_with_retry(
                 messages=messages,
-                tools=self.tools.get_definitions(),
+                tools=active_tools.get_definitions(),
                 model=self.model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
@@ -238,7 +250,7 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
-                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = await active_tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -437,8 +449,10 @@ class AgentLoop:
         enable_pending_consolidation: bool,
         extra_system_messages: list[str] | None = None,
         empty_response_fallback: str = "I've completed processing but have no response to give.",
+        tool_registry: ToolRegistry | None = None,
     ) -> OutboundMessage | None:
         """Run one turn against the supplied session, optionally persisting it."""
+        active_tools = tool_registry or self.tools
         session.metadata = overlay_context.to_metadata(session.metadata)
 
         # Slash commands
@@ -469,8 +483,8 @@ class AgentLoop:
             ):
                 self._pending_consolidations.add(session.key)
 
-        self._set_tool_context(channel, chat_id, metadata.get("message_id"))
-        if message_tool := self.tools.get("message"):
+        self._set_tool_context_for_registry(active_tools, channel, chat_id, metadata.get("message_id"))
+        if message_tool := active_tools.get("message"):
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
@@ -503,6 +517,7 @@ class AgentLoop:
         final_content, _, all_msgs = await self._run_agent_loop(
             initial_messages,
             on_progress=on_progress or _bus_progress,
+            tool_registry=active_tools,
         )
 
         if final_content is None:
@@ -512,7 +527,7 @@ class AgentLoop:
         if persist_session:
             self.sessions.save(session)
 
-        if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
+        if (mt := active_tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
@@ -697,6 +712,7 @@ class AgentLoop:
         )
         session = Session(key=ephemeral_key)
         extra_system_messages = [self._build_heartbeat_execution_message(workspace_root)]
+        heartbeat_tools = self._build_heartbeat_tool_registry(workspace_root)
 
         try:
             async with self._get_session_lock(ephemeral_key):
@@ -712,6 +728,7 @@ class AgentLoop:
                     allow_session_commands=False,
                     enable_pending_consolidation=False,
                     extra_system_messages=extra_system_messages,
+                    tool_registry=heartbeat_tools,
                 )
         except Exception as exc:
             summary = self._build_heartbeat_state_summary("", session.messages, error=exc)
@@ -732,11 +749,21 @@ class AgentLoop:
         return (
             "You are executing a heartbeat run. This is a fresh ephemeral run with no prior heartbeat transcript. "
             "Use HEARTBEAT.md for low-disturbance reminder rules and WORKLOG.md for current work state. "
-            "If recurring reminder rules changed, update HEARTBEAT.md using file tools, but do not overwrite "
-            "the framework-managed HEARTBEAT_STATE block. If work state changed, update WORKLOG.md in the same run.\n\n"
+            "You may read relevant files to check context and use the `message` tool to send a reminder when needed. "
+            "Do not modify USER.md, SOUL.md, WORKLOG.md, memory/MEMORY.md, memory/HISTORY.md, or HEARTBEAT.md. "
+            "Do not use shell, web, spawn, MCP, or cron capabilities during heartbeat execution. "
+            "The HEARTBEAT_STATE managed block is written only by the framework, never by you.\n\n"
             f"## HEARTBEAT.md\n{heartbeat_text.strip()}"
             f"\n\n## WORKLOG.md\n{worklog_text}"
         )
+
+    def _build_heartbeat_tool_registry(self, workspace_root: Path) -> ToolRegistry:
+        """Build the restricted tool registry used only for heartbeat execution."""
+        registry = ToolRegistry()
+        allowed_dir = workspace_root if self.restrict_to_workspace else None
+        registry.register(ReadFileTool(workspace=workspace_root, allowed_dir=allowed_dir))
+        registry.register(MessageTool(send_callback=self.bus.publish_outbound))
+        return registry
 
     def _build_heartbeat_state_summary(
         self,

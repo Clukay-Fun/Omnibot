@@ -958,12 +958,16 @@ class TestHeartbeatFreshDirect:
         assert loop._pending_consolidations == set()
 
         messages = provider.chat_with_retry.await_args.kwargs["messages"]
+        tools = provider.chat_with_retry.await_args.kwargs["tools"]
         assert messages[1]["role"] == "system"
         assert "You are executing a heartbeat run." in messages[1]["content"]
         assert "## HEARTBEAT.md" in messages[1]["content"]
         assert "Follow up on onboarding" in messages[1]["content"]
+        assert "Do not modify USER.md, SOUL.md, WORKLOG.md, memory/MEMORY.md, memory/HISTORY.md, or HEARTBEAT.md." in messages[1]["content"]
+        assert "Do not use shell, web, spawn, MCP, or cron capabilities during heartbeat execution." in messages[1]["content"]
         assert messages[2]["role"] == "system"
         assert "Feishu delivery rule" in messages[2]["content"]
+        assert [tool["function"]["name"] for tool in tools] == ["read_file", "message"]
 
     @pytest.mark.asyncio
     async def test_process_direct_still_persists_normal_sessions(self, tmp_path: Path) -> None:
@@ -988,6 +992,46 @@ class TestHeartbeatFreshDirect:
         saved = session_files[0].read_text(encoding="utf-8")
         assert '"content": "hello"' in saved
         assert '"content": "ok"' in saved
+
+    @pytest.mark.asyncio
+    async def test_process_heartbeat_direct_does_not_emit_default_reply_after_message_tool(self, tmp_path: Path) -> None:
+        from nanobot.agent.loop import AgentLoop
+        from nanobot.bus.queue import MessageBus
+        from nanobot.providers.base import LLMResponse, ToolCallRequest
+
+        (tmp_path / "HEARTBEAT.md").write_text("- [ ] Follow up on onboarding\n", encoding="utf-8")
+
+        bus = MessageBus()
+        provider = MagicMock()
+        provider.get_default_model.return_value = "test-model"
+        provider.chat_with_retry = AsyncMock(side_effect=[
+            LLMResponse(
+                content="",
+                tool_calls=[ToolCallRequest(
+                    id="call1",
+                    name="message",
+                    arguments={"content": "Reminder", "channel": "feishu", "chat_id": "ou_user_1"},
+                )],
+            ),
+            LLMResponse(content="This should be suppressed", tool_calls=[]),
+        ])
+
+        loop = AgentLoop(
+            bus=bus, provider=provider, workspace=tmp_path, model="test-model", memory_window=10
+        )
+
+        result = await loop.process_heartbeat_direct(
+            "check open tasks",
+            channel="feishu",
+            chat_id="ou_user_1",
+            workspace_root=tmp_path,
+        )
+
+        first = await bus.consume_outbound()
+        second = await bus.consume_outbound()
+        assert first.metadata.get("_progress") is True
+        assert second.content == "Reminder"
+        assert result.response_text == ""
 
     @pytest.mark.asyncio
     async def test_process_direct_adds_feishu_channel_delivery_hint(self, tmp_path: Path) -> None:

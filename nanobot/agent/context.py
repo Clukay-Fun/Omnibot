@@ -46,24 +46,30 @@ class ContextBuilder:
         system_overlay_root: Path | None = None,
         system_overlay_bootstrap: bool | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, worklog, and skills."""
+        """Build the system prompt from identity, layered context, and skills."""
         parts = [self._get_identity(system_overlay_root)]
 
         bootstrap = self._load_bootstrap_files(
             system_overlay_root,
             system_overlay_bootstrap=system_overlay_bootstrap,
         )
-        if bootstrap:
-            parts.append(bootstrap)
-
         active_root = system_overlay_root or self.workspace
-        memory = MemoryStore(active_root).get_memory_context()
-        if memory:
-            parts.append(f"# Memory\n\n{memory}")
-
         worklog_snapshot = WorklogStore(active_root).build_snapshot()
+        memory = MemoryStore(active_root).get_memory_context()
+
+        layered_sections: list[str] = []
+        rule_parts = [self._build_runtime_contract()]
+        if bootstrap:
+            rule_parts.append(bootstrap)
+        layered_sections.append("# 规则层（必须遵守）\n\n" + "\n\n".join(rule_parts))
+
         if worklog_snapshot:
-            parts.append(f"# Worklog Snapshot\n\n{worklog_snapshot}")
+            layered_sections.append(f"# 当前工作层（操作面板）\n\n## Worklog Snapshot\n\n{worklog_snapshot}")
+
+        if memory:
+            layered_sections.append(f"# 参考记忆层（可引用但不是硬规则）\n\n{memory}")
+
+        parts.append("\n\n---\n\n".join(layered_sections))
 
         active_skills: list[str] = []
         if skill_names:
@@ -158,6 +164,22 @@ Your workspace is at: {workspace_path}
 - For mutable workspace or external state, such as Feishu tables, records, calendars, documents, files, or other resources that may have changed since earlier turns, do not answer from memory or prior tool results. Re-run the relevant tools to verify the current state before answering.
 
 Reply directly with text for conversations. Only use the 'message' tool to send to a specific chat channel."""
+
+    @staticmethod
+    def _build_runtime_contract() -> str:
+        """Build the layered runtime contract that governs file usage."""
+        return """## 运行契约
+- 按这个优先级理解上下文并做决定：`规则层 > WORKLOG > MEMORY`。
+- `WORKLOG.md` 记录当前工作状态；`memory/MEMORY.md` 只记录稳定偏好、长期背景、长期有效事实。
+- `memory/MEMORY.md` 可能过时。如果近期对话明确推翻了旧的长期记忆，请在合适时机修正它。
+- 普通对话不要预加载 `memory/HISTORY.md` 或 `HEARTBEAT.md`。
+- `memory/HISTORY.md` 只用于明确的历史回查、追溯、核对承诺或查找过去事件。
+- 回复用户优先。不要为了维护文件而延迟正常答复。
+- 如果本轮改变了当前任务状态，在同一轮更新 `WORKLOG.md`。
+- 如果本轮暴露了稳定偏好或长期背景，在同一轮更新 `USER.md` 或 `memory/MEMORY.md`。
+- 当用户要求你“记住”某个偏好、风格、长期规则或长期背景时，“记住”就意味着同一轮写入对应文件；不要只在回复里说“已记住”而不落盘。
+- 如果你说了“已记住”却没有更新 `USER.md` 或 `memory/MEMORY.md`，这些信息会在下次会话中丢失；不要这样做。
+- 如果 `WORKLOG.md` 不存在、为空，或没有可用 snapshot，就直接跳过“当前工作层”；不要把它当成必有依赖。"""
 
     @staticmethod
     def _build_runtime_context(
