@@ -13,14 +13,14 @@ def test_pyproject_uses_dynamic_version_from_single_source() -> None:
     assert data["project"]["dynamic"] == ["version"]
     assert "version" not in data["project"]
     assert data["tool"]["hatch"]["version"]["path"] == "nanobot/version.py"
-    assert __version__ == "0.3.1"
+    assert __version__ == "0.3.2"
 
 
 def test_format_version_prefers_env_commit(monkeypatch) -> None:
     monkeypatch.setenv("NANOBOT_GIT_COMMIT", "abcdef123456")
     get_git_revision.cache_clear()
 
-    assert format_version() == "nanobot v0.3.1 (abcdef1)"
+    assert format_version() == "nanobot v0.3.2 (abcdef1)"
 
     get_git_revision.cache_clear()
 
@@ -32,6 +32,6 @@ def test_format_version_omits_commit_when_unavailable(monkeypatch) -> None:
     monkeypatch.setattr("nanobot.version._read_git_revision_from_repo", lambda: None)
     get_git_revision.cache_clear()
 
-    assert format_version() == "nanobot v0.3.1"
+    assert format_version() == "nanobot v0.3.2"
 
     get_git_revision.cache_clear()
