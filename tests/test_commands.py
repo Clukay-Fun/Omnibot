@@ -586,8 +586,7 @@ def test_reset_user_id_clears_only_target_feishu_user_state(tmp_path: Path) -> N
 
     assert result.exit_code == 0
     assert "Reset Feishu DM state for ou_user_1" in result.stdout
-    assert (target_overlay / "USER.md").exists()
-    assert "# target" not in (target_overlay / "USER.md").read_text(encoding="utf-8")
+    assert not target_overlay.exists()
     assert (other_overlay / "USER.md").read_text(encoding="utf-8") == "# other\n"
     assert not (workspace / "sessions" / "feishu_dm_ou_user_1.jsonl").exists()
     assert not (workspace / "sessions" / "feishu_dm_ou_user_1_heartbeat.jsonl").exists()
@@ -595,6 +594,7 @@ def test_reset_user_id_clears_only_target_feishu_user_state(tmp_path: Path) -> N
     assert store.get("tenant-1", "ou_user_1") is None
     assert store.get("tenant-1", "ou_user_2") is not None
     assert store.count_snapshots() == 0
+    assert "Overlay removed" in result.stdout
 
 
 def test_reset_user_id_requires_tenant_key_when_overlay_is_ambiguous(tmp_path: Path) -> None:

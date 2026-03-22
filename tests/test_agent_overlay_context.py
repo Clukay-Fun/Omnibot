@@ -9,7 +9,7 @@ from nanobot.agent.memory import MemoryStore
 from nanobot.agent.overlay import OverlayContext
 from nanobot.bus.events import InboundMessage
 from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import ToolCallRequest
+from nanobot.providers.base import LLMResponse, ToolCallRequest
 from nanobot.session.manager import Session
 
 
@@ -140,3 +140,53 @@ def test_tool_hint_keeps_full_argument_for_downstream_progress_mapping(tmp_path)
     ])
 
     assert hint == 'read_file("/Users/clukay/Program/ominibot/nanobot/skills/feishu-workspace/references/bitable.md")'
+
+
+@pytest.mark.asyncio
+async def test_process_direct_adds_feishu_dm_progress_rule_after_primary_system_prompt(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    overlay_root = tmp_path / "users" / "feishu" / "tenant-1" / "ou_user_1"
+    overlay_root.mkdir(parents=True)
+    loop.provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+
+    response = await loop.process_direct(
+        "hello",
+        session_key="feishu:dm:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
+        overlay_context=OverlayContext(
+            system_overlay_root=str(overlay_root),
+            system_overlay_bootstrap=True,
+        ),
+    )
+
+    assert response == "ok"
+    messages = loop.provider.chat_with_retry.await_args.kwargs["messages"]
+    assert messages[1]["role"] == "system"
+    assert "飞书私聊里，只有在你准备进行多步工具操作时" in messages[1]["content"]
+    assert messages[2]["role"] == "system"
+    assert "Feishu delivery rule" in messages[2]["content"]
+
+
+@pytest.mark.asyncio
+async def test_process_direct_skips_feishu_dm_progress_rule_without_overlay(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+    loop.provider.chat_with_retry = AsyncMock(return_value=LLMResponse(content="ok", tool_calls=[]))
+
+    response = await loop.process_direct(
+        "hello",
+        session_key="feishu:dm:ou_user_1",
+        channel="feishu",
+        chat_id="ou_user_1",
+    )
+
+    assert response == "ok"
+    messages = loop.provider.chat_with_retry.await_args.kwargs["messages"]
+    assert not any(
+        msg.get("role") == "system" and "飞书私聊里，只有在你准备进行多步工具操作时" in str(msg.get("content"))
+        for msg in messages
+    )
+    assert any(
+        msg.get("role") == "system" and "Feishu delivery rule" in str(msg.get("content"))
+        for msg in messages
+    )

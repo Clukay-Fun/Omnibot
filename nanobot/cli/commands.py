@@ -3,12 +3,23 @@
 import asyncio
 import os
 import select
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Callable
+
+import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
+from typer.core import TyperGroup
 
 # Force UTF-8 encoding for Windows console
 if sys.platform == "win32":
@@ -20,17 +31,6 @@ if sys.platform == "win32":
             sys.stderr.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
-
-import typer
-from typer.core import TyperGroup
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.table import Table
-from rich.text import Text
 
 from nanobot import __logo__
 from nanobot.cli.doctor import DoctorReport, resolve_config_path, run_doctor
@@ -163,6 +163,8 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     """Render assistant response with consistent terminal styling."""
     content = response or ""
     body = Markdown(content) if render_markdown else Text(content)
+    console.print(f"[cyan]{__logo__} nanobot[/cyan]")
+    console.print(body)
     console.print()
 
 
@@ -191,9 +193,6 @@ def _classify_upstream_risk(commit_paths: list[str], local_paths: set[str]) -> s
     if commit_top & set(_UPSTREAM_CORE_PATHS):
         return "medium"
     return "low"
-    console.print(f"[cyan]{__logo__} nanobot[/cyan]")
-    console.print(body)
-    console.print()
 
 
 def _is_exit_command(command: str) -> bool:
@@ -485,7 +484,6 @@ def _reset_feishu_user_state(
     tenant_key: str | None,
 ) -> dict[str, str | int]:
     from nanobot.feishu.memory import FeishuUserMemoryStore
-    from nanobot.feishu.persona import FeishuUserWorkspaceManager
     from nanobot.session.manager import SessionManager
 
     memory_store = FeishuUserMemoryStore(_resolve_feishu_memory_db_path(config, workspace))
@@ -501,9 +499,6 @@ def _reset_feishu_user_state(
         shutil.rmtree(overlay_root)
         removed_overlay = True
 
-    persona_manager = FeishuUserWorkspaceManager(workspace)
-    recreated_overlay = persona_manager.ensure_dm_workspace(resolved_tenant_key, user_id)
-
     memory_store.clear_all_for_user(resolved_tenant_key, user_id)
 
     session_manager = SessionManager(workspace)
@@ -514,7 +509,7 @@ def _reset_feishu_user_state(
 
     return {
         "tenant_key": resolved_tenant_key,
-        "overlay_root": str(recreated_overlay),
+        "overlay_root": str(overlay_root) if overlay_root is not None else "",
         "removed_overlay": int(removed_overlay),
         "removed_sessions": removed_sessions,
     }
@@ -1375,14 +1370,14 @@ def status():
 def reset(
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory to reset"),
     config: str | None = typer.Option(None, "--config-path", "-c", help="Path to config file"),
-    user_id: str | None = typer.Option(None, "--user-id", help="Only reset the Feishu DM state for this user_open_id"),
-    tenant_key: str | None = typer.Option(None, "--tenant-key", help="Tenant key used with --user-id when a user exists in multiple tenants"),
+    user_id: str | None = typer.Option(None, "--user-id", help="Permanently delete the Feishu DM state for this user_open_id without recreating the per-user workspace"),
+    tenant_key: str | None = typer.Option(None, "--tenant-key", help="Tenant key used with --user-id when the user exists in multiple tenants"),
     reset_config: bool = typer.Option(False, "--config", help="Also reset the config file to defaults"),
     reset_history: bool = typer.Option(False, "--history", help="Also clear CLI history"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be reset without changing anything"),
 ):
-    """重置 workspace 状态，并可选重置配置或历史记录。"""
+    """重置 workspace 状态，或彻底删除指定 Feishu 私聊用户的数据。"""
     from nanobot.config.loader import load_config, save_config, set_config_path
 
     config_path = resolve_config_path(config)
@@ -1407,7 +1402,6 @@ def reset(
         actions = [
             f"Reset Feishu DM state for user: {user_id}",
             "Delete that user's per-user workspace, Feishu sessions, and Feishu SQLite memory/snapshots",
-            "Recreate the user's per-user workspace from templates",
         ]
     else:
         actions = [
@@ -1442,7 +1436,8 @@ def reset(
             f"[green]✓[/green] Reset Feishu DM state for {user_id} "
             f"(tenant: {result['tenant_key']}, sessions removed: {result['removed_sessions']})"
         )
-        console.print(Text(f"Overlay: {result['overlay_root']}", no_wrap=True, overflow="ignore"))
+        overlay_label = "Overlay removed" if result["removed_overlay"] else "Overlay not found"
+        console.print(Text(f"{overlay_label}: {result['overlay_root']}", no_wrap=True, overflow="ignore"))
     else:
         _recreate_workspace(workspace_path)
         console.print(f"[green]✓[/green] Reset workspace at {workspace_path}")

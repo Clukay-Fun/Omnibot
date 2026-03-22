@@ -49,12 +49,8 @@ class _PreparedTurn:
     chat_id: str
     reply_to: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
-    started_at: float = field(default_factory=time.monotonic)
     pending_entries: list[tuple[str, bool]] = field(default_factory=list)
     card_task: asyncio.Task | None = None
-    delayed_text_task: asyncio.Task | None = None
-    delayed_text_sent: bool = False
-    delayed_text_elapsed_ms: int | None = None
 
 
 class FeishuCardStreamer:
@@ -63,8 +59,6 @@ class FeishuCardStreamer:
     _INITIAL_ENTRY = "思考中…"
     _MAX_ENTRY_CHARS = 80
     _DEFAULT_DEBOUNCE_SECONDS = 0.8
-    _DEFAULT_DELAYED_TEXT_SECONDS = 2.5
-    _DELAYED_TEXT = DELAYED_TEXT_CONTENT
 
     def __init__(
         self,
@@ -73,7 +67,7 @@ class FeishuCardStreamer:
         scope: str = "dm",
         throttle_seconds: float = 0.5,
         debounce_seconds: float = _DEFAULT_DEBOUNCE_SECONDS,
-        delayed_text_seconds: float = _DEFAULT_DELAYED_TEXT_SECONDS,
+        delayed_text_seconds: float | None = None,
         sleep: Callable[[float], Any] | None = None,
     ):
         self._client_getter = client_getter
@@ -106,7 +100,6 @@ class FeishuCardStreamer:
             reply_to=reply_to,
             metadata=dict(meta),
         )
-        await self._schedule_delayed_text(turn_id)
         return True
 
     async def handle(self, msg: OutboundMessage) -> bool:
@@ -142,8 +135,6 @@ class FeishuCardStreamer:
                 if state is None:
                     return True
             else:
-                if prepared.delayed_text_sent:
-                    return True
                 rendered = self._render_entry(msg.content, tool_hint=bool(metadata.get("_tool_hint")))
                 if not rendered:
                     return True
@@ -179,12 +170,6 @@ class FeishuCardStreamer:
         if prepared is not None:
             await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
-        self._log_delayed_text_resolution(
-            turn_id=turn_id,
-            prepared=prepared,
-            had_thinking_card=state is not None,
-            final_reply_sent=True,
-        )
         if state is None:
             return False
 
@@ -210,12 +195,6 @@ class FeishuCardStreamer:
         if prepared is not None:
             await self._cancel_prepared_tasks(prepared)
         state = self._states.pop(turn_id, None)
-        self._log_delayed_text_resolution(
-            turn_id=turn_id,
-            prepared=prepared,
-            had_thinking_card=state is not None,
-            final_reply_sent=False,
-        )
         if state is None:
             return prepared is not None
         await self._cancel_flush(state)
@@ -227,8 +206,6 @@ class FeishuCardStreamer:
             for prepared in self._prepared_turns.values():
                 if prepared.card_task is not None:
                     tasks.append(prepared.card_task)
-                if prepared.delayed_text_task is not None:
-                    tasks.append(prepared.delayed_text_task)
             if not tasks:
                 return
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -267,7 +244,6 @@ class FeishuCardStreamer:
             self._disabled_turns.add(turn_id)
             return None
 
-        await self._cancel_delayed_text(prepared)
         message_id = await self._create_card(client, prepared.chat_id, prepared.reply_to, build_initial())
         if not message_id:
             self._prepared_turns.pop(turn_id, None)
@@ -331,24 +307,6 @@ class FeishuCardStreamer:
                 message_id,
                 "interactive",
                 json.dumps(payload, ensure_ascii=False),
-            )
-        )
-
-    async def _send_delayed_text(self, chat_id: str, reply_to: str | None, content: str) -> bool:
-        client = self._client_getter()
-        if client is None:
-            return False
-        loop = asyncio.get_running_loop()
-        receive_id_type = FeishuClient.resolve_receive_id_type(chat_id)
-        return bool(
-            await loop.run_in_executor(
-                None,
-                client.send_message_sync,
-                receive_id_type,
-                chat_id,
-                "text",
-                json.dumps({"text": content}, ensure_ascii=False),
-                reply_to,
             )
         )
 
@@ -422,8 +380,6 @@ class FeishuCardStreamer:
         prepared = self._prepared_turns.get(turn_id)
         if prepared is None:
             return
-        if prepared.delayed_text_sent:
-            return
         if self.debounce_seconds <= 0:
             await self._ensure_state(
                 turn_id=turn_id,
@@ -440,7 +396,7 @@ class FeishuCardStreamer:
                 if self.debounce_seconds > 0:
                     await self._sleep(self.debounce_seconds)
                 current = self._prepared_turns.get(turn_id)
-                if current is None or current.delayed_text_sent or turn_id in self._states:
+                if current is None or turn_id in self._states:
                     return
                 await self._ensure_state(
                     turn_id=turn_id,
@@ -457,56 +413,7 @@ class FeishuCardStreamer:
 
         prepared.card_task = asyncio.create_task(_create())
 
-    async def _schedule_delayed_text(self, turn_id: str) -> None:
-        prepared = self._prepared_turns.get(turn_id)
-        if prepared is None or prepared.delayed_text_task is not None:
-            return
-        if self.delayed_text_seconds <= 0:
-            return
-        if prepared.metadata.get("delay_hint_eligible") is False:
-            return
-        if str(prepared.metadata.get("chat_type") or "") != "p2p":
-            return
-
-        async def _notify() -> None:
-            try:
-                if self.delayed_text_seconds > 0:
-                    await self._sleep(self.delayed_text_seconds)
-                current = self._prepared_turns.get(turn_id)
-                if current is None or current.delayed_text_sent or turn_id in self._states:
-                    return
-                if await self._send_delayed_text(current.chat_id, current.reply_to, self._DELAYED_TEXT):
-                    current.delayed_text_sent = True
-                    current.delayed_text_elapsed_ms = int(max(0.0, time.monotonic() - current.started_at) * 1000)
-                    logger.bind(
-                        event="feishu_delayed_text_fired",
-                        turn_id=turn_id,
-                        chat_id=current.chat_id,
-                        elapsed_ms=current.delayed_text_elapsed_ms,
-                    ).info("Feishu delayed text sent")
-            except asyncio.CancelledError:
-                raise
-            finally:
-                current = self._prepared_turns.get(turn_id)
-                if current is not None:
-                    current.delayed_text_task = None
-
-        prepared.delayed_text_task = asyncio.create_task(_notify())
-
-    async def _cancel_delayed_text(self, prepared: _PreparedTurn) -> None:
-        task = prepared.delayed_text_task
-        if task is None or task.done():
-            prepared.delayed_text_task = None
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        prepared.delayed_text_task = None
-
     async def _cancel_prepared_tasks(self, prepared: _PreparedTurn) -> None:
-        await self._cancel_delayed_text(prepared)
         task = prepared.card_task
         if task is None or task.done():
             prepared.card_task = None
@@ -640,25 +547,6 @@ class FeishuCardStreamer:
         if script_name:
             return self._clip_entry(f"正在执行 skill：{script_name}")
         return "正在执行飞书工作台 skill"
-
-    def _log_delayed_text_resolution(
-        self,
-        *,
-        turn_id: str,
-        prepared: _PreparedTurn | None,
-        had_thinking_card: bool,
-        final_reply_sent: bool,
-    ) -> None:
-        if prepared is None or not prepared.delayed_text_sent:
-            return
-        logger.bind(
-            event="feishu_delayed_text_resolution",
-            turn_id=turn_id,
-            chat_id=prepared.chat_id,
-            elapsed_ms=prepared.delayed_text_elapsed_ms,
-            had_thinking_card=had_thinking_card,
-            final_reply_sent=final_reply_sent,
-        ).info("Feishu delayed text resolved")
 
     @classmethod
     def _parse_tool_hint(cls, hint: str) -> tuple[str, str]:

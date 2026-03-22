@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 from typing import cast
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from nanobot.bus.events import OutboundMessage
@@ -295,7 +293,7 @@ async def test_streamer_tool_progress_after_debounce_creates_card() -> None:
 
 
 @pytest.mark.asyncio
-async def test_streamer_delayed_text_notice_suppresses_thinking_card() -> None:
+async def test_streamer_never_sends_delayed_text_notices() -> None:
     client = _FakeClient()
     clock = _Clock()
     streamer = FeishuCardStreamer(
@@ -308,91 +306,28 @@ async def test_streamer_delayed_text_notice_suppresses_thinking_card() -> None:
     )
 
     await streamer.prepare_turn(
-        turn_id="turn-delayed-text",
+        turn_id="turn-no-delayed-text",
         chat_id="ou_123",
         metadata={"chat_type": "p2p"},
-        reply_to="om_source_delayed_text",
+        reply_to="om_source_no_delayed_text",
     )
     await streamer.wait_for_idle()
     await streamer.handle(
         _msg(
             'web_search("测试查询")',
-            turn_id="turn-delayed-text",
+            turn_id="turn-no-delayed-text",
             chat_type="p2p",
-            message_id="om_source_delayed_text",
+            message_id="om_source_no_delayed_text",
             _progress=True,
             _is_tool_progress=True,
             _tool_hint=True,
         )
     )
-
-    assert client.sent == [
-        ("open_id", "ou_123", "text", {"text": "正在处理，稍后给你结果。"}, "om_source_delayed_text")
-    ]
-    assert client.created == []
-    assert client.patched == []
-
-
-@pytest.mark.asyncio
-async def test_streamer_skips_delayed_text_for_ineligible_lightweight_turns() -> None:
-    client = _FakeClient()
-    clock = _Clock()
-    streamer = FeishuCardStreamer(
-        client_getter=lambda: cast(object, client),
-        scope="dm",
-        throttle_seconds=0.5,
-        debounce_seconds=0.8,
-        delayed_text_seconds=2.5,
-        sleep=clock.sleep,
-    )
-
-    await streamer.prepare_turn(
-        turn_id="turn-no-delay",
-        chat_id="ou_123",
-        metadata={"chat_type": "p2p", "delay_hint_eligible": False},
-        reply_to="om_source_no_delay",
-    )
     await streamer.wait_for_idle()
 
     assert client.sent == []
-    assert clock.delays == []
-
-
-@pytest.mark.asyncio
-async def test_streamer_logs_delayed_text_fire_and_resolution() -> None:
-    client = _FakeClient()
-    clock = _Clock()
-    streamer = FeishuCardStreamer(
-        client_getter=lambda: cast(object, client),
-        scope="dm",
-        throttle_seconds=0.5,
-        debounce_seconds=0.8,
-        delayed_text_seconds=2.5,
-        sleep=clock.sleep,
-    )
-
-    bound_logger = MagicMock()
-    with patch("nanobot.feishu.streaming.logger") as mock_logger:
-        mock_logger.bind.return_value = bound_logger
-        await streamer.prepare_turn(
-            turn_id="turn-delay-log",
-            chat_id="ou_123",
-            metadata={"chat_type": "p2p"},
-            reply_to="om_source_delay_log",
-        )
-        await streamer.wait_for_idle()
-        await streamer.complete_turn("turn-delay-log")
-
-    assert client.sent == [
-        ("open_id", "ou_123", "text", {"text": "正在处理，稍后给你结果。"}, "om_source_delay_log")
-    ]
-    bind_calls = mock_logger.bind.call_args_list
-    assert any(call.kwargs.get("event") == "feishu_delayed_text_fired" for call in bind_calls)
-    assert any(
-        call.kwargs.get("event") == "feishu_delayed_text_resolution"
-        and call.kwargs.get("final_reply_sent") is True
-        for call in bind_calls
-    )
+    assert client.created
+    assert client.patched
 
 
 @pytest.mark.asyncio

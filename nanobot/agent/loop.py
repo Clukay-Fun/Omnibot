@@ -562,6 +562,12 @@ class AgentLoop:
                 message_tool.start_turn()
 
         system_messages = list(extra_system_messages or [])
+        if feishu_dm_progress_rule := self._feishu_dm_progress_rule(
+            channel=channel,
+            overlay_context=overlay_context,
+            allow_session_commands=allow_session_commands,
+        ):
+            system_messages.append(feishu_dm_progress_rule)
         system_messages.extend(self._channel_system_messages(channel))
         history = session.get_history(max_messages=self.memory_window)
         initial_messages = self.context.build_messages(
@@ -1186,3 +1192,15 @@ Decision guidance:
                 "the standard text/post path."
             )
         ]
+
+    @staticmethod
+    def _feishu_dm_progress_rule(*, channel: str, overlay_context: OverlayContext, allow_session_commands: bool) -> str | None:
+        """Return a Feishu DM-only public action-note rule for tool-heavy turns."""
+        if channel != "feishu" or overlay_context.root_path is None or not allow_session_commands:
+            return None
+        return (
+            "飞书私聊里，只有在你准备进行多步工具操作时，先用一句可公开展示的短话说明你接下来要做什么，例如："
+            "“先看现有实现，再定位问题。”\n"
+            "问候、确认、直接回答和单个简单工具调用不要加这句话；不要说“让我想想”“正在处理”“稍后给你结果”，"
+            "也不要暴露内部推理。"
+        )
