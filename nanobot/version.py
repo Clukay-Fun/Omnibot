@@ -7,7 +7,7 @@ import subprocess
 from functools import lru_cache
 from pathlib import Path
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 
 def _repo_root() -> Path:

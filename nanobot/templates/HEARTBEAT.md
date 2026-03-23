@@ -11,7 +11,7 @@ heartbeat 是低打扰提醒执行器，不是任务管理者。
 - heartbeat 只做“读相关文件 + 判断是否提醒 + 发送提醒消息”。
 - heartbeat 不替用户修改任务状态、偏好、人格或长期记忆。
 - heartbeat 不修改 `WORKLOG.md`、`USER.md`、`SOUL.md`、`memory/MEMORY.md`。
-- `HEARTBEAT.md` 中的 managed state block 只由框架代码维护。
+- `HEARTBEAT.md` 中的状态托管区块只由框架代码维护。
 
 ## 活动检查任务 / Active Tasks
 

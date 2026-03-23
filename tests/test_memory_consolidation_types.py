@@ -62,6 +62,15 @@ class ScriptedProvider(LLMProvider):
 class TestMemoryConsolidationTypeHandling:
     """Test that consolidation handles various argument types correctly."""
 
+    def test_get_memory_context_uses_chinese_heading(self, tmp_path: Path) -> None:
+        store = MemoryStore(tmp_path)
+        store.write_long_term("# MEMORY.md - 长期记忆\n\n- 用户长期在做 nanobot。\n")
+
+        context = store.get_memory_context()
+
+        assert context.startswith("## 长期记忆\n")
+        assert "Long-term Memory" not in context
+
     @pytest.mark.asyncio
     async def test_string_arguments_work(self, tmp_path: Path) -> None:
         """Normal case: LLM returns string arguments."""
@@ -82,6 +91,12 @@ class TestMemoryConsolidationTypeHandling:
         assert store.history_file.exists()
         assert "[2026-01-01] User discussed testing." in store.history_file.read_text()
         assert "User likes testing." in store.memory_file.read_text()
+        prompt = provider.chat.await_args.kwargs["messages"][1]["content"]
+        assert "## 当前长期记忆" in prompt
+        assert "## 当前 WORKLOG.md" in prompt
+        assert "## 待处理对话" in prompt
+        assert "Current Long-term Memory" not in prompt
+        assert "Conversation to Process" not in prompt
 
     @pytest.mark.asyncio
     async def test_dict_arguments_serialized_to_json(self, tmp_path: Path) -> None:
@@ -346,6 +361,6 @@ class TestMemoryConsolidationTypeHandling:
         await store.consolidate(_make_session(message_count=60), provider, "test-model", memory_window=50)
 
         prompt = provider.chat_with_retry.await_args.kwargs["messages"][1]["content"]
-        assert "## Current WORKLOG.md" in prompt
-        assert "The user is building a Feishu bot" in prompt
-        assert "Add per-user worklog support" in prompt
+        assert "## 当前 WORKLOG.md" in prompt
+        assert "用户正在做一个 Feishu bot 项目" in prompt
+        assert "补 per-user worklog 支持" in prompt

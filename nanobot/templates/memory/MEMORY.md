@@ -1,23 +1,23 @@
-# Long-term Memory
+# MEMORY.md - 长期记忆
 
-This file stores important information that should persist across sessions.
+这里记录应该跨会话保留的重要信息。
 
-## User Information
+## 用户信息
 
-(Important facts about the user)
+（记录关于用户的重要长期事实）
 
-## Preferences
+## 偏好与习惯
 
-(User preferences learned over time)
+（记录随着时间学习到的稳定偏好与协作习惯）
 
-## Long-term Work Context
+## 长期工作背景
 
-(Stable background about the user's work, responsibilities, or enduring projects)
+（记录长期稳定的工作背景、职责或持续性项目）
 
-## Important Notes
+## 重要备注
 
-(Things to remember)
+（记录其他值得长期记住的事实）
 
 ---
 
-*This file is automatically updated by nanobot when important information should be remembered.*
+*当出现需要长期保留的重要信息时，nanobot 会自动更新此文件。*

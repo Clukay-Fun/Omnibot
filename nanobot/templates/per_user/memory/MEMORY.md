@@ -1,19 +1,19 @@
-# Long-term Memory
+# MEMORY.md - 长期记忆
 
-This file stores persistent, user-scoped facts for the current private chat user.
+这里记录当前私聊用户需要跨会话保留的重要事实。
 
-## User Information
+## 用户信息
 
-(Important facts about this specific user)
+（记录这个用户的重要长期事实）
 
-## Preferences
+## 偏好与习惯
 
-(Learned communication or workflow preferences)
+（记录学到的沟通偏好或协作方式）
 
-## Long-term Work Context
+## 长期工作背景
 
-(Stable work background that remains useful across sessions)
+（记录跨会话仍然有价值的稳定工作背景）
 
-## Important Notes
+## 重要备注
 
-(Long-lived facts worth remembering)
+（记录其他值得长期记住的事实）

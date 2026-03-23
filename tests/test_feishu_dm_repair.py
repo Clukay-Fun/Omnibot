@@ -54,7 +54,7 @@ def _make_overlay(tmp_path: Path) -> Path:
         "# WORKLOG.md - 当前工作面板\n\n## 进行中\n\n## 待处理\n\n## 已完成\n",
         encoding="utf-8",
     )
-    (overlay / "memory" / "MEMORY.md").write_text("# Long-term Memory\n\n", encoding="utf-8")
+    (overlay / "memory" / "MEMORY.md").write_text("# MEMORY.md - 长期记忆\n\n", encoding="utf-8")
     (overlay / "BOOTSTRAP.md").write_text("bootstrap active", encoding="utf-8")
     return overlay
 
@@ -246,7 +246,7 @@ async def test_feishu_dm_new_user_replay_updates_user_worklog_and_memory(tmp_pat
                         name="write_file",
                         arguments={
                             "path": "memory/MEMORY.md",
-                            "content": "# Long-term Memory\n\n- 用户长期在做 Feishu bot 和 nanobot 相关工作。\n",
+                            "content": "# MEMORY.md - 长期记忆\n\n- 用户长期在做 Feishu bot 和 nanobot 相关工作。\n",
                         },
                     )
                 ],

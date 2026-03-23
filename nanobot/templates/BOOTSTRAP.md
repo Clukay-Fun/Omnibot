@@ -1,4 +1,4 @@
-# BOOTSTRAP.md - Hello, World
+# BOOTSTRAP.md - 启动引导
 
 这是启动期引导文件。目标不是盘问用户，而是在自然对话中尽快补齐最关键的连续性信息。
 

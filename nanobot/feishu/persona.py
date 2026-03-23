@@ -18,11 +18,19 @@ from nanobot.utils.helpers import ensure_dir, safe_filename
 class FeishuUserWorkspaceManager:
     """Manage per-user Feishu DM workspaces, migration, and heartbeat targets."""
 
-    _USER_PLACEHOLDER_MARKERS = (
+    _PLACEHOLDER_VALUES = (
         "(你的名字)",
         "(你希望我如何称呼你)",
         "(你的时区，例如：UTC+8)",
         "(偏好的语言)",
+        "(你的角色，例如：开发者、研究员)",
+        "(长期稳定的工作方向或项目背景)",
+        "(IDE、编程语言、框架)",
+        "(例如：直接、温和、结论先行)",
+        "(例如：先给全局，再拆下一步)",
+        "(例如：宁可多确认，也不要误判)",
+        "(例如：飞书、终端、文档、脚本)",
+        "(例如：过度打扰、过早展开、模糊建议)",
         "(待了解)",
     )
     _GLOBAL_RESET_FILES = (
@@ -73,9 +81,17 @@ class FeishuUserWorkspaceManager:
         return workspace_root
 
     def should_include_bootstrap(self, overlay_root: Path) -> bool:
-        """BOOTSTRAP.md stays active until USER.md is no longer placeholder-like."""
+        """BOOTSTRAP.md stays active until key onboarding facts are sufficiently filled in."""
         user_file = overlay_root / "USER.md"
-        return self._is_placeholder_user_text(user_file.read_text(encoding="utf-8")) if user_file.exists() else True
+        worklog_file = overlay_root / "WORKLOG.md"
+        memory_file = overlay_root / "memory" / "MEMORY.md"
+        if not user_file.exists():
+            return True
+        return not self._has_bootstrap_minimum_context(
+            user_text=user_file.read_text(encoding="utf-8"),
+            worklog_text=worklog_file.read_text(encoding="utf-8") if worklog_file.exists() else "",
+            memory_text=memory_file.read_text(encoding="utf-8") if memory_file.exists() else "",
+        )
 
     def list_heartbeat_targets(self) -> list[HeartbeatTarget]:
         """Enumerate Feishu DM heartbeat targets from per-user workspaces."""
@@ -245,8 +261,87 @@ class FeishuUserWorkspaceManager:
             stripped_lines.append(raw)
         return not stripped_lines
 
-    def _is_placeholder_user_text(self, text: str) -> bool:
-        return any(marker in text for marker in self._USER_PLACEHOLDER_MARKERS)
+    def _has_bootstrap_minimum_context(self, *, user_text: str, worklog_text: str, memory_text: str) -> bool:
+        return (
+            self._user_has_name(user_text)
+            and self._user_has_style(user_text)
+            and self._user_has_long_term_context(user_text, memory_text)
+            and self._worklog_has_active_item(worklog_text)
+        )
+
+    def _user_has_name(self, text: str) -> bool:
+        nickname = self._extract_field(text, "昵称")
+        title = self._extract_field(text, "称呼方式")
+        return self._is_meaningful_value(nickname) or self._is_meaningful_value(title)
+
+    def _user_has_style(self, text: str) -> bool:
+        return (
+            self._has_checked_option(text, "### 回复长度", ("简短且简洁", "详细的解释", "根据问题自适应"))
+            or self._has_checked_option(text, "### 沟通风格", ("随意的", "专业的", "技术的"))
+            or self._is_meaningful_value(self._extract_field(text, "表达风格偏好"))
+        )
+
+    def _user_has_long_term_context(self, user_text: str, memory_text: str) -> bool:
+        return self._is_meaningful_value(self._extract_field(user_text, "长期工作背景")) or self._memory_has_meaningful_content(
+            memory_text
+        )
+
+    @staticmethod
+    def _worklog_has_active_item(text: str) -> bool:
+        in_completed = False
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("## "):
+                in_completed = line == "## 已完成"
+                continue
+            if line.startswith("### ") and not in_completed:
+                return True
+        return False
+
+    def _memory_has_meaningful_content(self, text: str) -> bool:
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            if line.startswith("（") and line.endswith("）"):
+                continue
+            if line.startswith("*") and line.endswith("*"):
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _extract_field(text: str, field_name: str) -> str:
+        prefix = f"- **{field_name}**："
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith(prefix):
+                return line[len(prefix):].strip()
+        return ""
+
+    @staticmethod
+    def _has_checked_option(text: str, section_heading: str, labels: tuple[str, ...]) -> bool:
+        in_section = False
+        allowed = set(labels)
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line.startswith("### "):
+                in_section = line == section_heading
+                continue
+            if not in_section or not line.startswith("- [x] "):
+                continue
+            label = line.removeprefix("- [x] ").strip()
+            if label in allowed:
+                return True
+        return False
+
+    def _is_meaningful_value(self, value: str) -> bool:
+        normalized = value.strip()
+        return bool(normalized) and normalized not in self._PLACEHOLDER_VALUES
 
     @staticmethod
     def _normalize_text(text: str) -> str:

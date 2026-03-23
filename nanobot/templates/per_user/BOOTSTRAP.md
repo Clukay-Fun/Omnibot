@@ -14,7 +14,7 @@
 1. 更新当前用户作用域下的 `USER.md`
 2. 更新当前用户作用域下的 `WORKLOG.md`
 3. 在需要时把关键事实沉淀到当前用户的 `memory/MEMORY.md`
-4. 如果你确认 onboarding 已完成，可以删除当前用户目录下的 `BOOTSTRAP.md`
+4. 如果你确认初始化引导已完成，可以删除当前用户目录下的 `BOOTSTRAP.md`
 
 字段映射提示：
 

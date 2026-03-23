@@ -23,19 +23,17 @@ _SAVE_MEMORY_TOOL = [
         "type": "function",
         "function": {
             "name": "save_memory",
-            "description": "Save the memory consolidation result to persistent storage.",
+            "description": "把记忆整理结果保存到持久化存储。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "history_entry": {
                         "type": "string",
-                        "description": "A paragraph (2-5 sentences) summarizing key events/decisions/topics. "
-                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
+                        "description": "用 2-5 句话总结关键事件、决定或主题。以 [YYYY-MM-DD HH:MM] 开头，并保留便于 grep 检索的细节。",
                     },
                     "memory_update": {
                         "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "description": "完整更新后的长期记忆 Markdown。保留已有事实并合并新增事实；如果没有新信息，就返回原样。",
                     },
                 },
                 "required": ["history_entry", "memory_update"],
@@ -107,7 +105,7 @@ class MemoryStore:
 
     def get_memory_context(self) -> str:
         long_term = self.read_long_term()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        return f"## 长期记忆\n{long_term}" if long_term else ""
 
     @staticmethod
     def _format_messages(messages: list[dict[str, Any]]) -> str:
@@ -217,29 +215,29 @@ class MemoryStore:
 
         current_memory = self.read_long_term()
         current_worklog = WorklogStore(self.memory_dir.parent).read_full()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
+        prompt = f"""请处理这段对话，并调用 save_memory 工具提交整理结果。
 
-Rules:
-- MEMORY.md stores long-term facts, stable preferences, and long-lived work background.
-- WORKLOG.md stores active, executable work items with a next step.
-- Do not copy tasks, blockers, priorities, or next steps into MEMORY.md.
-- Example for MEMORY.md: "The user is building a Feishu bot."
-- Example for WORKLOG.md instead: "Add per-user worklog support" or "Control prompt bloat from WORKLOG snapshots."
+规则：
+- `MEMORY.md` 用来记录长期事实、稳定偏好和长期工作背景。
+- `WORKLOG.md` 用来记录当前活跃、可执行、带下一步的工作事项。
+- 不要把任务、阻塞、优先级或下一步写进 `MEMORY.md`。
+- `MEMORY.md` 示例：“用户正在做一个 Feishu bot 项目。”
+- 应写进 `WORKLOG.md` 的示例：“补 per-user worklog 支持”或“控制 WORKLOG 快照带来的 prompt 膨胀”。
 
-## Current Long-term Memory
-{current_memory or "(empty)"}
+## 当前长期记忆
+{current_memory or "（空）"}
 
-## Current WORKLOG.md
-{current_worklog or "(empty)"}
+## 当前 WORKLOG.md
+{current_worklog or "（空）"}
 
-## Conversation to Process
+## 待处理对话
 {self._format_messages(messages)}"""
 
         try:
             forced = {"type": "function", "function": {"name": "save_memory"}}
             response = await provider.chat_with_retry(
                 messages=[
-                    {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+                    {"role": "system", "content": "你是记忆整理代理。请调用 save_memory 工具提交这段对话的整理结果。"},
                     {"role": "user", "content": prompt},
                 ],
                 tools=_SAVE_MEMORY_TOOL,
@@ -255,7 +253,7 @@ Rules:
                 logger.warning("Forced tool_choice unsupported, retrying memory consolidation with auto")
                 response = await provider.chat_with_retry(
                     messages=[
-                        {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
+                        {"role": "system", "content": "你是记忆整理代理。请调用 save_memory 工具提交这段对话的整理结果。"},
                         {"role": "user", "content": prompt},
                     ],
                     tools=_SAVE_MEMORY_TOOL,

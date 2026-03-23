@@ -31,6 +31,72 @@ def test_workspace_manager_creates_dm_workspace_from_per_user_templates(tmp_path
     assert manager.should_include_bootstrap(overlay) is True
 
 
+def test_workspace_manager_exits_bootstrap_when_key_context_is_filled(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    manager = FeishuUserWorkspaceManager(workspace)
+    overlay = manager.ensure_dm_workspace("tenant-1", "ou_user_1")
+
+    (overlay / "USER.md").write_text(
+        "# USER.md - 用户档案\n\n"
+        "## 基本信息\n"
+        "- **昵称**：小敬\n"
+        "- **称呼方式**：(待了解)\n"
+        "- **时区**：(待了解)\n"
+        "- **语言**：(待了解)\n\n"
+        "## 偏好设置\n\n"
+        "### 沟通风格\n"
+        "- [ ] 随意的\n"
+        "- [ ] 专业的\n"
+        "- [ ] 技术的\n"
+        "- [ ] 待确认\n\n"
+        "### 回复长度\n"
+        "- [x] 简短且简洁\n"
+        "- [ ] 详细的解释\n"
+        "- [ ] 根据问题自适应\n\n"
+        "## 工作背景\n"
+        "- **主要角色**：(待了解)\n"
+        "- **长期工作背景**：长期在做 Feishu bot 和 nanobot\n"
+        "- **常用工具栈**：(待了解)\n\n"
+        "## 工作方式偏好\n"
+        "- **表达风格偏好**：结论先行、少铺垫\n",
+        encoding="utf-8",
+    )
+    (overlay / "WORKLOG.md").write_text(
+        "# WORKLOG.md - 当前工作面板\n\n"
+        "## 进行中\n\n"
+        "### Feishu 对话测试\n"
+        "- 优先级：高\n"
+        "- 状态/下一步：跑一轮真机验收脚本\n\n"
+        "## 待处理\n\n"
+        "## 已完成\n",
+        encoding="utf-8",
+    )
+
+    assert manager.should_include_bootstrap(overlay) is False
+
+
+def test_workspace_manager_keeps_bootstrap_when_worklog_is_missing(tmp_path: Path) -> None:
+    workspace = _make_workspace(tmp_path)
+    manager = FeishuUserWorkspaceManager(workspace)
+    overlay = manager.ensure_dm_workspace("tenant-1", "ou_user_1")
+
+    (overlay / "USER.md").write_text(
+        "# USER.md - 用户档案\n\n"
+        "- **昵称**：小敬\n"
+        "- **长期工作背景**：长期在做 Feishu bot 和 nanobot\n"
+        "- **表达风格偏好**：结论先行、少铺垫\n\n"
+        "### 回复长度\n"
+        "- [x] 简短且简洁\n",
+        encoding="utf-8",
+    )
+    (overlay / "WORKLOG.md").write_text(
+        "# WORKLOG.md - 当前工作面板\n\n## 进行中\n\n## 待处理\n\n## 已完成\n",
+        encoding="utf-8",
+    )
+
+    assert manager.should_include_bootstrap(overlay) is True
+
+
 def test_workspace_manager_skips_group_overlay(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     manager = FeishuUserWorkspaceManager(workspace)
@@ -98,10 +164,10 @@ def test_workspace_manager_migrates_meaningful_global_state_once_and_resets_root
     assert Path(marker["snapshot_dir"]).exists()
 
     assert "(你的名字)" in (workspace / "USER.md").read_text(encoding="utf-8")
-    assert "Hello, World" in (workspace / "BOOTSTRAP.md").read_text(encoding="utf-8")
+    assert "启动引导" in (workspace / "BOOTSTRAP.md").read_text(encoding="utf-8")
     assert "活动检查任务" in (workspace / "HEARTBEAT.md").read_text(encoding="utf-8")
     assert "当前工作面板" in (workspace / "WORKLOG.md").read_text(encoding="utf-8")
-    assert "# Long-term Memory" in (workspace / "memory" / "MEMORY.md").read_text(encoding="utf-8")
+    assert "# MEMORY.md - 长期记忆" in (workspace / "memory" / "MEMORY.md").read_text(encoding="utf-8")
     assert (workspace / "memory" / "HISTORY.md").read_text(encoding="utf-8") == ""
 
     second_overlay = manager.ensure_dm_workspace("tenant-1", "ou_user_2")
@@ -114,7 +180,17 @@ def test_workspace_manager_lists_feishu_heartbeat_targets(tmp_path: Path) -> Non
     manager = FeishuUserWorkspaceManager(workspace)
 
     overlay = manager.ensure_dm_workspace("tenant-1", "ou_user_1")
-    (overlay / "USER.md").write_text("- **昵称**：康哥\n", encoding="utf-8")
+    (overlay / "USER.md").write_text(
+        "- **昵称**：康哥\n"
+        "- **长期工作背景**：长期在做 Feishu bot\n"
+        "- **表达风格偏好**：结论先行\n"
+        "\n### 回复长度\n- [x] 简短且简洁\n",
+        encoding="utf-8",
+    )
+    (overlay / "WORKLOG.md").write_text(
+        "## 进行中\n\n### 跟进飞书对话测试\n- 优先级：高\n- 状态/下一步：整理结果\n",
+        encoding="utf-8",
+    )
 
     targets = manager.list_heartbeat_targets()
 
