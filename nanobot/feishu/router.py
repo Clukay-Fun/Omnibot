@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from nanobot.feishu.payload import read_path
+
 
 @dataclass
 class FeishuEnvelope:
@@ -36,28 +38,16 @@ class FeishuRouter:
     def get_event_key(self, envelope: FeishuEnvelope) -> str | None:
         payload = envelope.payload
         if envelope.source == "webhook":
-            header = self._read(payload, "header")
+            header = read_path(payload, "header")
             if isinstance(header, dict) and header.get("event_id"):
                 return str(header["event_id"])
-        message_id = self._read(payload, "event", "message", "message_id")
+        message_id = read_path(payload, "event", "message", "message_id")
         if message_id:
             return f"message:{message_id}"
         return None
 
     def _is_message_event(self, envelope: FeishuEnvelope) -> bool:
         if envelope.source == "websocket":
-            return self._read(envelope.payload, "event", "message") is not None
-        event_type = self._read(envelope.payload, "header", "event_type")
+            return read_path(envelope.payload, "event", "message") is not None
+        event_type = read_path(envelope.payload, "header", "event_type")
         return event_type == self.MESSAGE_EVENT_TYPE
-
-    @staticmethod
-    def _read(value: Any, *path: str) -> Any:
-        current = value
-        for part in path:
-            if current is None:
-                return None
-            if isinstance(current, dict):
-                current = current.get(part)
-            else:
-                current = getattr(current, part, None)
-        return current

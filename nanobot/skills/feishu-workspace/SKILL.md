@@ -44,7 +44,7 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 不要假设这里支持 `tenant_access_token` 之外的认证模型。
 - 不要承诺访问用户私有日历、私有云盘文件或任何未共享给应用的资源。
 - 不要做容器级删除，例如删除整个 bitable app/table、calendar、wiki space 或文件夹。
-- 不要做 doc 富文本 block 编辑、整文替换、图片/表格/嵌入块写入。
+- 不要把这里当作通用 doc 富文本编辑器。仅允许受控的根级基础块追加（例如固定模板写入），不要做整文替换、任意嵌套 block 编辑或图片/表格/嵌入块写入。
 - 不要手写 API 请求；直接使用 `{baseDir}/scripts/*.sh` wrapper。
 - 不要把当前 wrapper 未接入的 URL、资源类型或权限能力说成已经可用。
 - 不要把飞书聊天上下文里的 `open_id` 获取方式和服务器 shell 手工执行混为一谈。离开实时消息上下文后，`docs.sh` 不会自动带入当前用户身份。

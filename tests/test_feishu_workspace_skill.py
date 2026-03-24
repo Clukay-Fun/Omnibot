@@ -122,7 +122,7 @@ def test_feishu_workspace_skill_actions_are_covered_by_references() -> None:
     assert "读取 doc 文本、wiki 节点、drive 文件当前状态" in skill_md
     assert "云文档协作者、公开分享设置、公开密码" in skill_md
     assert "drive list|search|get|delete" in docs_md
-    assert "doc create|read_text|append_text|trash" in docs_md
+    assert "doc create|read_text|append_text|create_blocks|trash" in docs_md
     assert "permission member list|auth|create|batch_create|update|delete|transfer_owner" in docs_md
     assert "permission public get|patch" in docs_md
     assert "permission public password create|update|delete" in docs_md
@@ -146,8 +146,8 @@ def test_feishu_workspace_skill_boundaries_are_not_contradicted_by_references() 
     assert "不支持创建或删除整个 calendar" in calendar_md
     assert "未覆盖的 Feishu 官方 endpoint 请改用 `raw request`" in docs_md
 
-    assert "不要做 doc 富文本 block 编辑" in skill_md
-    assert "不支持富文本 block 精细编辑" in docs_md
+    assert "不要把这里当作通用 doc 富文本编辑器" in skill_md
+    assert "不支持通用富文本 block 编辑" in docs_md
 
 
 def test_common_resolve_auth_prefers_env_token_and_import_failure_is_non_fatal(monkeypatch) -> None:
@@ -384,6 +384,102 @@ def test_docs_append_text_uses_root_block_and_text_children(monkeypatch, capsys)
     assert len(seen[0]["body"]["children"]) == 2
     output = json.loads(capsys.readouterr().out)
     assert output["ok"] is True
+
+
+def test_docs_create_blocks_appends_flat_root_level_blocks(monkeypatch, capsys) -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8")) if request.content else None
+        seen.append(
+            {
+                "method": request.method,
+                "path": request.url.path,
+                "query": dict(request.url.params),
+                "body": body,
+            }
+        )
+        return httpx.Response(200, json={"code": 0, "data": {"children": [{"block_id": "blk-1"}], "client_token": "idem-1"}})
+
+    monkeypatch.setattr(
+        docs_mod.common,
+        "FeishuAPI",
+        lambda module_name, scopes: _TransportAPI(module_name, scopes, handler),
+    )
+
+    children_json = json.dumps(
+        [
+            {"block_type": 3, "heading1": {"elements": [{"text_run": {"content": "周报"}}]}},
+            {"block_type": 2, "text": {"elements": [{"text_run": {"content": "本周概览"}}]}},
+            {"block_type": 12, "bullet": {"elements": [{"text_run": {"content": "事项 A"}}]}},
+        ],
+        ensure_ascii=False,
+    )
+    exit_code = docs_mod.main(
+        [
+            "doc",
+            "create_blocks",
+            "--document-id",
+            "doccn123",
+            "--children-json",
+            children_json,
+            "--client-token",
+            "idem-1",
+            "--document-revision-id",
+            "-1",
+            "--user-id-type",
+            "open_id",
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen[0]["method"] == "POST"
+    assert seen[0]["path"] == "/open-apis/docx/v1/documents/doccn123/blocks/doccn123/children"
+    assert seen[0]["query"] == {
+        "client_token": "idem-1",
+        "document_revision_id": "-1",
+        "user_id_type": "open_id",
+    }
+    assert len(seen[0]["body"]["children"]) == 3
+    output = json.loads(capsys.readouterr().out)
+    assert output["meta"]["resource"] == "doc"
+    assert output["meta"]["action"] == "create_blocks"
+
+
+def test_docs_create_blocks_rejects_nested_or_unsupported_blocks() -> None:
+    with pytest.raises(docs_mod.common.SkillError) as nested_exc:
+        docs_mod.main(
+            [
+                "doc",
+                "create_blocks",
+                "--document-id",
+                "doccn123",
+                "--children-json",
+                json.dumps(
+                    [
+                        {
+                            "block_type": 2,
+                            "text": {"elements": [{"text_run": {"content": "bad"}}]},
+                            "children": [{"block_type": 2}],
+                        }
+                    ]
+                ),
+            ]
+        )
+    assert "flat root-level blocks" in str(nested_exc.value)
+
+    with pytest.raises(docs_mod.common.SkillError) as unsupported_exc:
+        docs_mod.main(
+            [
+                "doc",
+                "create_blocks",
+                "--document-id",
+                "doccn123",
+                "--children-json",
+                json.dumps([{"block_type": 27, "image": {"token": "img"}}]),
+            ]
+        )
+    assert "only supports block_type" in str(unsupported_exc.value)
 
 
 def test_docs_trash_and_drive_delete_include_required_type_query(monkeypatch, capsys) -> None:

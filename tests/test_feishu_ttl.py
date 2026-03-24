@@ -92,3 +92,31 @@ async def test_ttl_keeps_session_when_archive_fails(tmp_path: Path) -> None:
     assert expired is False
     assert memory_store.get("tenant-1", "ou_user_1") is None
     assert len(session_manager.get_or_create("feishu:dm:ou_user_1").messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_ttl_keeps_session_when_archive_payload_is_invalid(tmp_path: Path) -> None:
+    manager, session_manager, memory_store, provider = _make_manager(tmp_path)
+    provider.chat_with_retry = AsyncMock(
+        return_value=LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCallRequest(
+                    id="call-1",
+                    name="save_feishu_user_memory",
+                    arguments={"profile": "likes coffee", "summary": None},
+                )
+            ],
+        )
+    )
+
+    session = session_manager.get_or_create("feishu:dm:ou_user_1")
+    session.add_message("user", "hello")
+    session.updated_at = datetime.now() - timedelta(seconds=120)
+    session_manager.save(session)
+
+    expired = await manager.maybe_expire("feishu:dm:ou_user_1", "tenant-1", "ou_user_1")
+
+    assert expired is False
+    assert memory_store.get("tenant-1", "ou_user_1") is None
+    assert len(session_manager.get_or_create("feishu:dm:ou_user_1").messages) == 1

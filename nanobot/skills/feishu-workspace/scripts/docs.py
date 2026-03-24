@@ -29,6 +29,15 @@ EXPECTED_SCOPES = [
     "上传、下载文件到云空间",
 ]
 TEXT_BLOCK_TYPE = 2
+ALLOWED_CREATE_BLOCK_TYPES = {
+    2: "text",
+    3: "heading1",
+    4: "heading2",
+    5: "heading3",
+    12: "bullet",
+    13: "ordered",
+    15: "quote",
+}
 PERMISSION_DOC_TYPES = ("doc", "sheet", "file", "wiki", "bitable", "docx", "folder", "mindnote", "minutes", "slides")
 PUBLIC_PERMISSION_API_VERSIONS = ("v1", "v2")
 RAW_AUTH_MODES = ("tenant", "bearer", "none")
@@ -315,6 +324,52 @@ def _split_paragraphs(text: str) -> list[str]:
     return [paragraph for paragraph in paragraphs if paragraph]
 
 
+def _load_children_blocks(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.children_json and args.children_file:
+        raise common.SkillError("validation_error", "Use either --children-json or --children-file, not both.")
+    if args.children_file:
+        raw = Path(args.children_file).read_text(encoding="utf-8")
+    elif args.children_json is not None:
+        raw = args.children_json
+    else:
+        raise common.SkillError("validation_error", "create_blocks requires --children-json or --children-file.")
+    parsed = common.parse_json_arg(raw, field_name="children_json")
+    if not isinstance(parsed, list):
+        raise common.SkillError("validation_error", "create_blocks requires a JSON array of blocks.")
+    if not parsed:
+        raise common.SkillError("validation_error", "create_blocks requires at least one block.")
+    if len(parsed) > 50:
+        raise common.SkillError("validation_error", "create_blocks supports at most 50 blocks per request.")
+    return _validate_root_level_children(parsed)
+
+
+def _validate_root_level_children(children: list[Any]) -> list[dict[str, Any]]:
+    validated: list[dict[str, Any]] = []
+    for index, block in enumerate(children, start=1):
+        if not isinstance(block, dict):
+            raise common.SkillError("validation_error", f"children[{index}] must be a JSON object.")
+        if "children" in block:
+            raise common.SkillError(
+                "validation_error",
+                f"children[{index}] contains nested children; create_blocks only supports flat root-level blocks.",
+            )
+        block_type = block.get("block_type")
+        if block_type not in ALLOWED_CREATE_BLOCK_TYPES:
+            raise common.SkillError(
+                "validation_error",
+                "create_blocks only supports block_type "
+                f"{', '.join(str(value) for value in sorted(ALLOWED_CREATE_BLOCK_TYPES))}.",
+            )
+        block_key = ALLOWED_CREATE_BLOCK_TYPES[block_type]
+        if block_key not in block or not isinstance(block.get(block_key), dict):
+            raise common.SkillError(
+                "validation_error",
+                f"children[{index}] with block_type {block_type} must include a `{block_key}` object.",
+            )
+        validated.append(block)
+    return validated
+
+
 def _check(api: common.FeishuAPI, args: argparse.Namespace) -> int:
     if args.document_id:
         document_id = common.normalize_doc_token(args.document_id, expected_kind="doc")
@@ -419,6 +474,22 @@ def _handle_doc(api: common.FeishuAPI, args: argparse.Namespace) -> int:
             "POST",
             f"/open-apis/docx/v1/documents/{document_id}/blocks/{root_block_id}/children",
             json_body={"children": [_make_text_block(paragraph) for paragraph in paragraphs]},
+        )
+        return _success(api, args, payload.get("data", {}))
+    if args.action == "create_blocks":
+        children = _load_children_blocks(args)
+        params: dict[str, Any] = {}
+        if args.document_revision_id is not None:
+            params["document_revision_id"] = args.document_revision_id
+        if args.client_token:
+            params["client_token"] = args.client_token
+        if args.user_id_type:
+            params["user_id_type"] = args.user_id_type
+        payload = api.request(
+            "POST",
+            f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+            params=params or None,
+            json_body={"children": children},
         )
         return _success(api, args, payload.get("data", {}))
     if args.action == "trash":
@@ -751,6 +822,13 @@ def build_parser() -> argparse.ArgumentParser:
     doc_append.add_argument("--document-id", required=True)
     doc_append.add_argument("--text")
     doc_append.add_argument("--text-file")
+    doc_create_blocks = doc_sub.add_parser("create_blocks")
+    doc_create_blocks.add_argument("--document-id", required=True)
+    doc_create_blocks.add_argument("--children-json")
+    doc_create_blocks.add_argument("--children-file")
+    doc_create_blocks.add_argument("--client-token")
+    doc_create_blocks.add_argument("--document-revision-id", type=int)
+    doc_create_blocks.add_argument("--user-id-type", choices=("open_id", "union_id", "user_id"))
     doc_trash = doc_sub.add_parser("trash")
     doc_trash.add_argument("--document-id", required=True)
 

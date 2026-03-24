@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from nanobot.config.schema import FeishuConfig
+from nanobot.feishu.payload import read_path
 from nanobot.feishu.parser import MSG_TYPE_MAP, _extract_post_content, _extract_share_card_content
 from nanobot.feishu.types import TranslatedFeishuMessage
 
@@ -31,22 +32,22 @@ class FeishuAdapter:
         self.overflow_keep_messages = overflow_keep_messages
 
     async def translate_message(self, payload: Any) -> TranslatedFeishuMessage | None:
-        event = self._read(payload, "event") or payload
-        message = self._read(event, "message")
-        sender = self._read(event, "sender")
+        event = read_path(payload, "event") or payload
+        message = read_path(event, "message")
+        sender = read_path(event, "sender")
         if message is None or sender is None:
             return None
 
-        sender_type = self._read(sender, "sender_type")
+        sender_type = read_path(sender, "sender_type")
         if sender_type == "bot":
             return None
 
-        sender_id = self._read(sender, "sender_id", "open_id") or "unknown"
-        chat_id = self._read(message, "chat_id") or ""
-        chat_type = self._read(message, "chat_type") or "p2p"
-        msg_type = self._read(message, "message_type") or "text"
-        message_id = self._read(message, "message_id")
-        tenant_key = self._read(payload, "header", "tenant_key")
+        sender_id = read_path(sender, "sender_id", "open_id") or "unknown"
+        chat_id = read_path(message, "chat_id") or ""
+        chat_type = read_path(message, "chat_type") or "p2p"
+        msg_type = read_path(message, "message_type") or "text"
+        message_id = read_path(message, "message_id")
+        tenant_key = read_path(payload, "header", "tenant_key")
         session_key = self._build_session_key(chat_type, chat_id, sender_id)
 
         if self.ttl_manager is not None:
@@ -60,7 +61,7 @@ class FeishuAdapter:
                 start_worker=False,
             )
 
-        content_json = self._parse_content_json(self._read(message, "content"))
+        content_json = self._parse_content_json(read_path(message, "content"))
         content = ""
         image_keys: list[str] = []
 
@@ -128,15 +129,3 @@ class FeishuAdapter:
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
-
-    @staticmethod
-    def _read(value: Any, *path: str) -> Any:
-        current = value
-        for part in path:
-            if current is None:
-                return None
-            if isinstance(current, dict):
-                current = current.get(part)
-            else:
-                current = getattr(current, part, None)
-        return current

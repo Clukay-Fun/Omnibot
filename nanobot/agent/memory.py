@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from loguru import logger
 
 from nanobot.agent.worklog import WorklogStore
+from nanobot.providers.tool_calls import coerce_tool_text, run_required_tool_call
 from nanobot.utils.helpers import ensure_dir
 
 if TYPE_CHECKING:
@@ -43,28 +43,6 @@ _SAVE_MEMORY_TOOL = [
 ]
 
 
-def _ensure_text(value: Any) -> str:
-    """Normalize tool-call payload values to text for file storage."""
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-
-def _normalize_save_memory_args(args: Any) -> dict[str, Any] | None:
-    """Normalize provider tool-call arguments to the expected dict shape."""
-    if isinstance(args, str):
-        args = json.loads(args)
-    if isinstance(args, list):
-        return args[0] if args and isinstance(args[0], dict) else None
-    return args if isinstance(args, dict) else None
-
-
-_TOOL_CHOICE_ERROR_MARKERS = (
-    "tool_choice",
-    "toolchoice",
-    "does not support",
-    'should be ["none", "auto"]',
-)
-
-
 @dataclass(slots=True)
 class MemoryConsolidationResult:
     """Normalized consolidation payload emitted after a successful archive."""
@@ -72,12 +50,6 @@ class MemoryConsolidationResult:
     history_entry: str
     memory_update: str
     raw_archive: bool = False
-
-
-def _is_tool_choice_unsupported(content: str | None) -> bool:
-    """Detect provider errors caused by forced tool_choice being unsupported."""
-    text = (content or "").lower()
-    return any(marker in text for marker in _TOOL_CHOICE_ERROR_MARKERS)
 
 
 class MemoryStore:
@@ -234,38 +206,25 @@ class MemoryStore:
 {self._format_messages(messages)}"""
 
         try:
-            forced = {"type": "function", "function": {"name": "save_memory"}}
-            response = await provider.chat_with_retry(
-                messages=[
-                    {"role": "system", "content": "你是记忆整理代理。请调用 save_memory 工具提交这段对话的整理结果。"},
-                    {"role": "user", "content": prompt},
-                ],
+            request_messages = [
+                {"role": "system", "content": "你是记忆整理代理。请调用 save_memory 工具提交这段对话的整理结果。"},
+                {"role": "user", "content": prompt},
+            ]
+            tool_result = await run_required_tool_call(
+                provider,
+                messages=request_messages,
                 tools=_SAVE_MEMORY_TOOL,
+                tool_name="save_memory",
+                required_fields=("history_entry", "memory_update"),
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
-                tool_choice=forced,
                 purpose=purpose,
             )
 
-            if response.finish_reason == "error" and _is_tool_choice_unsupported(response.content):
-                logger.warning("Forced tool_choice unsupported, retrying memory consolidation with auto")
-                response = await provider.chat_with_retry(
-                    messages=[
-                        {"role": "system", "content": "你是记忆整理代理。请调用 save_memory 工具提交这段对话的整理结果。"},
-                        {"role": "user", "content": prompt},
-                    ],
-                    tools=_SAVE_MEMORY_TOOL,
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    reasoning_effort=reasoning_effort,
-                    tool_choice="auto",
-                    purpose=purpose,
-                )
-
-            if not response.has_tool_calls:
+            if not tool_result.ok and tool_result.error == "missing_tool_call":
+                response = tool_result.response
                 logger.warning(
                     "Memory consolidation: LLM did not call save_memory "
                     "(finish_reason={}, content_len={}, content_preview={})",
@@ -275,29 +234,39 @@ class MemoryStore:
                 )
                 return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
-            args = _normalize_save_memory_args(response.tool_calls[0].arguments)
-            if args is None:
+            if not tool_result.ok and tool_result.error == "invalid_arguments":
                 logger.warning("Memory consolidation: unexpected save_memory arguments")
                 return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
-            if "history_entry" not in args or "memory_update" not in args:
-                logger.warning("Memory consolidation: save_memory payload missing required fields")
+            if not tool_result.ok and tool_result.error == "missing_required_fields":
+                logger.warning(
+                    "Memory consolidation: save_memory payload missing required fields: {}",
+                    ", ".join(tool_result.missing_fields),
+                )
                 return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
+            if not tool_result.ok and tool_result.error == "null_required_fields":
+                logger.warning(
+                    "Memory consolidation: save_memory payload contains null required fields: {}",
+                    ", ".join(tool_result.missing_fields),
+                )
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
+
+            if not tool_result.ok:
+                logger.warning("Memory consolidation: unexpected tool-call failure {}", tool_result.error)
+                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
+
+            args = tool_result.arguments or {}
             entry = args["history_entry"]
             update = args["memory_update"]
 
-            if entry is None or update is None:
-                logger.warning("Memory consolidation: save_memory payload contains null required fields")
-                return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
-
-            entry = _ensure_text(entry).strip()
+            entry = coerce_tool_text(entry).strip()
             if not entry:
                 logger.warning("Memory consolidation: history_entry is empty after normalization")
                 return self._fail_or_raw_archive(messages, on_consolidated=on_consolidated)
 
             self.append_history(entry)
-            update = _ensure_text(update)
+            update = coerce_tool_text(update)
             if update != current_memory:
                 self.write_long_term(update)
             if on_consolidated is not None:

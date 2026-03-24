@@ -10,6 +10,7 @@ from loguru import logger
 
 from nanobot.feishu.memory import FeishuMemorySnapshot, FeishuUserMemoryStore
 from nanobot.providers.base import LLMProvider
+from nanobot.providers.tool_calls import coerce_tool_text, run_required_tool_call
 from nanobot.session.manager import Session, SessionManager
 
 FEISHU_ARCHIVED_UNTIL_KEY = "feishu_archived_until"
@@ -82,15 +83,19 @@ class FeishuMemoryArchiver:
 """
 
         try:
-            response = await self.provider.chat_with_retry(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You maintain shared Feishu user memory. Call the save_feishu_user_memory tool with merged profile and summary.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+            request_messages = [
+                {
+                    "role": "system",
+                    "content": "You maintain shared Feishu user memory. Call the save_feishu_user_memory tool with merged profile and summary.",
+                },
+                {"role": "user", "content": prompt},
+            ]
+            tool_result = await run_required_tool_call(
+                self.provider,
+                messages=request_messages,
                 tools=_SAVE_FEISHU_MEMORY_TOOL,
+                tool_name="save_feishu_user_memory",
+                required_fields=("profile", "summary"),
                 model=self.model,
                 temperature=0.0,
                 purpose="feishu_archive",
@@ -99,17 +104,37 @@ class FeishuMemoryArchiver:
             logger.exception("Feishu memory archive call failed")
             return False
 
-        if not response.has_tool_calls:
+        if not tool_result.ok and tool_result.error == "missing_tool_call":
             logger.warning("Feishu archive did not return save_feishu_user_memory")
             return False
 
-        arguments = response.tool_calls[0].arguments
-        if not isinstance(arguments, dict):
+        if not tool_result.ok and tool_result.error == "invalid_arguments":
             logger.warning("Feishu archive returned unexpected arguments type")
             return False
 
-        profile = str(arguments.get("profile") or current_profile)
-        summary = str(arguments.get("summary") or current_summary)
+        if not tool_result.ok and tool_result.error == "missing_required_fields":
+            logger.warning(
+                "Feishu archive payload missing required fields: {}",
+                ", ".join(tool_result.missing_fields),
+            )
+            return False
+
+        if not tool_result.ok and tool_result.error == "null_required_fields":
+            logger.warning(
+                "Feishu archive payload contains null required fields: {}",
+                ", ".join(tool_result.missing_fields),
+            )
+            return False
+
+        if not tool_result.ok:
+            logger.warning("Feishu archive failed with unexpected tool-call error {}", tool_result.error)
+            return False
+
+        arguments = tool_result.arguments or {}
+        profile_value = arguments.get("profile")
+        summary_value = arguments.get("summary")
+        profile = coerce_tool_text(profile_value) if profile_value not in ("", None) else current_profile
+        summary = coerce_tool_text(summary_value) if summary_value not in ("", None) else current_summary
         self.memory_store.upsert(
             tenant_key,
             user_open_id,
