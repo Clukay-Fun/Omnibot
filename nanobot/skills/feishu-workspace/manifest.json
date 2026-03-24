@@ -1,0 +1,93 @@
+{
+  "domain": "feishu",
+  "capabilities": [
+    {
+      "name": "resources",
+      "kind": "resource",
+      "trigger": [
+        "飞书文档",
+        "多维表格",
+        "bitable",
+        "calendar",
+        "permission",
+        "wiki",
+        "drive"
+      ],
+      "required_context": [
+        "feishu_resource_id"
+      ],
+      "files": [
+        "SKILL.md",
+        "references/bitable.md",
+        "references/calendar.md",
+        "references/docs.md"
+      ],
+      "sticky": false,
+      "expected_tools": [
+        "bash"
+      ]
+    },
+    {
+      "name": "workflows.weekly_report",
+      "kind": "workflow",
+      "trigger": [
+        "周报",
+        "汇总",
+        "根据表格生成文档"
+      ],
+      "required_context": [
+        "bitable_link_or_token"
+      ],
+      "files": [
+        "workflows/weekly-report/CAPABILITY.md",
+        "workflows/weekly-report/references/report-template.md"
+      ],
+      "sticky": true,
+      "expected_tools": [
+        "bash"
+      ]
+    },
+    {
+      "name": "perception.ocr",
+      "kind": "perception",
+      "trigger": [
+        "OCR",
+        "识别图片文字",
+        "提取截图文字"
+      ],
+      "required_context": [
+        "message_image"
+      ],
+      "files": [
+        "perception/ocr/CAPABILITY.md",
+        "perception/ocr/references/mode-general.md",
+        "perception/ocr/references/mode-enterprise.md"
+      ],
+      "sticky": false,
+      "expected_tools": []
+    },
+    {
+      "name": "automation",
+      "kind": "automation",
+      "trigger": [
+        "定时",
+        "提醒",
+        "巡检"
+      ],
+      "required_context": [
+        "feishu_runtime_context"
+      ],
+      "files": [
+        "SKILL.md"
+      ],
+      "sticky": false,
+      "expected_tools": [
+        "bash"
+      ]
+    }
+  ],
+  "compat_aliases": [
+    "feishu-ocr",
+    "feishu-weekly-report"
+  ]
+}

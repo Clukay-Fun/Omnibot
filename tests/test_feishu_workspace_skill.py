@@ -60,7 +60,9 @@ def test_feishu_workspace_skill_is_valid_and_discoverable(tmp_path: Path) -> Non
     assert valid, message
 
     skills = SkillsLoader(tmp_path).list_skills(filter_unavailable=False)
-    assert any(skill["name"] == "feishu-workspace" for skill in skills)
+    workspace_skill = next(skill for skill in skills if skill["name"] == "feishu-workspace")
+    assert workspace_skill["manifest_path"]
+    assert not workspace_skill["deprecated"]
 
     skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
     assert "tenant_access_token" in skill_md
@@ -68,6 +70,7 @@ def test_feishu_workspace_skill_is_valid_and_discoverable(tmp_path: Path) -> Non
     assert "{baseDir}/references/bitable.md" in skill_md
     assert "{baseDir}/references/calendar.md" in skill_md
     assert "{baseDir}/references/docs.md" in skill_md
+    assert "{baseDir}/manifest.json" in skill_md or "manifest.json" in (SKILL_DIR / "manifest.json").read_text(encoding="utf-8")
 
 
 def test_feishu_workspace_skill_md_is_action_focused() -> None:
@@ -88,6 +91,26 @@ def test_feishu_workspace_skill_md_is_action_focused() -> None:
     assert "部分支持" not in skill_md
     assert "后续补齐" not in skill_md
     assert "路线图" not in skill_md
+
+
+def test_feishu_workspace_manifest_exposes_platform_capabilities() -> None:
+    manifest = json.loads((SKILL_DIR / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["domain"] == "feishu"
+    capability_names = {cap["name"] for cap in manifest["capabilities"]}
+    assert "resources" in capability_names
+    assert "workflows.weekly_report" in capability_names
+    assert "perception.ocr" in capability_names
+    assert manifest["compat_aliases"] == ["feishu-ocr", "feishu-weekly-report"]
+
+
+def test_feishu_workspace_internal_capability_docs_exist() -> None:
+    weekly_capability = (SKILL_DIR / "workflows" / "weekly-report" / "CAPABILITY.md").read_text(encoding="utf-8")
+    ocr_capability = (SKILL_DIR / "perception" / "ocr" / "CAPABILITY.md").read_text(encoding="utf-8")
+
+    assert "受控工作流能力" in weekly_capability
+    assert "feishu-workspace" in weekly_capability
+    assert "图片与附件感知能力" in ocr_capability
 
 
 def test_feishu_workspace_references_share_uniform_structure() -> None:

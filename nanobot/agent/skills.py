@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 # Default builtin skills directory (relative to this file)
 BUILTIN_SKILLS_DIR = Path(__file__).parent.parent / "skills"
@@ -23,7 +24,7 @@ class SkillsLoader:
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
 
-    def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
+    def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, Any]]:
         """
         List all available skills.
 
@@ -33,7 +34,7 @@ class SkillsLoader:
         Returns:
             List of skill info dicts with 'name', 'path', 'source'.
         """
-        skills = []
+        skills: list[dict[str, Any]] = []
 
         # Workspace skills (highest priority)
         if self.workspace_skills.exists():
@@ -41,7 +42,7 @@ class SkillsLoader:
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists():
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "workspace"})
+                        skills.append(self._build_skill_entry(skill_dir, source="workspace"))
 
         # Built-in skills
         if self.builtin_skills and self.builtin_skills.exists():
@@ -49,7 +50,7 @@ class SkillsLoader:
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
-                        skills.append({"name": skill_dir.name, "path": str(skill_file), "source": "builtin"})
+                        skills.append(self._build_skill_entry(skill_dir, source="builtin"))
 
         # Filter by requirements
         if filter_unavailable:
@@ -108,7 +109,7 @@ class SkillsLoader:
         Returns:
             XML-formatted skills summary.
         """
-        all_skills = self.list_skills(filter_unavailable=False)
+        all_skills = [skill for skill in self.list_skills(filter_unavailable=False) if not skill.get("deprecated")]
         if not all_skills:
             return ""
 
@@ -122,11 +123,16 @@ class SkillsLoader:
             desc = escape_xml(self._get_skill_description(s["name"]))
             skill_meta = self._get_skill_meta(s["name"])
             available = self._check_requirements(skill_meta)
+            manifest = self.get_skill_manifest(s["name"])
 
             lines.append(f"  <skill available=\"{str(available).lower()}\">")
             lines.append(f"    <name>{name}</name>")
             lines.append(f"    <description>{desc}</description>")
             lines.append(f"    <location>{path}</location>")
+            if manifest:
+                capability_names = [cap.get("name") for cap in manifest.get("capabilities", []) if cap.get("name")]
+                if capability_names:
+                    lines.append(f"    <capabilities>{escape_xml(', '.join(capability_names))}</capabilities>")
 
             # Show missing requirements for unavailable skills
             if not available:
@@ -157,6 +163,19 @@ class SkillsLoader:
         if meta and meta.get("description"):
             return meta["description"]
         return name  # Fallback to skill name
+
+    def _build_skill_entry(self, skill_dir: Path, *, source: str) -> dict[str, Any]:
+        skill_file = skill_dir / "SKILL.md"
+        meta = self.get_skill_metadata(skill_dir.name) or {}
+        skill_meta = self._parse_nanobot_metadata(meta.get("metadata", ""))
+        manifest_path = skill_dir / "manifest.json"
+        return {
+            "name": skill_dir.name,
+            "path": str(skill_file),
+            "source": source,
+            "deprecated": bool(skill_meta.get("deprecated") or meta.get("deprecated")),
+            "manifest_path": str(manifest_path) if manifest_path.exists() else None,
+        }
 
     def _strip_frontmatter(self, content: str) -> str:
         """Remove YAML frontmatter from markdown content."""
@@ -189,6 +208,30 @@ class SkillsLoader:
         """Get nanobot metadata for a skill (cached in frontmatter)."""
         meta = self.get_skill_metadata(name) or {}
         return self._parse_nanobot_metadata(meta.get("metadata", ""))
+
+    def get_skill_manifest(self, name: str) -> dict[str, Any] | None:
+        """Get a skill's manifest.json if present and valid JSON."""
+        skill_dir = None
+        workspace_skill_dir = self.workspace_skills / name
+        if workspace_skill_dir.exists():
+            skill_dir = workspace_skill_dir
+        elif self.builtin_skills:
+            builtin_skill_dir = self.builtin_skills / name
+            if builtin_skill_dir.exists():
+                skill_dir = builtin_skill_dir
+
+        if skill_dir is None:
+            return None
+
+        manifest_path = skill_dir / "manifest.json"
+        if not manifest_path.exists():
+            return None
+        try:
+            raw = manifest_path.read_text(encoding="utf-8")
+            manifest = json.loads(raw)
+        except (OSError, json.JSONDecodeError):
+            return None
+        return manifest if isinstance(manifest, dict) else None
 
     def get_always_skills(self) -> list[str]:
         """Get skills marked as always=true that meet requirements."""

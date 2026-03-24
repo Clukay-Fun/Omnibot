@@ -190,3 +190,54 @@ async def test_process_direct_skips_feishu_dm_progress_rule_without_overlay(tmp_
         msg.get("role") == "system" and "Feishu delivery rule" in str(msg.get("content"))
         for msg in messages
     )
+
+
+@pytest.mark.asyncio
+async def test_process_direct_answers_skill_inventory_without_llm(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+
+    response = await loop.process_direct(
+        "你现在有哪些内置 skill？请直接列出名字。",
+        session_key="cli:direct",
+        channel="cli",
+        chat_id="direct",
+    )
+
+    assert "当前可用的 skill" in response
+    assert "feishu-workspace" in response
+    assert "feishu-ocr" not in response
+    assert "feishu-weekly-report" not in response
+    loop.provider.chat_with_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_direct_answers_skill_detail_without_llm(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+
+    response = await loop.process_direct(
+        "查看feishu-workspace",
+        session_key="cli:direct",
+        channel="cli",
+        chat_id="direct",
+    )
+
+    assert "`feishu-workspace` 的当前说明如下" in response
+    assert "workflows.weekly_report" in response
+    assert "perception.ocr" in response
+    loop.provider.chat_with_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_direct_handles_generic_skill_call_without_llm(tmp_path) -> None:
+    loop = _make_loop(tmp_path)
+
+    response = await loop.process_direct(
+        "调用skill",
+        session_key="cli:direct",
+        channel="cli",
+        chat_id="direct",
+    )
+
+    assert "请直接说 skill 名称和要完成的任务" in response
+    assert "feishu-workspace" in response
+    loop.provider.chat_with_retry.assert_not_called()

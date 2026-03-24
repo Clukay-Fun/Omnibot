@@ -3,6 +3,7 @@
 Minimal validator for nanobot skill folders.
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -22,7 +23,8 @@ ALLOWED_FRONTMATTER_KEYS = {
     "license",
     "allowed-tools",
 }
-ALLOWED_RESOURCE_DIRS = {"scripts", "references", "assets"}
+ALLOWED_RESOURCE_DIRS = {"scripts", "references", "assets", "resources", "workflows", "perception", "automation"}
+ALLOWED_ROOT_FILES = {"SKILL.md", "manifest.json"}
 PLACEHOLDER_MARKERS = ("[todo", "todo:")
 
 
@@ -187,8 +189,45 @@ def validate_skill(skill_path):
     if always is not None and not isinstance(always, bool):
         return False, f"'always' must be a boolean, got {type(always).__name__}"
 
+    manifest_path = skill_path / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return False, f"Invalid manifest.json: {exc}"
+        if not isinstance(manifest, dict):
+            return False, "manifest.json must be a JSON object"
+        required_manifest_keys = {"domain", "capabilities", "compat_aliases"}
+        missing_manifest_keys = sorted(required_manifest_keys - set(manifest.keys()))
+        if missing_manifest_keys:
+            return False, f"manifest.json missing required key(s): {', '.join(missing_manifest_keys)}"
+        if not isinstance(manifest["domain"], str) or not manifest["domain"].strip():
+            return False, "manifest.json field 'domain' must be a non-empty string"
+        if not isinstance(manifest["capabilities"], list):
+            return False, "manifest.json field 'capabilities' must be a list"
+        if not isinstance(manifest["compat_aliases"], list):
+            return False, "manifest.json field 'compat_aliases' must be a list"
+        for capability in manifest["capabilities"]:
+            if not isinstance(capability, dict):
+                return False, "Each capability in manifest.json must be an object"
+            required_capability_keys = {
+                "name",
+                "kind",
+                "trigger",
+                "required_context",
+                "files",
+                "sticky",
+                "expected_tools",
+            }
+            missing_capability_keys = sorted(required_capability_keys - set(capability.keys()))
+            if missing_capability_keys:
+                return False, (
+                    "manifest.json capability missing required key(s): "
+                    + ", ".join(missing_capability_keys)
+                )
+
     for child in skill_path.iterdir():
-        if child.name == "SKILL.md":
+        if child.name in ALLOWED_ROOT_FILES:
             continue
         if child.is_dir() and child.name in ALLOWED_RESOURCE_DIRS:
             continue
@@ -197,7 +236,7 @@ def validate_skill(skill_path):
         return (
             False,
             f"Unexpected file or directory in skill root: {child.name}. "
-            "Only SKILL.md, scripts/, references/, and assets/ are allowed.",
+            "Only SKILL.md, manifest.json, and approved resource directories are allowed.",
         )
 
     return True, "Skill is valid!"

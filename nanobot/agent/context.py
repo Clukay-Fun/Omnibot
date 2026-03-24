@@ -90,6 +90,8 @@ class ContextBuilder:
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+If the user asks what skills or built-in capabilities you currently have, answer directly from this skills summary.
+Do not claim that you cannot see your own skills, default skills, or built-in capabilities when they are listed here.
 
 {skills_summary}""")
 

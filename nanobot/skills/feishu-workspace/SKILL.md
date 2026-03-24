@@ -1,6 +1,6 @@
 ---
 name: feishu-workspace
-description: Operate Feishu bitable, calendar, docs, wiki, and drive resources via bundled scripts. Use for deterministic Feishu workspace operations that require app-level API access, structured JSON output, and explicit action boundaries.
+description: Unified Feishu workspace platform skill. Use as the single public Feishu entry for resources, workflows, perception, and automation capabilities backed by bundled wrappers and capability manifests.
 metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 ---
 
@@ -8,11 +8,22 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 
 ## 一句话定位
 
-在需要通过飞书应用级 API 读取或修改 bitable、calendar、docs、wiki、drive 当前状态时使用这个 skill。
+这是唯一公开的 Feishu 平台 skill。后续所有 Feishu 能力都从这里进入，不再新增顶层 Feishu skill。
+
+当前平台内部按 4 类 capability 组织：
+
+- `resources`: bitable / calendar / docs / wiki / drive / permission
+- `workflows`: weekly-report / 后续模板化文档工作流
+- `perception`: OCR、图片与附件理解
+- `automation`: 定时与巡检类 Feishu 工作流
+
+机器可读能力清单定义在 `{baseDir}/manifest.json`。
 
 ## 触发条件
 
 - 用户明确要查看或修改飞书多维表格、日历、文档、知识库、云空间文件或云文档权限。
+- 用户要从飞书资源生成结构化输出，例如周报文档。
+- 用户要识别当前飞书消息里的截图、证照或图片文字。
 - 用户问的是当前状态，例如“现在有哪些表”“当前有哪些事件”“这份文档现在写了什么”。
 - 用户要求执行当前 wrapper 已支持的实体级创建、更新、删除。
 
@@ -24,6 +35,9 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
   - Bitable: `{baseDir}/references/bitable.md`
   - Calendar: `{baseDir}/references/calendar.md`
   - Docs / Wiki / Drive: `{baseDir}/references/docs.md`
+- 如果命中内部 capability，再只读取对应 capability 文件，不要一次性把整个平台所有文档都读进上下文：
+  - Weekly report: `{baseDir}/workflows/weekly-report/CAPABILITY.md`
+  - OCR: `{baseDir}/perception/ocr/CAPABILITY.md`
 - 如果用户没有给出必要的资源标识，先索要链接、ID、token 或足够明确的对象名称。
 - 如果当前会话来自飞书，优先查看运行时上下文是否已经提供 `Feishu User Open ID`、`Feishu Tenant Key` 等标识。用户说“把我加进去”“给我权限”时，优先直接复用当前 `Feishu User Open ID` 作为协作者 `member_id`，不要重复索要。
 - 如果用户要的是飞书官方 API，但当前 wrapper 没有对应 endpoint，先用 `web_search` / `web_fetch` 查 `open.feishu.cn` 官方文档，再切到 `http-api` skill 发请求。
@@ -36,6 +50,8 @@ metadata: {"nanobot":{"emoji":"🪶","requires":{"bins":["bash"]}}}
 - 可以读取 calendar、event 当前状态，并执行 event 的受支持实体级操作。
 - 可以读取 doc 文本、wiki 节点、drive 文件当前状态，并执行 doc、wiki node、drive file 的受支持实体级操作。
 - 可以读取和修改受支持的云文档协作者、公开分享设置、公开密码等权限能力。
+- 可以运行受控工作流，例如根据一张 Bitable 生成周报并授权给当前发起人。
+- 可以处理当前飞书消息里的 OCR / 证照识别类请求。
 - 可以直接请求任意 Feishu `open-apis` 路径，并复用当前应用鉴权或显式 bearer token。
 - 对任何当前状态类问题，都重新运行 `check`、`list`、`get`、`read` 或其他对应 wrapper 命令，不要直接复用历史回答。
 

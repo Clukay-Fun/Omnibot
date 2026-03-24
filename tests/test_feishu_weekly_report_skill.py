@@ -22,17 +22,18 @@ def test_feishu_weekly_report_skill_is_valid_and_discoverable(tmp_path: Path) ->
     assert valid, message
 
     skills = SkillsLoader(tmp_path).list_skills(filter_unavailable=False)
-    assert any(skill["name"] == "feishu-weekly-report" for skill in skills)
+    skill = next(skill for skill in skills if skill["name"] == "feishu-weekly-report")
+    assert skill["deprecated"] is True
 
 
 def test_feishu_weekly_report_skill_contains_required_boundaries() -> None:
     skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
+    assert "旧入口兼容壳" in skill_md
+    assert "workflows.weekly_report" in skill_md
     assert "v1 每次只处理一张表" in skill_md
-    assert "追问上限 2 轮" in skill_md
-    assert "只使用 `feishu-workspace` 的受控 `doc create_blocks`" in skill_md
-    assert "v1 固定使用 `edit`" in skill_md
-    assert "不要自动分享给“比尔”或其他第三方" in skill_md
+    assert "受控 `doc create_blocks`" in skill_md
+    assert "固定使用 `edit`" in skill_md
 
 
 def test_feishu_weekly_report_reference_locks_template_sections() -> None:

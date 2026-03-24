@@ -9,6 +9,7 @@ import re
 import uuid
 import weakref
 from contextlib import AsyncExitStack
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
@@ -574,6 +575,45 @@ class AgentLoop:
         if allow_session_commands and cmd == "/help":
             return OutboundMessage(channel=msg.channel, chat_id=msg.chat_id,
                                   content="🐈 nanobot commands:\n/new — Start a new conversation\n/stop — Stop the current task\n/help — Show available commands")
+        if skill_inventory := self._build_skill_inventory_response(msg.content):
+            if persist_session:
+                timestamp = datetime.now().isoformat()
+                session.messages.append({"role": "user", "content": msg.content, "timestamp": timestamp})
+                session.messages.append({"role": "assistant", "content": skill_inventory, "timestamp": timestamp})
+                session.updated_at = datetime.now()
+                self.sessions.save(session)
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=skill_inventory,
+                metadata=metadata,
+            )
+        if skill_detail := self._build_skill_detail_response(msg.content):
+            if persist_session:
+                timestamp = datetime.now().isoformat()
+                session.messages.append({"role": "user", "content": msg.content, "timestamp": timestamp})
+                session.messages.append({"role": "assistant", "content": skill_detail, "timestamp": timestamp})
+                session.updated_at = datetime.now()
+                self.sessions.save(session)
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=skill_detail,
+                metadata=metadata,
+            )
+        if generic_skill_call := self._build_generic_skill_call_response(msg.content):
+            if persist_session:
+                timestamp = datetime.now().isoformat()
+                session.messages.append({"role": "user", "content": msg.content, "timestamp": timestamp})
+                session.messages.append({"role": "assistant", "content": generic_skill_call, "timestamp": timestamp})
+                session.updated_at = datetime.now()
+                self.sessions.save(session)
+            return OutboundMessage(
+                channel=channel,
+                chat_id=chat_id,
+                content=generic_skill_call,
+                metadata=metadata,
+            )
 
         if enable_pending_consolidation:
             unconsolidated = len(session.messages) - session.last_consolidated
@@ -1244,3 +1284,107 @@ Decision guidance:
             "问候、确认、直接回答和单个简单工具调用不要加这句话；不要说“让我想想”“正在处理”“稍后给你结果”，"
             "也不要暴露内部推理。"
         )
+
+    @staticmethod
+    def _looks_like_skill_inventory_request(content: str) -> bool:
+        normalized = re.sub(r"\s+", "", (content or "").lower())
+        if not normalized:
+            return False
+        if "skill" not in normalized and "能力" not in normalized:
+            return False
+        keywords = ("哪些", "列表", "list", "默认", "内置", "自己", "自己的", "查看", "看", "有啥", "有什么", "看不到")
+        return any(keyword in normalized for keyword in keywords)
+
+    @staticmethod
+    def _looks_like_generic_skill_call_request(content: str) -> bool:
+        normalized = re.sub(r"\s+", "", (content or "").lower())
+        if not normalized:
+            return False
+        return normalized in {"调用skill", "用skill", "使用skill", "执行skill"}
+
+    def _extract_skill_detail_request(self, content: str) -> dict[str, Any] | None:
+        normalized = re.sub(r"\s+", "", content or "").lower()
+        if not normalized:
+            return None
+        if not any(keyword in normalized for keyword in ("查看", "看看", "介绍", "详情", "说明", "打开")):
+            return None
+        for skill in self.context.skills.list_skills(filter_unavailable=False):
+            if skill["name"].lower() in normalized:
+                return skill
+        return None
+
+    def _build_skill_inventory_response(self, content: str) -> str | None:
+        if not self._looks_like_skill_inventory_request(content):
+            return None
+
+        all_skills = self.context.skills.list_skills(filter_unavailable=False)
+        visible_skills = [item for item in all_skills if not item.get("deprecated")]
+        available_names = {item["name"] for item in self.context.skills.list_skills(filter_unavailable=True)}
+        builtin = [
+            item["name"]
+            for item in visible_skills
+            if item.get("source") == "builtin" and item["name"] in available_names
+        ]
+        workspace = [
+            item["name"]
+            for item in visible_skills
+            if item.get("source") == "workspace" and item["name"] in available_names
+        ]
+        unavailable = [item["name"] for item in visible_skills if item["name"] not in available_names]
+
+        if not builtin and not workspace:
+            return "结论：当前没有可用的 skill。"
+
+        lines = ["结论：当前可用的 skill 如下。"]
+        if builtin:
+            lines.append("内置 skill：")
+            lines.extend(f"- {name}" for name in builtin)
+        if workspace:
+            lines.append("工作区 skill：")
+            lines.extend(f"- {name}" for name in workspace)
+        if unavailable:
+            lines.append(f"另有 {len(unavailable)} 个 skill 因依赖未满足暂不可用。")
+        return "\n".join(lines)
+
+    def _build_generic_skill_call_response(self, content: str) -> str | None:
+        if not self._looks_like_generic_skill_call_request(content):
+            return None
+        visible_skills = [
+            item["name"]
+            for item in self.context.skills.list_skills(filter_unavailable=True)
+            if not item.get("deprecated")
+        ]
+        if not visible_skills:
+            return "结论：当前没有可直接调用的 skill。"
+        lines = ["结论：可以，请直接说 skill 名称和要完成的任务。", "当前常用 skill："]
+        lines.extend(f"- {name}" for name in visible_skills)
+        return "\n".join(lines)
+
+    def _build_skill_detail_response(self, content: str) -> str | None:
+        skill = self._extract_skill_detail_request(content)
+        if skill is None:
+            return None
+
+        metadata = self.context.skills.get_skill_metadata(skill["name"]) or {}
+        description = metadata.get("description") or skill["name"]
+        manifest = self.context.skills.get_skill_manifest(skill["name"])
+
+        lines = [f"结论：`{skill['name']}` 的当前说明如下。", f"来源：{'内置' if skill.get('source') == 'builtin' else '工作区'} skill", f"描述：{description}"]
+        if skill.get("deprecated"):
+            skill_meta = self.context.skills._get_skill_meta(skill["name"])
+            replacement = skill_meta.get("replacement") or "feishu-workspace"
+            capability = skill_meta.get("capability")
+            redirect = f"建议改用：`{replacement}`"
+            if capability:
+                redirect += f" -> `{capability}`"
+            lines.append(redirect)
+        if manifest:
+            capabilities = [cap.get("name") for cap in manifest.get("capabilities", []) if cap.get("name")]
+            if capabilities:
+                lines.append("能力：")
+                lines.extend(f"- {name}" for name in capabilities)
+            compat_aliases = manifest.get("compat_aliases") or []
+            if compat_aliases:
+                lines.append("兼容别名：")
+                lines.extend(f"- {name}" for name in compat_aliases)
+        return "\n".join(lines)

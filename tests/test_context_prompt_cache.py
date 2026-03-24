@@ -89,6 +89,20 @@ def test_system_prompt_instructs_model_to_avoid_tools_for_small_talk(tmp_path) -
     assert "materially help answer the user's request" not in prompt
 
 
+def test_system_prompt_tells_model_to_answer_from_skills_summary(tmp_path) -> None:
+    workspace = _make_workspace(tmp_path)
+    builder = ContextBuilder(workspace)
+
+    prompt = builder.build_system_prompt()
+
+    assert "# Skills" in prompt
+    assert "If the user asks what skills or built-in capabilities you currently have, answer directly from this skills summary." in prompt
+    assert "Do not claim that you cannot see your own skills, default skills, or built-in capabilities when they are listed here." in prompt
+    assert "feishu-workspace" in prompt
+    assert "feishu-ocr" not in prompt
+    assert "feishu-weekly-report" not in prompt
+
+
 def test_system_prompt_includes_explicitly_requested_skills(tmp_path) -> None:
     workspace = _make_workspace(tmp_path)
     builder = ContextBuilder(workspace)
@@ -96,9 +110,9 @@ def test_system_prompt_includes_explicitly_requested_skills(tmp_path) -> None:
     prompt = builder.build_system_prompt(skill_names=["feishu-ocr"])
 
     assert "# Active Skills" in prompt
-    assert "# Feishu OCR" in prompt
-    assert "only process the first image" in prompt
-    assert "Do not use scripts or external OCR tools for v1." in prompt
+    assert "# Feishu OCR Compatibility Shim" in prompt
+    assert "perception.ocr" in prompt
+    assert "多张图片只处理第一张" in prompt
 
 
 def test_runtime_context_is_separate_untrusted_user_message(tmp_path) -> None:

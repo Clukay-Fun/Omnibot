@@ -22,17 +22,18 @@ def test_feishu_ocr_skill_is_valid_and_discoverable(tmp_path: Path) -> None:
     assert valid, message
 
     skills = SkillsLoader(tmp_path).list_skills(filter_unavailable=False)
-    assert any(skill["name"] == "feishu-ocr" for skill in skills)
+    skill = next(skill for skill in skills if skill["name"] == "feishu-ocr")
+    assert skill["deprecated"] is True
 
 
 def test_feishu_ocr_skill_contains_required_boundaries() -> None:
     skill_md = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "If the current message has no image, stop and ask the user to send or resend the image." in skill_md
-    assert "only process the first image" in skill_md
-    assert "Do not invent unreadable or missing text." in skill_md
-    assert "low confidence" in skill_md
-    assert "Do not use web search or external lookup to verify company authenticity." in skill_md
+    assert "旧入口兼容壳" in skill_md
+    assert "perception.ocr" in skill_md
+    assert "当前消息没有图片时" in skill_md
+    assert "多张图片只处理第一张" in skill_md
+    assert "不要使用外部 OCR 工具" in skill_md
 
 
 def test_feishu_ocr_references_exist_and_define_output_templates() -> None:
