@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -181,3 +181,50 @@ async def test_handler_omits_summary_from_dm_extra_context_when_overlay_exists(t
     await handler.handle_message(envelope)
 
     assert publish.await_args.kwargs["metadata"]["extra_context"] == ["Profile: likes coffee"]
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_bootstrap_decision_with_status(tmp_path) -> None:
+    publish = AsyncMock()
+    adapter = AsyncMock()
+    adapter.translate_message = AsyncMock(
+        return_value=TranslatedFeishuMessage(
+            sender_id="ou_user_1",
+            chat_id="ou_user_1",
+            content="hello",
+            media=[],
+            metadata={
+                "message_id": "om_1",
+                "chat_type": "p2p",
+                "tenant_key": "tenant-1",
+                "user_open_id": "ou_user_1",
+            },
+            session_key="feishu:dm:ou_user_1",
+        )
+    )
+
+    class _PersonaManager:
+        def overlay_root_for_chat(self, _chat_type, tenant_key, user_open_id):
+            return tmp_path / "users" / "feishu" / tenant_key / user_open_id
+
+        def bootstrap_status(self, _overlay_root):
+            return {
+                "include_bootstrap": False,
+                "has_name": True,
+                "has_style": True,
+                "has_long_term_context": True,
+                "has_current_work": True,
+            }
+
+    with patch("nanobot.feishu.handler.logger") as mock_logger:
+        mock_logger.bind.return_value = MagicMock()
+        handler = FeishuEventHandler(adapter=adapter, publish=publish, persona_manager=_PersonaManager())
+        envelope = FeishuEnvelope(source="webhook", payload={"header": {"event_id": "evt_1"}, "event": {}})
+        await handler.handle_message(envelope)
+
+    assert any(
+        call.kwargs.get("event") == "feishu_bootstrap_decision"
+        and call.kwargs.get("include_bootstrap") is False
+        and call.kwargs.get("has_current_work") is True
+        for call in mock_logger.bind.call_args_list
+    )

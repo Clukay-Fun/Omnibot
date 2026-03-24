@@ -30,6 +30,17 @@ def _is_worklog_path(path: Path) -> bool:
     return path.name == "WORKLOG.md"
 
 
+def _tracked_memory_label(path: Path) -> str | None:
+    normalized = path.as_posix()
+    if normalized.endswith("/memory/MEMORY.md") or path.name == "MEMORY.md":
+        return "MEMORY"
+    if path.name == "WORKLOG.md":
+        return "WORKLOG"
+    if path.name == "USER.md":
+        return "USER"
+    return None
+
+
 class ReadFileTool(Tool):
     """Tool to read file contents."""
 
@@ -111,15 +122,16 @@ class WriteFileTool(Tool):
             file_path = _resolve_path(path, self._workspace, self._allowed_dir)
             if _is_worklog_path(file_path):
                 content = WorklogStore.normalize_content(content)
+            tracked_label = _tracked_memory_label(file_path)
             previous = file_path.read_text(encoding="utf-8") if file_path.exists() else None
             if previous == content:
-                if _is_worklog_path(file_path):
-                    logger.info("WORKLOG unchanged via write_file: {}", file_path)
+                if tracked_label:
+                    logger.info(f"{tracked_label} unchanged via write_file: {file_path}")
                 return f"No changes written to {file_path}"
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
-            if _is_worklog_path(file_path):
-                logger.info("WORKLOG updated via write_file: {}", file_path)
+            if tracked_label:
+                logger.info(f"{tracked_label} updated via write_file: {file_path}")
             return f"Successfully wrote {len(content)} bytes to {file_path}"
         except PermissionError as e:
             return f"Error: {e}"
@@ -173,13 +185,14 @@ class EditFileTool(Tool):
             new_content = content.replace(old_text, new_text, 1)
             if _is_worklog_path(file_path):
                 new_content = WorklogStore.normalize_content(new_content)
+            tracked_label = _tracked_memory_label(file_path)
             if new_content == content:
-                if _is_worklog_path(file_path):
-                    logger.info("WORKLOG unchanged via edit_file: {}", file_path)
+                if tracked_label:
+                    logger.info(f"{tracked_label} unchanged via edit_file: {file_path}")
                 return f"No changes written to {file_path}"
             file_path.write_text(new_content, encoding="utf-8")
-            if _is_worklog_path(file_path):
-                logger.info("WORKLOG updated via edit_file: {}", file_path)
+            if tracked_label:
+                logger.info(f"{tracked_label} updated via edit_file: {file_path}")
 
             return f"Successfully edited {file_path}"
         except PermissionError as e:

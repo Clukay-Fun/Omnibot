@@ -5,6 +5,12 @@ SERVICE_USER="${SERVICE_USER:-nanobot}"
 SERVICE_NAME="${SERVICE_NAME:-nanobot-gateway}"
 APP_DIR="${APP_DIR:-/opt/omnibot}"
 BRANCH="${1:-${BRANCH:-dev/upstream-clean-main}}"
+DEFAULT_HTTP_PROXY="http://127.0.0.1:7890"
+DEFAULT_HTTPS_PROXY="http://127.0.0.1:7890"
+DEFAULT_ALL_PROXY="socks5://127.0.0.1:7891"
+HTTP_PROXY="${HTTP_PROXY:-$DEFAULT_HTTP_PROXY}"
+HTTPS_PROXY="${HTTPS_PROXY:-$DEFAULT_HTTPS_PROXY}"
+ALL_PROXY="${ALL_PROXY:-$DEFAULT_ALL_PROXY}"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "ERROR: run this script as root or with sudo" >&2
@@ -41,16 +47,23 @@ run_as_service_user() {
   sudo -u "$SERVICE_USER" -H "$@"
 }
 
+run_network_as_service_user() {
+  sudo -u "$SERVICE_USER" -H env \
+    HTTP_PROXY="$HTTP_PROXY" \
+    HTTPS_PROXY="$HTTPS_PROXY" \
+    ALL_PROXY="$ALL_PROXY" \
+    http_proxy="$HTTP_PROXY" \
+    https_proxy="$HTTPS_PROXY" \
+    all_proxy="$ALL_PROXY" \
+    "$@"
+}
+
+run_network_shell_as_service_user() {
+  run_network_as_service_user bash -lc "$1"
+}
+
 run_git_as_service_user() {
-  if [[ -n "${HTTP_PROXY:-}" || -n "${HTTPS_PROXY:-}" || -n "${ALL_PROXY:-}" ]]; then
-    sudo -u "$SERVICE_USER" -H env \
-      HTTP_PROXY="${HTTP_PROXY:-}" \
-      HTTPS_PROXY="${HTTPS_PROXY:-}" \
-      ALL_PROXY="${ALL_PROXY:-}" \
-      git -c http.version=HTTP/1.1 -C "$APP_DIR" "$@"
-  else
-    sudo -u "$SERVICE_USER" -H git -C "$APP_DIR" "$@"
-  fi
+  run_network_as_service_user git -c http.version=HTTP/1.1 -C "$APP_DIR" "$@"
 }
 
 repo_dirty=0
@@ -76,6 +89,9 @@ echo "SERVICE_USER=$SERVICE_USER"
 echo "SERVICE_NAME=$SERVICE_NAME"
 echo "BRANCH=$BRANCH"
 echo "OLD_COMMIT=$old_commit"
+echo "HTTP_PROXY=$HTTP_PROXY"
+echo "HTTPS_PROXY=$HTTPS_PROXY"
+echo "ALL_PROXY=$ALL_PROXY"
 echo "Rollback if needed: sudo -u $SERVICE_USER -H git -C $APP_DIR checkout $old_commit"
 echo
 
@@ -97,7 +113,7 @@ echo "[4/6] Updating submodules..."
 run_git_as_service_user submodule update --init --recursive --depth 1
 
 echo "[5/6] Reinstalling application..."
-run_as_service_user bash -lc "cd '$APP_DIR' && '$APP_DIR/.venv/bin/pip' install -e ."
+run_network_shell_as_service_user "cd '$APP_DIR' && '$APP_DIR/.venv/bin/pip' install -e ."
 
 echo "[6/6] Restarting service..."
 systemctl restart "$SERVICE_NAME"

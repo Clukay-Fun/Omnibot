@@ -320,3 +320,40 @@ async def test_feishu_placeholder_reply_logs_separately_from_streamer(tmp_path: 
         call.kwargs.get("event") == "feishu_model_placeholder_reply"
         for call in mock_logger.bind.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_feishu_dm_repair_logs_tracked_memory_file_tool_calls(tmp_path: Path) -> None:
+    overlay = _make_overlay(tmp_path)
+    provider = QueueProvider(
+        [
+            LLMResponse(content="记住，我以后希望你结论先行。", tool_calls=[]),
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCallRequest(
+                        id="repair-user",
+                        name="write_file",
+                        arguments={
+                            "path": "USER.md",
+                            "content": "# USER.md - 用户档案\n\n- **表达风格偏好**：结论先行\n",
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(content="REPAIRED", tool_calls=[]),
+        ]
+    )
+
+    with patch("nanobot.agent.loop.logger") as mock_logger:
+        mock_logger.bind.return_value = MagicMock()
+        loop = _make_loop(tmp_path, provider)
+        await loop._process_message(_make_msg(overlay, "记住，我以后希望你结论先行。"))
+        await _drain_repair_tasks(loop)
+
+    assert any(
+        call.kwargs.get("event") == "tracked_memory_file_tool_call"
+        and call.kwargs.get("target_file") == "USER.md"
+        and call.kwargs.get("purpose") == "feishu_dm_post_turn_repair"
+        for call in mock_logger.bind.call_args_list
+    )

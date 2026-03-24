@@ -82,16 +82,33 @@ class FeishuUserWorkspaceManager:
 
     def should_include_bootstrap(self, overlay_root: Path) -> bool:
         """BOOTSTRAP.md stays active until key onboarding facts are sufficiently filled in."""
+        return self.bootstrap_status(overlay_root)["include_bootstrap"]
+
+    def bootstrap_status(self, overlay_root: Path) -> dict[str, bool]:
+        """Return a structured bootstrap decision for logging and downstream inspection."""
         user_file = overlay_root / "USER.md"
         worklog_file = overlay_root / "WORKLOG.md"
         memory_file = overlay_root / "memory" / "MEMORY.md"
         if not user_file.exists():
-            return True
-        return not self._has_bootstrap_minimum_context(
+            return {
+                "include_bootstrap": True,
+                "has_name": False,
+                "has_style": False,
+                "has_long_term_context": False,
+                "has_current_work": False,
+            }
+        status = self._bootstrap_completion_status(
             user_text=user_file.read_text(encoding="utf-8"),
             worklog_text=worklog_file.read_text(encoding="utf-8") if worklog_file.exists() else "",
             memory_text=memory_file.read_text(encoding="utf-8") if memory_file.exists() else "",
         )
+        status["include_bootstrap"] = not (
+            status["has_name"]
+            and status["has_style"]
+            and status["has_long_term_context"]
+            and status["has_current_work"]
+        )
+        return status
 
     def list_heartbeat_targets(self) -> list[HeartbeatTarget]:
         """Enumerate Feishu DM heartbeat targets from per-user workspaces."""
@@ -261,13 +278,13 @@ class FeishuUserWorkspaceManager:
             stripped_lines.append(raw)
         return not stripped_lines
 
-    def _has_bootstrap_minimum_context(self, *, user_text: str, worklog_text: str, memory_text: str) -> bool:
-        return (
-            self._user_has_name(user_text)
-            and self._user_has_style(user_text)
-            and self._user_has_long_term_context(user_text, memory_text)
-            and self._worklog_has_active_item(worklog_text)
-        )
+    def _bootstrap_completion_status(self, *, user_text: str, worklog_text: str, memory_text: str) -> dict[str, bool]:
+        return {
+            "has_name": self._user_has_name(user_text),
+            "has_style": self._user_has_style(user_text),
+            "has_long_term_context": self._user_has_long_term_context(user_text, memory_text),
+            "has_current_work": self._worklog_has_active_item(worklog_text),
+        }
 
     def _user_has_name(self, text: str) -> bool:
         nickname = self._extract_field(text, "昵称")

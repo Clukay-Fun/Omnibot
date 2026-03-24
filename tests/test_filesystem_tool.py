@@ -57,3 +57,16 @@ async def test_write_file_normalizes_legacy_worklog_schema(tmp_path: Path) -> No
     assert "### 旧格式事项" in content
     assert "1. 旧格式事项" not in content
     assert "- 阻塞：" not in content
+
+
+@pytest.mark.asyncio
+async def test_write_file_logs_user_and_memory_updates(tmp_path: Path) -> None:
+    with patch("nanobot.agent.tools.filesystem.logger.info") as mock_info:
+        tool = WriteFileTool(workspace=tmp_path)
+
+        await tool.execute(path="USER.md", content="user")
+        await tool.execute(path="memory/MEMORY.md", content="memory")
+
+        messages = [call.args[0] for call in mock_info.call_args_list]
+        assert any("USER updated via write_file" in message for message in messages)
+        assert any("MEMORY updated via write_file" in message for message in messages)

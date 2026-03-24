@@ -55,10 +55,27 @@ class FeishuEventHandler:
                     str(translated.metadata.get("user_open_id") or ""),
                 )
                 if overlay_root is not None:
+                    bootstrap_status = None
+                    if hasattr(self.persona_manager, "bootstrap_status"):
+                        bootstrap_status = self.persona_manager.bootstrap_status(overlay_root)
+                        include_bootstrap = bool(bootstrap_status.get("include_bootstrap"))
+                    else:
+                        include_bootstrap = self.persona_manager.should_include_bootstrap(overlay_root)
                     active_overlay = OverlayContext(
                         system_overlay_root=str(overlay_root),
-                        system_overlay_bootstrap=self.persona_manager.should_include_bootstrap(overlay_root),
+                        system_overlay_bootstrap=include_bootstrap,
                     )
+                    logger.bind(
+                        event="feishu_bootstrap_decision",
+                        chat_id=translated.chat_id,
+                        user_open_id=str(translated.metadata.get("user_open_id") or ""),
+                        overlay_root=str(overlay_root),
+                        include_bootstrap=include_bootstrap,
+                        has_name=bootstrap_status.get("has_name") if bootstrap_status else None,
+                        has_style=bootstrap_status.get("has_style") if bootstrap_status else None,
+                        has_long_term_context=bootstrap_status.get("has_long_term_context") if bootstrap_status else None,
+                        has_current_work=bootstrap_status.get("has_current_work") if bootstrap_status else None,
+                    ).info("Feishu bootstrap decision evaluated")
                     translated.metadata = active_overlay.to_metadata(translated.metadata)
             if self.memory_store is not None:
                 extra_context = self.memory_store.safe_build_extra_context(translated.metadata)

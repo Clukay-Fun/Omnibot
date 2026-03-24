@@ -267,12 +267,29 @@ class AgentLoop:
             return f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _tracked_memory_file_target(tool_name: str, arguments: Any) -> str | None:
+        if tool_name not in {"write_file", "edit_file"} or not isinstance(arguments, dict):
+            return None
+        path = str(arguments.get("path") or "").strip()
+        if not path:
+            return None
+        normalized = Path(path).as_posix()
+        if normalized.endswith("/memory/MEMORY.md") or normalized == "memory/MEMORY.md" or normalized.endswith("/MEMORY.md"):
+            return "memory/MEMORY.md"
+        if normalized.endswith("/WORKLOG.md") or normalized == "WORKLOG.md":
+            return "WORKLOG.md"
+        if normalized.endswith("/USER.md") or normalized == "USER.md":
+            return "USER.md"
+        return None
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
         tool_registry: ToolRegistry | None = None,
         purpose: str | None = None,
+        tool_call_context: dict[str, Any] | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop. Returns (final_content, tools_used, messages)."""
         active_tools = tool_registry or self.tools
@@ -323,6 +340,17 @@ class AgentLoop:
                     tools_used.append(tool_call.name)
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+                    if tracked_file := self._tracked_memory_file_target(tool_call.name, tool_call.arguments):
+                        logger.bind(
+                            event="tracked_memory_file_tool_call",
+                            tool_name=tool_call.name,
+                            target_file=tracked_file,
+                            purpose=purpose,
+                            turn_id=(tool_call_context or {}).get("turn_id"),
+                            session_key=(tool_call_context or {}).get("session_key"),
+                            channel=(tool_call_context or {}).get("channel"),
+                            chat_id=(tool_call_context or {}).get("chat_id"),
+                        ).info("Tracked memory file tool call detected")
                     result = await active_tools.execute(tool_call.name, tool_call.arguments)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
@@ -597,6 +625,12 @@ class AgentLoop:
             initial_messages,
             on_progress=on_progress or _bus_progress,
             tool_registry=active_tools,
+            tool_call_context={
+                "turn_id": str(metadata.get("turn_id") or ""),
+                "session_key": session.key,
+                "channel": channel,
+                "chat_id": chat_id,
+            },
         )
 
         if final_content is None:
@@ -988,6 +1022,12 @@ class AgentLoop:
             initial_messages,
             tool_registry=repair_tools,
             purpose="feishu_dm_post_turn_repair",
+            tool_call_context={
+                "turn_id": turn_id,
+                "session_key": session_key,
+                "channel": "feishu",
+                "chat_id": chat_id,
+            },
         )
         logger.bind(
             event="feishu_dm_turn_repair",
