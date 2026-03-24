@@ -32,12 +32,12 @@ def test_feishu_broadcast_requires_message_source(monkeypatch) -> None:
 
 
 def test_version_flag_shows_formatted_version(monkeypatch) -> None:
-    monkeypatch.setattr("nanobot.cli.commands.format_version", lambda: "nanobot v0.3.4 (f7ab86f)")
+    monkeypatch.setattr("nanobot.cli.commands.format_version", lambda: "nanobot v0.3.5 (f7ab86f)")
 
     result = runner.invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert "nanobot v0.3.4 (f7ab86f)" in result.stdout
+    assert "nanobot v0.3.5 (f7ab86f)" in result.stdout
 
 
 def test_feishu_broadcast_send_requires_confirm_token(monkeypatch, tmp_path: Path) -> None:

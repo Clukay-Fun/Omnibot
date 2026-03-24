@@ -2,6 +2,14 @@
 
 此文件用于记录项目中所有值得关注的变更。
 
+## 0.3.5 - 2026-03-24
+
+### 近期新增
+
+- 将 Feishu 平台能力统一收口到 `feishu-workspace`，通过 `manifest.json` 和 capability 文档暴露 `resources`、`workflows.weekly_report`、`perception.ocr` 等能力。
+- 将 `feishu-ocr` 与 `feishu-weekly-report` 调整为兼容别名入口，默认引导到 `feishu-workspace` 的对应 capability。
+- 优化 agent 对 skill 清单、skill 详情和通用 skill 调用请求的直答能力，减少这类问题对主 LLM 回合的依赖。
+
 ## 0.3.4 - 2026-03-24
 
 ### 近期新增
